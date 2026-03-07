@@ -119,7 +119,9 @@ echo "Checkpoint REDO WAL file: $REDO_WAL"
 echo "=== Clearing WAL segments older than $REDO_WAL ==="
 DELETED=0
 KEPT=0
-for f in $(find "$WAL_DIR" -maxdepth 1 -type f -name '0*' | sort); do
+# Match only 24-hex-char WAL segment filenames (e.g. 000000030000000A00000036)
+# Excludes .history files (e.g. 00000003.history) which pg_rewind needs for timeline tracking
+for f in $(find "$WAL_DIR" -maxdepth 1 -type f -regex '.*/[0-9A-F]\{24\}$' | sort); do
   BASENAME=$(basename "$f")
   if [ "$BASENAME" \< "$REDO_WAL" ]; then
     rm -f "$f"
@@ -128,6 +130,9 @@ for f in $(find "$WAL_DIR" -maxdepth 1 -type f -name '0*' | sort); do
     KEPT=$((KEPT + 1))
   fi
 done
+
+HISTORY_COUNT=$(find "$WAL_DIR" -maxdepth 1 -type f -name '*.history' | wc -l)
+echo "Preserved $HISTORY_COUNT .history file(s) (required for pg_rewind timeline tracking)"
 
 # Remove stale .partial and .backup files (safe — these are bookkeeping, not data)
 find "$WAL_DIR" -maxdepth 1 -type f -name '*.partial' -delete
