@@ -1,0 +1,6 @@
+- **Git Commits**: Only sign commits as sofmeright@gmail.com / SoFMeRight. No anthropic attribution comments in commits. No Co-Authored-By lines.
+- **NO LOCAL GO TOOLCHAIN** — builds are managed by StageFreight in containers. NEVER run `go build`, `go mod tidy`, `go vet`, etc. locally. Verify code correctness by reading it, not by compiling.
+- **Build Pipeline**: StageFreight builds on every push automatically.
+  - Untagged commits → `docker.io/prplanit/hasteward:dev-<shortsha>` + `docker.io/prplanit/hasteward:latest-dev`
+  - Tagged commits (vX.X.X) → `docker.io/prplanit/hasteward:<tag>` + `docker.io/prplanit/hasteward:latest`
+- **Dev Lifecycle**: commit → push → verify with `latest-dev` image. Only tag when the maintainer requests it.
