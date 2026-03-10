@@ -5,9 +5,9 @@ import (
 	"log/slog"
 
 	v1alpha1 "gitlab.prplanit.com/precisionplanit/hasteward/api/v1alpha1"
-	"gitlab.prplanit.com/precisionplanit/hasteward/common"
-	"gitlab.prplanit.com/precisionplanit/hasteward/engine"
-	"gitlab.prplanit.com/precisionplanit/hasteward/metrics"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/engine"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/metrics"
 )
 
 // runTriage is called by the cron scheduler to health-check a database.

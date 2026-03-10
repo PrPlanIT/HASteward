@@ -4,9 +4,9 @@ import (
 	"context"
 
 	v1alpha1 "gitlab.prplanit.com/precisionplanit/hasteward/api/v1alpha1"
-	"gitlab.prplanit.com/precisionplanit/hasteward/common"
-	"gitlab.prplanit.com/precisionplanit/hasteward/k8s"
-	"gitlab.prplanit.com/precisionplanit/hasteward/metrics"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/metrics"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

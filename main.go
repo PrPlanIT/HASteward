@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 
-	"gitlab.prplanit.com/precisionplanit/hasteward/cmd"
-	"gitlab.prplanit.com/precisionplanit/hasteward/common"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/cmd"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 
 	// Register engines via init()
-	_ "gitlab.prplanit.com/precisionplanit/hasteward/engine/cnpg"
-	_ "gitlab.prplanit.com/precisionplanit/hasteward/engine/galera"
+	_ "gitlab.prplanit.com/precisionplanit/hasteward/src/engine/cnpg"
+	_ "gitlab.prplanit.com/precisionplanit/hasteward/src/engine/galera"
 )
 
 func main() {

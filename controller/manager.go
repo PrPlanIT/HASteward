@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	v1alpha1 "gitlab.prplanit.com/precisionplanit/hasteward/api/v1alpha1"
-	"gitlab.prplanit.com/precisionplanit/hasteward/common"
-	"gitlab.prplanit.com/precisionplanit/hasteward/k8s"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
