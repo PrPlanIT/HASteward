@@ -1,0 +1,112 @@
+# HASteward ad-hoc Job manifest
+#
+# Usage:
+#   # One-time setup: ServiceAccount + RBAC + PVC
+#   kubectl apply -f job.yaml -l app.kubernetes.io/component=rbac
+#   kubectl apply -f job.yaml -l app.kubernetes.io/component=storage
+#
+#   # Per-run: Edit the Job args + env, then apply
+#   kubectl delete job hasteward-run -n fairy-bottle --ignore-not-found
+#   kubectl apply -f job.yaml -l app.kubernetes.io/component=job
+#   kubectl logs -f job/hasteward-run -n fairy-bottle
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hasteward
+  labels:
+    app.kubernetes.io/name: hasteward
+    app.kubernetes.io/component: rbac
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hasteward
+  labels:
+    app.kubernetes.io/name: hasteward
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/exec, persistentvolumeclaims, services, configmaps, secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["apps"]
+    resources: [statefulsets, statefulsets/scale]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: [clusters, clusters/status]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: [mariadbs, mariadbs/status]
+    verbs: [get, list, watch, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hasteward
+  labels:
+    app.kubernetes.io/name: hasteward
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hasteward
+subjects:
+  - kind: ServiceAccount
+    name: hasteward
+    namespace: fairy-bottle
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hasteward-backups
+  labels:
+    app.kubernetes.io/name: hasteward
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hasteward-run
+  labels:
+    app.kubernetes.io/name: hasteward
+    app.kubernetes.io/component: job
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: hasteward
+      restartPolicy: Never
+      containers:
+        - name: hasteward
+          image: docker.io/prplanit/hasteward:latest
+          args: ["triage"]                           # <-- change subcommand here
+          env:
+            - name: HASTEWARD_ENGINE
+              value: "cnpg"                          # <-- cnpg or galera
+            - name: HASTEWARD_CLUSTER
+              value: "my-postgres"                   # <-- cluster CR name
+            - name: HASTEWARD_NAMESPACE
+              value: "my-namespace"                  # <-- target namespace
+            - name: HASTEWARD_BACKUPS_PATH
+              value: "/backups"
+            - name: RESTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hasteward-restic
+                  key: password
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: hasteward-backups
+        - name: tmp
+          emptyDir: {}
