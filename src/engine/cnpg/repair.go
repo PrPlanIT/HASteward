@@ -9,6 +9,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -22,9 +23,12 @@ type healConfig struct {
 	serviceAccount string
 }
 
-func (e *Engine) Repair(ctx context.Context) (*common.RepairResult, error) {
+func (e *Engine) Repair(ctx context.Context) (*model.RepairResult, error) {
 	start := time.Now()
-	repairResult := &common.RepairResult{}
+	repairResult := &model.RepairResult{
+		Engine:  e.Name(),
+		Cluster: model.ObjectRef{Namespace: e.cfg.Namespace, Name: e.cfg.ClusterName},
+	}
 
 	// Phase 1: Full triage
 	output.Section("Phase 1: Triage")
@@ -127,7 +131,7 @@ func (e *Engine) Repair(ctx context.Context) (*common.RepairResult, error) {
 	return repairResult, nil
 }
 
-func (e *Engine) repairTargeted(ctx context.Context, result *common.TriageResult, hcfg *healConfig, repairResult *common.RepairResult) error {
+func (e *Engine) repairTargeted(ctx context.Context, result *model.TriageResult, hcfg *healConfig, repairResult *model.RepairResult) error {
 	targetPod := fmt.Sprintf("%s-%d", e.cfg.ClusterName, *e.cfg.InstanceNumber)
 	primary := k8s.GetNestedString(e.cluster, "status", "currentPrimary")
 
@@ -137,7 +141,7 @@ func (e *Engine) repairTargeted(ctx context.Context, result *common.TriageResult
 	}
 
 	// Find target assessment
-	var targetAssessment *common.InstanceAssessment
+	var targetAssessment *model.InstanceAssessment
 	for i := range result.Assessments {
 		if result.Assessments[i].Pod == targetPod {
 			targetAssessment = &result.Assessments[i]
@@ -184,7 +188,7 @@ func (e *Engine) repairTargeted(ctx context.Context, result *common.TriageResult
 	return nil
 }
 
-func (e *Engine) repairUntargeted(ctx context.Context, result *common.TriageResult, hcfg *healConfig, repairResult *common.RepairResult) error {
+func (e *Engine) repairUntargeted(ctx context.Context, result *model.TriageResult, hcfg *healConfig, repairResult *model.RepairResult) error {
 	// Safety gate: split-brain → HARD STOP (no override for untargeted)
 	if !result.DataComparison.SafeToHeal {
 		return fmt.Errorf("HARD STOP: Split-brain detected. Cannot auto-heal all replicas. " +
@@ -192,7 +196,7 @@ func (e *Engine) repairUntargeted(ctx context.Context, result *common.TriageResu
 	}
 
 	// Compute heal targets
-	var targets []common.InstanceAssessment
+	var targets []model.InstanceAssessment
 	for _, a := range result.Assessments {
 		if a.NeedsHeal {
 			targets = append(targets, a)

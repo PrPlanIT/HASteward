@@ -10,6 +10,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,7 +45,7 @@ type effectiveSeqno struct {
 	Source string
 }
 
-func (e *Engine) Triage(ctx context.Context) (*common.TriageResult, error) {
+func (e *Engine) Triage(ctx context.Context) (*model.TriageResult, error) {
 	displayClusterStatus(e)
 
 	data, err := e.triageCollect(ctx)
@@ -438,7 +439,7 @@ func (e *Engine) runPVCProbes(ctx context.Context, targets []probeTarget, ns, sa
 
 // --- Analysis ---
 
-func (e *Engine) triageAnalyze(data *galeraTriageData) *common.TriageResult {
+func (e *Engine) triageAnalyze(data *galeraTriageData) *model.TriageResult {
 	comparison := e.crossInstanceComparison(data)
 
 	output.Section("Data Freshness Check")
@@ -458,7 +459,7 @@ func (e *Engine) triageAnalyze(data *galeraTriageData) *common.TriageResult {
 
 	assessments := e.buildAssessments(data, &comparison)
 
-	var bestSeqnoAssessment *common.InstanceAssessment
+	var bestSeqnoAssessment *model.InstanceAssessment
 	for i := range assessments {
 		if assessments[i].Pod == data.bestSeqnoNode {
 			bestSeqnoAssessment = &assessments[i]
@@ -466,7 +467,12 @@ func (e *Engine) triageAnalyze(data *galeraTriageData) *common.TriageResult {
 		}
 	}
 
-	return &common.TriageResult{
+	return &model.TriageResult{
+		Engine: e.Name(),
+		Cluster: model.ObjectRef{
+			Namespace: e.cfg.Namespace,
+			Name:      e.cfg.ClusterName,
+		},
 		Assessments:    assessments,
 		DataComparison: comparison,
 		ReadyCount:     len(data.primaryMembers),
@@ -476,7 +482,7 @@ func (e *Engine) triageAnalyze(data *galeraTriageData) *common.TriageResult {
 	}
 }
 
-func (e *Engine) crossInstanceComparison(data *galeraTriageData) common.DataComparison {
+func (e *Engine) crossInstanceComparison(data *galeraTriageData) model.DataComparison {
 	var warnings, splitBrain []string
 
 	// UUID divergence check
@@ -545,7 +551,7 @@ func (e *Engine) crossInstanceComparison(data *galeraTriageData) common.DataComp
 		}
 	}
 
-	return common.DataComparison{
+	return model.DataComparison{
 		MostAdvanced:      data.bestSeqnoNode,
 		MostAdvancedValue: data.bestSeqnoValue,
 		SafeToHeal:        safe,
@@ -556,14 +562,14 @@ func (e *Engine) crossInstanceComparison(data *galeraTriageData) common.DataComp
 	}
 }
 
-func (e *Engine) buildAssessments(data *galeraTriageData, comparison *common.DataComparison) []common.InstanceAssessment {
+func (e *Engine) buildAssessments(data *galeraTriageData, comparison *model.DataComparison) []model.InstanceAssessment {
 	missingSet := setFromSlice(data.missingNodes)
 	crashloopSet := podNameSet(data.crashloopPods)
 	runningSet := podNameSet(data.runningPods)
 	pmSet := setFromSlice(data.primaryMembers)
 	bestPrimarySeqno := comparison.BestPrimarySeqno
 
-	var assessments []common.InstanceAssessment
+	var assessments []model.InstanceAssessment
 
 	for _, gs := range data.grastateData {
 		isMissing := missingSet[gs.Pod]
@@ -706,7 +712,7 @@ func (e *Engine) buildAssessments(data *galeraTriageData, comparison *common.Dat
 			recommendation = "Could not determine state. Check node manually."
 		}
 
-		assessments = append(assessments, common.InstanceAssessment{
+		assessments = append(assessments, model.InstanceAssessment{
 			Pod:                gs.Pod,
 			IsRunning:          isRunning,
 			IsReady:            isRunning && wsState == 4,
@@ -794,7 +800,7 @@ func displayWsrep(name string, ws *wsrepStatus) {
 	output.Printf("  flow_control_paused: %s\n", ws.FlowControlPaused)
 }
 
-func (e *Engine) triageDisplay(data *galeraTriageData, result *common.TriageResult) {
+func (e *Engine) triageDisplay(data *galeraTriageData, result *model.TriageResult) {
 	output.Banner("TRIAGE SUMMARY")
 
 	output.Printf("Cluster: %s (%s)\n", e.cfg.ClusterName, e.cfg.Namespace)

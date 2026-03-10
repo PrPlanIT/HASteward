@@ -45,19 +45,7 @@ var backupCmd = &cobra.Command{
 		if p.IsHuman() {
 			output.Complete(fmt.Sprintf("Backup complete — snapshot %s (%s)", result.SnapshotID, result.Duration.Truncate(time.Second)))
 		} else {
-			backupResult := &model.BackupResult{
-				Engine: Cfg.Engine,
-				Cluster: model.ObjectRef{
-					Namespace: Cfg.Namespace,
-					Name:      Cfg.ClusterName,
-				},
-				SnapshotID: result.SnapshotID,
-				Repository: result.Repository,
-				Size:       result.Size,
-				Duration:   result.Duration,
-				Tags:       result.Tags,
-			}
-			printer.PrintResult(p, backupResult, nil, nil)
+			printer.PrintResult(p, result, nil, nil)
 		}
 		return nil
 	},

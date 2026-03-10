@@ -3,7 +3,7 @@ package metrics
 import (
 	"time"
 
-	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -151,7 +151,7 @@ func init() {
 // --- Helper functions for recording metrics from engine results ---
 
 // RecordBackupSuccess records metrics for a successful backup.
-func RecordBackupSuccess(engine, cluster, ns, repo string, result *common.BackupResult) {
+func RecordBackupSuccess(engine, cluster, ns, repo string, result *model.BackupResult) {
 	labels := prometheus.Labels{
 		"engine": engine, "cluster": cluster, "namespace": ns, "repository": repo,
 	}
@@ -173,7 +173,7 @@ func RecordBackupFailure(engine, cluster, ns, repo string) {
 }
 
 // RecordTriageResult records metrics for a triage operation.
-func RecordTriageResult(engine, cluster, ns string, result *common.TriageResult, triageStatus string) {
+func RecordTriageResult(engine, cluster, ns string, result *model.TriageResult, triageStatus string) {
 	labels := prometheus.Labels{
 		"engine": engine, "cluster": cluster, "namespace": ns,
 	}

@@ -13,19 +13,20 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func (e *Engine) Restore(ctx context.Context) (*common.RestoreResult, error) {
+func (e *Engine) Restore(ctx context.Context) (*model.RestoreResult, error) {
 	if e.cfg.BackupMethod == "native" {
 		return nil, fmt.Errorf("native S3 restore (PITR via bootstrap.recovery) is not yet implemented. Use --method dump")
 	}
 	return e.restoreDump(ctx)
 }
 
-func (e *Engine) restoreDump(ctx context.Context) (*common.RestoreResult, error) {
+func (e *Engine) restoreDump(ctx context.Context) (*model.RestoreResult, error) {
 	start := time.Now()
 	ns := e.cfg.Namespace
 	primary := k8s.GetNestedString(e.cluster, "status", "currentPrimary")
@@ -130,7 +131,9 @@ func (e *Engine) restoreDump(ctx context.Context) (*common.RestoreResult, error)
 	}
 
 	output.Success("Restore complete")
-	return &common.RestoreResult{
+	return &model.RestoreResult{
+		Engine:     e.Name(),
+		Cluster:    model.ObjectRef{Namespace: ns, Name: e.cfg.ClusterName},
 		SnapshotID: snapshotID,
 		Duration:   time.Since(start),
 	}, nil

@@ -17,16 +17,16 @@ type Engine interface {
 	Validate(ctx context.Context, cfg *common.Config) error
 
 	// Triage runs read-only diagnostics and returns the assessment.
-	Triage(ctx context.Context) (*common.TriageResult, error)
+	Triage(ctx context.Context) (*model.TriageResult, error)
 
 	// Repair runs the full repair flow (safety gates, escrow, heal, re-triage).
-	Repair(ctx context.Context) (*common.RepairResult, error)
+	Repair(ctx context.Context) (*model.RepairResult, error)
 
 	// Backup takes a backup of the cluster.
-	Backup(ctx context.Context) (*common.BackupResult, error)
+	Backup(ctx context.Context) (*model.BackupResult, error)
 
 	// Restore restores the cluster from a backup.
-	Restore(ctx context.Context) (*common.RestoreResult, error)
+	Restore(ctx context.Context) (*model.RestoreResult, error)
 
 	// PruneWAL clears accumulated WAL from a disk-full instance.
 	// This is a destructive operation — only safe when replicas are caught up.

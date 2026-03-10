@@ -43,16 +43,7 @@ var restoreCmd = &cobra.Command{
 		if p.IsHuman() {
 			output.Complete(fmt.Sprintf("Restore complete — snapshot %s (%s)", result.SnapshotID, result.Duration.Truncate(time.Second)))
 		} else {
-			restoreResult := &model.RestoreResult{
-				Engine: Cfg.Engine,
-				Cluster: model.ObjectRef{
-					Namespace: Cfg.Namespace,
-					Name:      Cfg.ClusterName,
-				},
-				SnapshotID: result.SnapshotID,
-				Duration:   result.Duration,
-			}
-			printer.PrintResult(p, restoreResult, nil, nil)
+			printer.PrintResult(p, result, nil, nil)
 		}
 		return nil
 	},

@@ -11,13 +11,14 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 )
 
-func (e *Engine) Restore(ctx context.Context) (*common.RestoreResult, error) {
+func (e *Engine) Restore(ctx context.Context) (*model.RestoreResult, error) {
 	return e.restoreDump(ctx)
 }
 
-func (e *Engine) restoreDump(ctx context.Context) (*common.RestoreResult, error) {
+func (e *Engine) restoreDump(ctx context.Context) (*model.RestoreResult, error) {
 	start := time.Now()
 	ns := e.cfg.Namespace
 
@@ -83,7 +84,9 @@ func (e *Engine) restoreDump(ctx context.Context) (*common.RestoreResult, error)
 	output.Section("Restore Complete")
 	common.InfoLog("Galera replication will propagate the restored data to other nodes")
 	output.Success("Restore complete")
-	return &common.RestoreResult{
+	return &model.RestoreResult{
+		Engine:     e.Name(),
+		Cluster:    model.ObjectRef{Namespace: ns, Name: e.cfg.ClusterName},
 		SnapshotID: snapshotID,
 		Duration:   time.Since(start),
 	}, nil

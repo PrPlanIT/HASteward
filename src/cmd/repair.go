@@ -47,20 +47,7 @@ var repairCmd = &cobra.Command{
 				len(result.HealedInstances), len(result.SkippedInstances), result.Duration.Truncate(time.Second))
 			output.Complete(summary)
 		} else {
-			repairResult := &model.RepairResult{
-				Engine: Cfg.Engine,
-				Cluster: model.ObjectRef{
-					Namespace: Cfg.Namespace,
-					Name:      Cfg.ClusterName,
-				},
-				HealedInstances:  result.HealedInstances,
-				SkippedInstances: result.SkippedInstances,
-				Duration:         result.Duration,
-			}
-			if result.PostTriageResult != nil {
-				repairResult.PostTriageResult = convertTriageResult(result.PostTriageResult)
-			}
-			printer.PrintResult(p, repairResult, nil, nil)
+			printer.PrintResult(p, result, nil, nil)
 		}
 		return nil
 	},

@@ -9,6 +9,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/restic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +20,7 @@ import (
 // DumpFilename is the virtual filename used in restic snapshots for pg_dumpall output.
 const DumpFilename = "pgdumpall.sql"
 
-func (e *Engine) Backup(ctx context.Context) (*common.BackupResult, error) {
+func (e *Engine) Backup(ctx context.Context) (*model.BackupResult, error) {
 	if e.cfg.BackupMethod == "native" {
 		return e.backupNative(ctx)
 	}
@@ -39,7 +40,7 @@ func (e *Engine) newResticClient() *restic.Client {
 // donor is the pod to dump from. stdinFilename is the virtual path in the snapshot.
 // jobTime is set as the restic snapshot timestamp via --time.
 // extraTags are merged into the snapshot tags (e.g., job=<id> for diverged grouping).
-func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilename string, jobTime time.Time, extraTags map[string]string) (*common.BackupResult, error) {
+func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilename string, jobTime time.Time, extraTags map[string]string) (*model.BackupResult, error) {
 	start := time.Now()
 	ns := e.cfg.Namespace
 
@@ -91,7 +92,9 @@ func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilenam
 		return nil, fmt.Errorf("pg_dumpall exec failed: %w", execErr)
 	}
 
-	result := &common.BackupResult{
+	result := &model.BackupResult{
+		Engine:     e.Name(),
+		Cluster:    model.ObjectRef{Namespace: ns, Name: e.cfg.ClusterName},
 		SnapshotID: summary.SnapshotID,
 		Repository: e.cfg.BackupsPath,
 		Size:       summary.TotalSize,
@@ -107,7 +110,7 @@ func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilenam
 	return result, nil
 }
 
-func (e *Engine) backupNative(ctx context.Context) (*common.BackupResult, error) {
+func (e *Engine) backupNative(ctx context.Context) (*model.BackupResult, error) {
 	start := time.Now()
 
 	// Verify barmanObjectStore is configured
@@ -169,7 +172,9 @@ func (e *Engine) backupNative(ctx context.Context) (*common.BackupResult, error)
 			output.Field("Destination", dest)
 			output.Field("Backup CR", backupName)
 			output.Success("Native backup completed")
-			return &common.BackupResult{
+			return &model.BackupResult{
+				Engine:     e.Name(),
+				Cluster:    model.ObjectRef{Namespace: e.cfg.Namespace, Name: e.cfg.ClusterName},
 				SnapshotID: backupName,
 				Repository: dest,
 				Duration:   time.Since(start),

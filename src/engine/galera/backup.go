@@ -8,6 +8,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/restic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,7 +17,7 @@ import (
 // DumpFilename is the virtual filename used in restic snapshots for mysqldump output.
 const DumpFilename = "mysqldump.sql"
 
-func (e *Engine) Backup(ctx context.Context) (*common.BackupResult, error) {
+func (e *Engine) Backup(ctx context.Context) (*model.BackupResult, error) {
 	ns := e.cfg.Namespace
 	stdinFilename := fmt.Sprintf("%s/%s/%s", ns, e.cfg.ClusterName, DumpFilename)
 	return e.BackupDump(ctx, "backup", "", stdinFilename, time.Now(), nil)
@@ -33,7 +34,7 @@ func (e *Engine) newResticClient() *restic.Client {
 // stdinFilename is the virtual path in the snapshot.
 // jobTime is set as the restic snapshot timestamp via --time.
 // extraTags are merged into the snapshot tags (e.g., job=<id> for diverged grouping).
-func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilename string, jobTime time.Time, extraTags map[string]string) (*common.BackupResult, error) {
+func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilename string, jobTime time.Time, extraTags map[string]string) (*model.BackupResult, error) {
 	start := time.Now()
 	ns := e.cfg.Namespace
 
@@ -100,7 +101,9 @@ func (e *Engine) BackupDump(ctx context.Context, backupType, donor, stdinFilenam
 		return nil, fmt.Errorf("mysqldump exec failed: %w", execErr)
 	}
 
-	result := &common.BackupResult{
+	result := &model.BackupResult{
+		Engine:     e.Name(),
+		Cluster:    model.ObjectRef{Namespace: ns, Name: e.cfg.ClusterName},
 		SnapshotID: summary.SnapshotID,
 		Repository: e.cfg.BackupsPath,
 		Size:       summary.TotalSize,

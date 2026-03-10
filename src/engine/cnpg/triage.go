@@ -10,6 +10,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +43,7 @@ type replicaInfo struct {
 	ApplicationName string
 }
 
-func (e *Engine) Triage(ctx context.Context) (*common.TriageResult, error) {
+func (e *Engine) Triage(ctx context.Context) (*model.TriageResult, error) {
 	// Display cluster status
 	displayClusterStatus(e)
 
@@ -503,7 +504,7 @@ func (e *Engine) waitAndCollectProbe(ctx context.Context, probeName, instanceNam
 
 // --- Analysis ---
 
-func (e *Engine) triageAnalyze(data *triageData) *common.TriageResult {
+func (e *Engine) triageAnalyze(data *triageData) *model.TriageResult {
 	currentPrimary := k8s.GetNestedString(e.cluster, "status", "currentPrimary")
 
 	// Cross-instance comparison
@@ -542,7 +543,12 @@ func (e *Engine) triageAnalyze(data *triageData) *common.TriageResult {
 		readyCount = int(v)
 	}
 
-	return &common.TriageResult{
+	return &model.TriageResult{
+		Engine: e.Name(),
+		Cluster: model.ObjectRef{
+			Namespace: e.cfg.Namespace,
+			Name:      e.cfg.ClusterName,
+		},
 		Assessments:    assessments,
 		DataComparison: comparison,
 		ClusterPhase:   getMapString(e.clusterStatus, "phase"),
@@ -551,7 +557,7 @@ func (e *Engine) triageAnalyze(data *triageData) *common.TriageResult {
 	}
 }
 
-func crossInstanceComparison(data *triageData, primaryName string) common.DataComparison {
+func crossInstanceComparison(data *triageData, primaryName string) model.DataComparison {
 	pTL := int64(0)
 	pLSN := "unknown"
 	if data.primaryControlData != nil {
@@ -599,7 +605,7 @@ func crossInstanceComparison(data *triageData, primaryName string) common.DataCo
 		}
 	}
 
-	return common.DataComparison{
+	return model.DataComparison{
 		MostAdvanced:       mostAdvanced,
 		MostAdvancedValue:  mostAdvancedTL,
 		CheckpointLocation: mostAdvancedLSN,
@@ -609,8 +615,8 @@ func crossInstanceComparison(data *triageData, primaryName string) common.DataCo
 	}
 }
 
-func (e *Engine) buildAssessments(data *triageData, comparison *common.DataComparison,
-	primaryName string) []common.InstanceAssessment {
+func (e *Engine) buildAssessments(data *triageData, comparison *model.DataComparison,
+	primaryName string) []model.InstanceAssessment {
 
 	pTL := data.primaryTimeline
 	pLSN := "unknown"
@@ -623,7 +629,7 @@ func (e *Engine) buildAssessments(data *triageData, comparison *common.DataCompa
 	crashloopSet := podNameSet(data.crashloopPods)
 	streamingSet := setFromSlice(data.streamingReplicas)
 
-	var assessments []common.InstanceAssessment
+	var assessments []model.InstanceAssessment
 
 	for _, inst := range data.controlData {
 		isPrimary := inst.Pod == primaryName
@@ -749,7 +755,7 @@ func (e *Engine) buildAssessments(data *triageData, comparison *common.DataCompa
 			recommendation = "Could not determine timeline. Check instance manually."
 		}
 
-		assessments = append(assessments, common.InstanceAssessment{
+		assessments = append(assessments, model.InstanceAssessment{
 			Pod:            inst.Pod,
 			IsPrimary:      isPrimary,
 			Timeline:       parseTimelineInt(instTL),
@@ -835,7 +841,7 @@ func displayControlData(cd controlData) {
 	output.Printf("  Min recovery end: %s\n", cd.MinRecoveryEnd)
 }
 
-func (e *Engine) triageDisplay(data *triageData, result *common.TriageResult) {
+func (e *Engine) triageDisplay(data *triageData, result *model.TriageResult) {
 	output.Banner("TRIAGE SUMMARY")
 
 	currentPrimary := k8s.GetNestedString(e.cluster, "status", "currentPrimary")

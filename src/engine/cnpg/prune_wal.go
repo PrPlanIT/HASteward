@@ -9,6 +9,7 @@ import (
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/common"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/k8s"
 	"gitlab.prplanit.com/precisionplanit/hasteward/src/output"
+	"gitlab.prplanit.com/precisionplanit/hasteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,7 +41,7 @@ func (e *Engine) PruneWAL(ctx context.Context) error {
 	}
 
 	// Find the target instance assessment
-	var targetAssessment *common.InstanceAssessment
+	var targetAssessment *model.InstanceAssessment
 	for i := range triageResult.Assessments {
 		if triageResult.Assessments[i].Pod == targetPod {
 			targetAssessment = &triageResult.Assessments[i]
@@ -342,7 +343,7 @@ func (e *Engine) resolvePVC(ctx context.Context, podName string) (string, error)
 }
 
 // discoverPostgresInfo finds the postgres image, UID, and GID from a healthy instance.
-func (e *Engine) discoverPostgresInfo(ctx context.Context, triage *common.TriageResult) (image, uid, gid string, err error) {
+func (e *Engine) discoverPostgresInfo(ctx context.Context, triage *model.TriageResult) (image, uid, gid string, err error) {
 	c := k8s.GetClients()
 	ns := e.cfg.Namespace
 	primary := k8s.GetNestedString(e.cluster, "status", "currentPrimary")
