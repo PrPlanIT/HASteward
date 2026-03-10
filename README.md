@@ -4,9 +4,7 @@
 
 # HASteward
 
-> *Your clusters, under careful watch*
-
-**H**igh **A**vailability **Steward** — Go CLI and Kubernetes operator for database cluster triage, repair, backup, and restore. Pronounced **Haste·Ward** — warding against haste, not moving hastily. Backups use [restic](https://restic.net/) for block-level dedup, encryption, and compression.
+**H**igh **A**vailability **Steward** is a (*WIP*) Go CLI and Kubernetes operator for database cluster triage, repair, backup, and restore. Pronounced like **Haste·Ward** or **H.A.** or **Ha!** Steward — flexible pronunciation. Backups use [restic](https://restic.net/) for block-level dedup, encryption, and compression.
 
 <!-- sf:badges:start -->
 <!-- sf:badges:end -->
