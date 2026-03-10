@@ -206,7 +206,7 @@ var getRepositoriesCmd = &cobra.Command{
 				Name:             r.Name,
 				Repository:       r.Spec.Restic.Repository,
 				Ready:            r.Status.Ready,
-				SnapshotCount:    r.Status.SnapshotCount,
+				SnapshotCount:    int64(r.Status.SnapshotCount),
 				TotalSize:        r.Status.TotalSize,
 				DeduplicatedSize: r.Status.DeduplicatedSize,
 			})

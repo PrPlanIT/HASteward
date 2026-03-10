@@ -51,22 +51,28 @@ func (w *cnpgPruner) Name() string { return "cnpg" }
 //     (typically because replicas were disconnected and are now caught up)
 //
 // Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
-func (w *cnpgPruner) PruneWAL(ctx context.Context) error {
+func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error) {
 	cfg := w.p.Config()
 	ns := cfg.Namespace
 	c := k8s.GetClients()
 
 	if cfg.InstanceNumber == nil {
-		return fmt.Errorf("prune wal requires --instance/-i to specify which instance to clear")
+		return nil, fmt.Errorf("prune wal requires --instance/-i to specify which instance to clear")
 	}
 	instanceNum := *cfg.InstanceNumber
 	targetPod := fmt.Sprintf("%s-%d", cfg.ClusterName, instanceNum)
+
+	result := &model.PruneWALResult{
+		Engine:   "cnpg",
+		Cluster:  model.ObjectRef{Name: cfg.ClusterName, Namespace: ns},
+		Instance: int64(instanceNum),
+	}
 
 	// Phase 1: Triage to understand cluster state
 	output.Section("Phase 1: Triage")
 	triageResult, err := triage.Run(ctx, w.triager, engine.NopSink{})
 	if err != nil {
-		return fmt.Errorf("triage failed: %w", err)
+		return nil, fmt.Errorf("triage failed: %w", err)
 	}
 
 	// Find the target instance assessment
@@ -78,7 +84,7 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) error {
 		}
 	}
 	if targetAssessment == nil {
-		return fmt.Errorf("instance %s not found in triage", targetPod)
+		return nil, fmt.Errorf("instance %s not found in triage", targetPod)
 	}
 
 	// Safety checks
@@ -87,12 +93,12 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) error {
 	// Must be the primary (WAL accumulates on primary, not replicas)
 	primary := k8s.GetNestedString(w.p.Cluster(), "status", "currentPrimary")
 	if primary != targetPod {
-		return fmt.Errorf("ABORT: %s is not the primary (primary is %s). WAL pruning only applies to primaries", targetPod, primary)
+		return nil, fmt.Errorf("ABORT: %s is not the primary (primary is %s). WAL pruning only applies to primaries", targetPod, primary)
 	}
 
 	// Must be disk-full or crash-looping
 	if targetAssessment.IsReady {
-		return fmt.Errorf("ABORT: %s is running and ready. WAL pruning is for disk-full/crash-looping instances", targetPod)
+		return nil, fmt.Errorf("ABORT: %s is running and ready. WAL pruning is for disk-full/crash-looping instances", targetPod)
 	}
 
 	output.Success("Target %s is primary and not ready — proceeding", targetPod)
@@ -103,7 +109,7 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) error {
 	replicaCount := triageResult.ReadyCount
 	if replicaCount == 0 {
 		if !cfg.Force {
-			return fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override")
+			return nil, fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override")
 		}
 		common.WarnLog("force=true — proceeding with WAL prune despite no ready replicas. Data safety cannot be verified by a replica.")
 	} else {
@@ -113,13 +119,13 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) error {
 	// Resolve PVC name for the target instance
 	targetPVC, err := w.resolvePVC(ctx, targetPod)
 	if err != nil {
-		return fmt.Errorf("failed to resolve PVC for %s: %w", targetPod, err)
+		return nil, fmt.Errorf("failed to resolve PVC for %s: %w", targetPod, err)
 	}
 
 	// Discover postgres image and UID/GID from a healthy replica
 	imageName, postgresUID, postgresGID, err := w.discoverPostgresInfo(ctx, triageResult)
 	if err != nil {
-		return fmt.Errorf("failed to discover postgres info: %w", err)
+		return nil, fmt.Errorf("failed to discover postgres info: %w", err)
 	}
 
 	// Phase 3: Fence and clear WAL
@@ -198,7 +204,7 @@ echo "=== WAL prune complete ==="
 	// Step 1: Fence
 	output.Bullet(0, "1. Fence instance %s", targetPod)
 	if err := w.fenceInstance(ctx, targetPod); err != nil {
-		return fmt.Errorf("failed to fence %s: %w", targetPod, err)
+		return nil, fmt.Errorf("failed to fence %s: %w", targetPod, err)
 	}
 	fenceApplied = true
 	time.Sleep(3 * time.Second)
@@ -244,7 +250,7 @@ echo "=== WAL prune complete ==="
 	_, err = c.Clientset.CoreV1().Pods(ns).Create(ctx, walPod, metav1.CreateOptions{})
 	if err != nil {
 		cleanup()
-		return fmt.Errorf("failed to create WAL prune pod: %w", err)
+		return nil, fmt.Errorf("failed to create WAL prune pod: %w", err)
 	}
 	walPodCreated = true
 	time.Sleep(2 * time.Second)
@@ -272,7 +278,7 @@ echo "=== WAL prune complete ==="
 		if phase == "Failed" {
 			w.logHealPodOutput(ctx, walPodName)
 			cleanup()
-			return fmt.Errorf("WAL prune pod failed before acquiring PVC")
+			return nil, fmt.Errorf("WAL prune pod failed before acquiring PVC")
 		}
 		delErr := c.Clientset.CoreV1().Pods(ns).Delete(ctx, targetPod, metav1.DeleteOptions{
 			GracePeriodSeconds: ptr(int64(0)),
@@ -285,7 +291,7 @@ echo "=== WAL prune complete ==="
 
 	if !acquired {
 		cleanup()
-		return fmt.Errorf("timeout: WAL prune pod never acquired PVC after %ds", deleteTimeout)
+		return nil, fmt.Errorf("timeout: WAL prune pod never acquired PVC after %ds", deleteTimeout)
 	}
 
 	// Step 4: Wait for WAL prune to complete
@@ -304,14 +310,14 @@ echo "=== WAL prune complete ==="
 		if string(hp.Status.Phase) == "Failed" {
 			w.logHealPodOutput(ctx, walPodName)
 			cleanup()
-			return fmt.Errorf("WAL prune pod FAILED")
+			return nil, fmt.Errorf("WAL prune pod FAILED")
 		}
 	}
 
 	if !succeeded {
 		w.logHealPodOutput(ctx, walPodName)
 		cleanup()
-		return fmt.Errorf("WAL prune pod timed out")
+		return nil, fmt.Errorf("WAL prune pod timed out")
 	}
 
 	// Display output
@@ -345,12 +351,12 @@ echo "=== WAL prune complete ==="
 		if podErr == nil && pod.Status.Phase == "Running" &&
 			len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
 			output.Success("Instance %s is back online!", targetPod)
-			return nil
+			return result, nil
 		}
 	}
 
 	common.WarnLog("%s did not become ready within timeout. CNPG may still be reconciling.", targetPod)
-	return nil
+	return result, nil
 }
 
 // fenceInstance adds a pod to the CNPG fenced instances annotation.
