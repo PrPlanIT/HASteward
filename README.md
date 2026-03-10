@@ -65,4 +65,4 @@ Single static binary with embedded restic. No runtime dependencies.
 
 ## License
 
-MIT
+Distributed under the [AGPL-3.0-only](LICENSE) License. See [LICENSING.md](docs/LICENSING.md) for commercial licensing.

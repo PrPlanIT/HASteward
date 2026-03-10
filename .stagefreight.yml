@@ -121,7 +121,7 @@ narrator:
           mode: replace
           inline: true
         text: license
-        value: "MIT"
+        value: "AGPL-3.0-only"
         color: "#310937"
         font: monofur
         output: ".stagefreight/badges/license.svg"

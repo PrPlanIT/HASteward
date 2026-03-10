@@ -256,4 +256,4 @@ The image includes Ansible, `kubernetes.core` collection, and the Python `kubern
 
 ## License
 
-MIT
+[AGPL-3.0-only](../LICENSE)
