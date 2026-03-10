@@ -75,7 +75,7 @@ targets:
     when: { branches: [main], events: [push, tag] }
     file: "README.md"
     description: "High Availability Steward - database cluster recovery with restic-backed dedup backups"
-    link_base: "https://gitlab.prplanit.com/precisionplanit/{var:repo}/blob/main"
+    link_base: "https://github.com/{var:org}/{var:github_repo}/blob/main"
 
   # ── Primary release ─────────────────────────────────────────────
   - id: primary-release
