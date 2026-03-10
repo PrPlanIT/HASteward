@@ -8,6 +8,9 @@
 
 **H**igh **A**vailability **Steward** — Go CLI and Kubernetes operator for database cluster triage, repair, backup, and restore. Pronounced **Haste·Ward** — warding against haste, not moving hastily. Backups use [restic](https://restic.net/) for block-level dedup, encryption, and compression.
 
+<!-- sf:badges:start -->
+<!-- sf:badges:end -->
+
 ### Public Resources
 
 |                  |                                                                                          |

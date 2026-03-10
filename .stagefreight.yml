@@ -3,6 +3,7 @@ version: 1
 vars:
   org: prplanit
   repo: hasteward
+  github_repo: HASteward
 
 sources:
   primary:
@@ -81,6 +82,72 @@ targets:
     kind: release
     aliases: ["{version}", "latest"]
     when: { git_tags: [stable], events: [tag] }
+
+narrator:
+  - file: "README.md"
+    link_base: "https://github.com/{var:org}/{var:github_repo}/blob/main"
+    items:
+      - id: badge.release
+        kind: badge
+        placement:
+          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+          mode: replace
+          inline: true
+        text: release
+        value: "v{version}"
+        color: "#74ecbe"
+        font: dejavu-sans
+        font_size: 11
+        output: ".stagefreight/badges/release.svg"
+        link: "https://github.com/{var:org}/{var:github_repo}/releases"
+
+      - id: badge.build
+        kind: badge
+        placement:
+          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+          mode: replace
+          inline: true
+        text: build
+        value: "{env:BUILD_STATUS}"
+        color: auto
+        font: monofur
+        output: ".stagefreight/badges/build.svg"
+        link: "https://github.com/{var:org}/{var:github_repo}/actions"
+
+      - id: badge.license
+        kind: badge
+        placement:
+          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+          mode: replace
+          inline: true
+        text: license
+        value: "MIT"
+        color: "#310937"
+        font: monofur
+        output: ".stagefreight/badges/license.svg"
+        link: LICENSE
+
+      - id: badge.updated
+        kind: badge
+        placement:
+          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+          mode: replace
+          inline: true
+        text: updated
+        value: "{env:BUILD_DATE}"
+        color: "#236144"
+        font: dejavu-sans
+        font_size: 11
+        output: ".stagefreight/badges/updated.svg"
+
+      - id: shield.pulls
+        kind: shield
+        placement:
+          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+          mode: replace
+          inline: true
+        shield: "docker/pulls/{var:org}/{var:repo}"
+        link: "https://hub.docker.com/r/{var:org}/{var:repo}"
 
 lint:
   level: full
