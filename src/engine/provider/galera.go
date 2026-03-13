@@ -43,6 +43,7 @@ func (p *GaleraProvider) RootPassword() string     { return p.rootPassword }
 func (p *GaleraProvider) ReadyCondition() map[string]interface{}  { return p.readyCondition }
 func (p *GaleraProvider) GaleraCondition() map[string]interface{} { return p.galeraCondition }
 func (p *GaleraProvider) GaleraRecovery() map[string]interface{}  { return p.galeraRecovery }
+func (p *GaleraProvider) Image() string                           { return k8s.GetNestedString(p.mariadb, "spec", "image") }
 
 // SetMariaDB replaces the cached CR state (used after re-fetch during repair/bootstrap).
 func (p *GaleraProvider) SetMariaDB(obj *unstructured.Unstructured) {

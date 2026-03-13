@@ -25,6 +25,10 @@ const (
 	PhaseWaitReady      = "wait_ready"
 	PhaseCleanup        = "cleanup"
 	PhaseVerify         = "verify"
+	PhaseGenLock        = "gen_lock"
+	PhaseWsrepRecover   = "wsrep_recover"
+	PhaseSafeBootClear  = "safe_boot_clear"
+	PhaseResume         = "resume"
 )
 
 // Event represents a discrete progress event emitted during command execution.

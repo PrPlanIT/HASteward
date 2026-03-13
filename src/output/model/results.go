@@ -104,15 +104,27 @@ type RestoreResult struct {
 
 // BootstrapDecision captures the eligibility analysis for a Galera bootstrap.
 type BootstrapDecision struct {
-	Eligible          bool     `json:"eligible"`
-	Reason            string   `json:"reason"`
-	CandidatePod      string   `json:"candidatePod"`
-	CandidateSeqno    int64    `json:"candidateSeqno"`
-	CandidateUUID     string   `json:"candidateUuid"`
-	AmbiguityDetected bool     `json:"ambiguityDetected"`
-	ForceRequired     bool     `json:"forceRequired"`
-	SafeToProceed     bool     `json:"safeToProceed"`
-	Competitors       []string `json:"competitors,omitempty"`
+	Eligible            bool            `json:"eligible"`
+	Reason              string          `json:"reason"`
+	CandidatePod        string          `json:"candidatePod"`
+	CandidateSeqno      int64           `json:"candidateSeqno"`
+	CandidateUUID       string          `json:"candidateUuid"`
+	AmbiguityDetected   bool            `json:"ambiguityDetected"`
+	ForceRequired       bool            `json:"forceRequired"`
+	SafeToProceed       bool            `json:"safeToProceed"`
+	Competitors         []string        `json:"competitors,omitempty"`
+	WsrepRecoverApplied bool            `json:"wsrepRecoverApplied,omitempty"`
+	OriginalCandidate   string          `json:"originalCandidate,omitempty"`
+	LineageGroups       []LineageGroup  `json:"lineageGroups,omitempty"`
+}
+
+// LineageGroup represents a set of nodes sharing a recovery UUID lineage.
+type LineageGroup struct {
+	UUID         string   `json:"uuid"`
+	Members      []string `json:"members"`
+	MaxSeqno     int64    `json:"maxSeqno"`
+	MaxCommitted int64    `json:"maxCommitted"`
+	BestNode     string   `json:"bestNode"`
 }
 
 // BootstrapAction describes a single mutation in a bootstrap sequence.

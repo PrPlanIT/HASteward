@@ -169,6 +169,15 @@ func GetNestedMap(obj *unstructured.Unstructured, fields ...string) map[string]i
 	return val
 }
 
+// HasNestedField returns true if the given field path exists in the object.
+func HasNestedField(obj *unstructured.Unstructured, fields ...string) bool {
+	_, found, err := unstructured.NestedFieldNoCopy(obj.Object, fields...)
+	if err != nil {
+		return false
+	}
+	return found
+}
+
 // GetNestedFieldCopy extracts a value from an unstructured object at the given path.
 func GetNestedFieldCopy(obj *unstructured.Unstructured, fields ...string) (interface{}, bool) {
 	val, found, err := unstructured.NestedFieldCopy(obj.Object, fields...)
