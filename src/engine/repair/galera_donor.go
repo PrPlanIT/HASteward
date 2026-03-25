@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -152,6 +153,8 @@ func (g *galeraRepair) resolveAutoDonor(ctx context.Context, result *model.Triag
 }
 
 // probeWsrep executes a wsrep status query directly on a donor pod.
+// Retries up to 3 times if exec succeeds but returns empty data (transient
+// mariadb container unavailability after operator recovery pod cleanup).
 func (g *galeraRepair) probeWsrep(ctx context.Context, podName string) DonorProbeResult {
 	cfg := g.p.Config()
 	result := DonorProbeResult{PodExists: true, PodRunning: true}
@@ -170,43 +173,63 @@ func (g *galeraRepair) probeWsrep(ctx context.Context, podName string) DonorProb
 		return result
 	}
 
-	// Execute wsrep query
-	execResult, err := k8s.ExecCommandWithEnv(ctx, podName, cfg.Namespace, "mariadb",
-		map[string]string{"MYSQL_PWD": g.p.RootPassword()},
-		[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
-			"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
-				"WHERE VARIABLE_NAME IN (" +
-				"'wsrep_local_state_comment', " +
-				"'wsrep_connected', 'wsrep_ready', " +
-				"'wsrep_cluster_size'" +
-				") ORDER BY VARIABLE_NAME"})
-	if err != nil {
-		result.ExecOK = false
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("wsrep query exec failed on %s: %v — suitability check incomplete", podName, err))
-		return result
-	}
-	result.ExecOK = true
+	// Execute wsrep query with retry — operator recovery cleanup can cause
+	// transient mariadb unavailability even when the pod is Running.
+	for attempt := 1; attempt <= 3; attempt++ {
+		execResult, err := k8s.ExecCommandWithEnv(ctx, podName, cfg.Namespace, "mariadb",
+			map[string]string{"MYSQL_PWD": g.p.RootPassword()},
+			[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
+				"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
+					"WHERE VARIABLE_NAME IN (" +
+					"'wsrep_local_state_comment', " +
+					"'wsrep_connected', 'wsrep_ready', " +
+					"'wsrep_cluster_size'" +
+					") ORDER BY VARIABLE_NAME"})
+		if err != nil {
+			if attempt < 3 {
+				common.WarnLog("wsrep probe on %s failed (attempt %d/3): %v", podName, attempt, err)
+				time.Sleep(time.Duration(attempt*5) * time.Second)
+				continue
+			}
+			result.ExecOK = false
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("wsrep query exec failed on %s after 3 attempts: %v", podName, err))
+			return result
+		}
 
-	// Parse results
-	for _, line := range strings.Split(execResult.Stdout, "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(parts) != 2 {
-			continue
+		// Parse results
+		result.ExecOK = true
+		for _, line := range strings.Split(execResult.Stdout, "\n") {
+			parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key, val := parts[0], parts[1]
+			switch key {
+			case "wsrep_ready":
+				b := val == "ON"
+				result.WsrepReady = &b
+			case "wsrep_connected":
+				b := val == "ON"
+				result.WsrepConnected = &b
+			case "wsrep_local_state_comment":
+				result.StateComment = val
+			case "wsrep_cluster_size":
+				result.ClusterSize, _ = strconv.Atoi(val)
+			}
 		}
-		key, val := parts[0], parts[1]
-		switch key {
-		case "wsrep_ready":
-			b := val == "ON"
-			result.WsrepReady = &b
-		case "wsrep_connected":
-			b := val == "ON"
-			result.WsrepConnected = &b
-		case "wsrep_local_state_comment":
-			result.StateComment = val
-		case "wsrep_cluster_size":
-			result.ClusterSize, _ = strconv.Atoi(val)
+
+		// If exec succeeded but returned no wsrep data, retry (mariadb may be initializing)
+		if result.WsrepReady == nil && result.WsrepConnected == nil && result.StateComment == "" {
+			if attempt < 3 {
+				common.WarnLog("wsrep probe on %s returned empty data (attempt %d/3), retrying...", podName, attempt)
+				time.Sleep(time.Duration(attempt*5) * time.Second)
+				continue
+			}
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("wsrep probe on %s returned empty data after 3 attempts", podName))
 		}
+		break // got data or exhausted retries
 	}
 
 	// Generate warnings for concerning probe results
