@@ -74,13 +74,19 @@ func (g *galeraRepair) resolveExplicitDonor(ctx context.Context, ordinal int, re
 	// Suitability probe: Galera-specific wsrep check
 	probe := g.probeWsrep(ctx, donorPod)
 
+	// No bypass — donor must be verifiably suitable. Explicit intent ≠ valid donor.
 	if !probe.ExecOK {
-		common.WarnLog("Could not verify wsrep state on %s (exec failed). Suitability check incomplete; proceeding due to explicit operator assertion.", donorPod)
-	} else if probe.WsrepReady != nil && !*probe.WsrepReady {
-		common.WarnLog("Declared donor %s: wsrep_ready=OFF, state=%s — proceeding because operator explicitly asserted authority with --donor.", donorPod, probe.StateComment)
-	} else if probe.WsrepReady != nil && *probe.WsrepReady {
-		common.InfoLog("Using operator-declared donor %s: wsrep_ready=ON, state=%s — valid donor.", donorPod, probe.StateComment)
+		return nil, fmt.Errorf("ABORT: Donor %s probe failed — cannot verify Galera suitability. "+
+			"Ensure the donor pod is running and the mariadb container is accessible", donorPod)
 	}
+	if probe.WsrepReady == nil || !*probe.WsrepReady ||
+		probe.WsrepConnected == nil || !*probe.WsrepConnected ||
+		probe.StateComment != "Synced" {
+		return nil, fmt.Errorf("ABORT: Donor %s is not Galera-suitable "+
+			"(ready=%v connected=%v state=%s)", donorPod, probe.WsrepReady, probe.WsrepConnected, probe.StateComment)
+	}
+
+	common.InfoLog("Using operator-declared donor %s: wsrep_ready=ON, state=Synced — valid donor.", donorPod)
 
 	for _, w := range probe.Warnings {
 		common.WarnLog("Donor probe: %s", w)
