@@ -111,8 +111,8 @@ func ExecCommandWithEnv(ctx context.Context, pod, namespace, container string,
 		fmt.Fprintf(&script, "export %s=\"$(printf '%%s' '%s')\"\n", k, ShellEscape(v))
 	}
 	for _, arg := range command {
-		script.WriteString(arg)
-		script.WriteByte(' ')
+		// Quote each arg to prevent shell interpretation of special chars
+		fmt.Fprintf(&script, "'%s' ", ShellEscape(arg))
 	}
 
 	return ExecCommand(ctx, pod, namespace, container, []string{"sh", "-c", script.String()})

@@ -288,7 +288,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 					"'wsrep_flow_control_paused'" +
 					") ORDER BY VARIABLE_NAME"})
 		if err != nil {
-			common.DebugLog("wsrep query failed on %s: %v", pod.Name, err)
+			common.WarnLog("wsrep query failed on %s: %v — wsrep data for this node will be incomplete", pod.Name, err)
 			data.wsrepMap[pod.Name] = &wsrepStatus{}
 			continue
 		}
