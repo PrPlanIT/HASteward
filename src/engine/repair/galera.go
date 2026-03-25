@@ -281,14 +281,24 @@ func (g *galeraRepair) Reassess(ctx context.Context) (*model.TriageResult, error
 // Private heal methods (from galera/heal.go)
 // ---------------------------------------------------------------------------
 
-// healNode heals a single Galera node via suspend/pod-delete/wipe/resume.
-// INVARIANT: This function NEVER affects other instances. It deletes only the
-// target pod, manipulates only the target PVCs, and resumes the operator.
-// Other pods stay running throughout — cluster authority is preserved.
+// healNode heals a single Galera node via suspend/scale-down/wipe/scale-up/resume.
+// Only the highest ordinal can be repaired instance-scoped (scale to N-1 removes
+// only the last pod). For lower ordinals, this function aborts — StatefulSet
+// ordering makes it impossible to remove ordinal N without also removing N+1..end.
 func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceNum int) error {
 	cfg := g.p.Config()
 	ns := cfg.Namespace
 	c := k8s.GetClients()
+
+	// StatefulSet ordering constraint: can only remove the highest ordinal
+	// without affecting other pods. Lower ordinals require cluster-scoped recovery.
+	replicas := int(g.p.Replicas())
+	if instanceNum < replicas-1 {
+		return fmt.Errorf("ABORT: Repairing ordinal %d requires removing ordinals %d–%d due to "+
+			"StatefulSet ordering. This is cluster-impacting and not allowed in instance-scoped repair. "+
+			"Use a cluster-scoped recovery operation for non-highest ordinals",
+			instanceNum, instanceNum+1, replicas-1)
+	}
 
 	// Capture SA from target pod before it gets deleted
 	sa := "default"
@@ -305,7 +315,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 
 	suspended := false
 	scaledDown := false
-	originalReplicas := int32(g.p.Replicas())
+	originalReplicas := int32(replicas)
 
 	// Check if galera config PVC exists
 	_, galeraErr := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, galeraPVC, metav1.GetOptions{})
@@ -372,9 +382,9 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	}
 
 	output.Section("Healing " + targetPod)
-	output.Bullet(0, "Strategy: scale to %d (CR suspended, data on other nodes untouched)", instanceNum)
+	output.Bullet(0, "Strategy: scale to %d (highest ordinal only — instance-scoped)", instanceNum)
 	output.Bullet(0, "1. Suspend MariaDB CR (prevent operator reconciliation)")
-	output.Bullet(0, "2. Scale StatefulSet to %d (release %s PVC)", instanceNum, targetPod)
+	output.Bullet(0, "2. Scale StatefulSet to %d (removes only %s)", instanceNum, targetPod)
 	if cfg.WipeDatadir {
 		output.Bullet(0, "3. WIPE ENTIRE DATADIR on storage PVC (full SST reseed)")
 	} else {
