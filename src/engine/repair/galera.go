@@ -61,9 +61,11 @@ func (g *galeraRepair) Assess(ctx context.Context) (*model.TriageResult, error) 
 // SafetyGate resolves the donor and verifies it is suitable for SST.
 // The resolved donor is cached on g.donorSelection for use by all downstream steps.
 func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResult) error {
-	// HARD STOP: if no primary component exists, this is a bootstrap scenario.
-	// --force CANNOT override this. Repair must not decide cluster authority.
-	if result.AllNodesDown {
+	// HARD STOP: if no primary component / no join target exists, this is a
+	// bootstrap scenario. --force CANNOT override this. Repair must not decide
+	// cluster authority. Checks both AllNodesDown AND empty PrimaryMembers
+	// (nodes can be running but not in a primary component).
+	if result.AllNodesDown || len(result.DataComparison.PrimaryMembers) == 0 {
 		return fmt.Errorf("ABORT: No primary component exists (cluster has no join target). " +
 			"Use 'hasteward bootstrap' to declare authority explicitly. --force cannot override this")
 	}
@@ -321,15 +323,22 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		joinTargetExists = true
 	} else {
 		// Coarse check: at least one other pod running (auto-mode, unambiguous)
+		// Get label selector from the StatefulSet itself (not hardcoded).
+		// This ensures we match whatever the operator actually uses.
+		sts, stsErr := c.Clientset.AppsV1().StatefulSets(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if stsErr != nil {
+			return fmt.Errorf("ABORT: Failed to get StatefulSet %s: %w", cfg.ClusterName, stsErr)
+		}
+		selectorStr := metav1.FormatLabelSelector(sts.Spec.Selector)
 		pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-			LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName,
+			LabelSelector: selectorStr,
 		})
 		if err != nil {
-			return fmt.Errorf("ABORT: Failed to list cluster pods: %w", err)
+			return fmt.Errorf("ABORT: Failed to list cluster pods (selector=%s): %w", selectorStr, err)
 		}
-		common.InfoLog("Found %d pods matching cluster %s", len(pods.Items), cfg.ClusterName)
+		common.InfoLog("Found %d pods matching cluster %s (selector=%s)", len(pods.Items), cfg.ClusterName, selectorStr)
 		if len(pods.Items) == 0 {
-			return fmt.Errorf("ABORT: No pods found for cluster %s — label selector may be wrong", cfg.ClusterName)
+			return fmt.Errorf("ABORT: No pods found for cluster %s (selector=%s)", cfg.ClusterName, selectorStr)
 		}
 		for _, p := range pods.Items {
 			if p.Name != targetPod && p.Status.Phase == corev1.PodRunning {
@@ -556,17 +565,30 @@ echo "=== Done! ==="
 	}
 
 	// Verify Galera join — K8s Ready alone does not prove cluster membership.
+	// Poll for up to 60s because SST can take time.
 	common.InfoLog("Pod %s is Running+Ready. Verifying Galera join...", targetPod)
-	joinProbe := g.probeWsrep(ctx, targetPod)
-	if joinProbe.ExecOK && joinProbe.WsrepReady != nil && *joinProbe.WsrepReady &&
-		joinProbe.WsrepConnected != nil && *joinProbe.WsrepConnected &&
-		joinProbe.StateComment == "Synced" {
-		output.Success("Node %s healed and joined cluster (wsrep_ready=ON, Synced, cluster_size=%d)", targetPod, joinProbe.ClusterSize)
-	} else if joinProbe.ExecOK {
-		common.WarnLog("Node %s is Running but Galera join incomplete (ready=%v connected=%v state=%s). SST may still be in progress.",
-			targetPod, joinProbe.WsrepReady, joinProbe.WsrepConnected, joinProbe.StateComment)
-	} else {
-		common.WarnLog("Node %s is Running but wsrep probe failed — cannot confirm Galera join", targetPod)
+	galeraJoined := false
+	for i := 0; i < 12; i++ {
+		joinProbe := g.probeWsrep(ctx, targetPod)
+		if joinProbe.ExecOK && joinProbe.WsrepReady != nil && *joinProbe.WsrepReady &&
+			joinProbe.WsrepConnected != nil && *joinProbe.WsrepConnected &&
+			joinProbe.StateComment == "Synced" {
+			output.Success("Node %s healed and joined cluster (wsrep_ready=ON, Synced, cluster_size=%d)", targetPod, joinProbe.ClusterSize)
+			galeraJoined = true
+			break
+		}
+		if i < 11 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+	if !galeraJoined {
+		finalProbe := g.probeWsrep(ctx, targetPod)
+		if finalProbe.ExecOK {
+			common.WarnLog("Node %s did not reach Synced within 60s (ready=%v connected=%v state=%s). SST may still be in progress.",
+				targetPod, finalProbe.WsrepReady, finalProbe.WsrepConnected, finalProbe.StateComment)
+		} else {
+			common.WarnLog("Node %s is Running but wsrep probe failed — cannot confirm Galera join", targetPod)
+		}
 	}
 
 	return nil
@@ -614,7 +636,8 @@ func (g *galeraRepair) waitForPodGone(ctx context.Context, podName string) error
 
 // runHelperWithRetry wraps runHelperPod with bounded retry for PVC detach lag.
 // Ceph RBD can take seconds to detach after pod deletion; first mount attempt
-// may fail even though pod is NotFound. Retries up to 3 times with backoff.
+// may fail even though pod is NotFound. Only retries mount-related errors —
+// script failures, permission errors, and image pull errors fail immediately.
 func (g *galeraRepair) runHelperWithRetry(ctx context.Context, name, pvc, mountPath, script, sa string) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -623,14 +646,29 @@ func (g *galeraRepair) runHelperWithRetry(ctx context.Context, name, pvc, mountP
 			return nil
 		}
 		lastErr = err
+
+		// Only retry if the error looks like a mount/attach issue.
+		// Script failures, permission errors, etc. should fail immediately.
+		errMsg := err.Error()
+		isMountError := strings.Contains(errMsg, "Multi-Attach") ||
+			strings.Contains(errMsg, "already attached") ||
+			strings.Contains(errMsg, "device busy") ||
+			strings.Contains(errMsg, "FailedAttachVolume") ||
+			strings.Contains(errMsg, "FailedMount") ||
+			strings.Contains(errMsg, "timed out") // helper pod stuck in ContainerCreating
+
+		if !isMountError {
+			return fmt.Errorf("helper pod %s failed (non-retryable): %w", name, err)
+		}
+
 		if attempt < 3 {
-			common.WarnLog("Helper pod %s failed (attempt %d/3): %v", name, attempt, err)
-			common.WarnLog("Retrying (possible PVC detach lag)...")
-			time.Sleep(time.Duration(attempt*10) * time.Second)
+			common.WarnLog("Helper pod %s mount failed (attempt %d/3): %v", name, attempt, err)
+			common.WarnLog("Retrying (PVC detach lag)...")
+			time.Sleep(time.Duration(attempt * 10) * time.Second)
 			continue
 		}
 	}
-	return fmt.Errorf("helper pod %s failed after retries: %w", name, lastErr)
+	return fmt.Errorf("helper pod %s failed after 3 mount retries: %w", name, lastErr)
 }
 
 // runHelperPod creates a busybox pod that mounts a PVC and runs a script,
