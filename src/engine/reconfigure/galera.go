@@ -76,6 +76,21 @@ func (g *galeraReconfigure) Validate(ctx context.Context, result *model.TriageRe
 			return fmt.Errorf("ABORT: --fix-bootstrap requires galera PVC %s but it was not found: %w", galeraPVC, err)
 		}
 		common.InfoLog("Target PVCs validated: %s (storage), %s (galera)", storagePVC, galeraPVC)
+
+		// Donor viability: at least one other node must be Galera-suitable for SST
+		// Without this, reconfigure destroys local data with no recovery path
+		donorAvailable := false
+		targetPodName := targetPod
+		for _, a := range result.Assessments {
+			if a.Pod != targetPodName && a.WsrepReady == "ON" && a.WsrepConnected == "ON" && a.WsrepStateComment == "Synced" {
+				donorAvailable = true
+				common.InfoLog("SST donor available: %s (Synced)", a.Pod)
+				break
+			}
+		}
+		if !donorAvailable {
+			return fmt.Errorf("ABORT: no valid donor available for SST — reconfigure would destroy data on %s without recovery path", targetPod)
+		}
 	}
 
 	return nil
@@ -102,8 +117,11 @@ func (g *galeraReconfigure) PrintPlan(ctx context.Context, result *model.TriageR
 		output.Field("Action", "fix-bootstrap")
 		output.Field("Blast radius", fmt.Sprintf("all %d Galera pods stopped, then restarted", replicas))
 		output.Println("Data mutation:")
-		output.Bullet(1, "storage PVC (storage-%s): grastate.dat will be cleared to null UUID", targetPod)
+		output.Bullet(1, "storage PVC (storage-%s): grastate.dat cleared, gvwstate.dat + galera.cache + ib_logfile* removed", targetPod)
 		output.Bullet(1, "galera PVC (galera-%s): 1-bootstrap.cnf will be removed", targetPod)
+		output.Println("Data impact:")
+		output.Bullet(1, "Local data on target instance will be discarded")
+		output.Bullet(1, "Node will rejoin cluster via full SST from a healthy donor")
 	}
 
 	output.Field("Expected", "cluster restarts without stale bootstrap intent on target; all replicas converge to Synced")
@@ -252,23 +270,37 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 
 	// STEP 4: Mount target PVCs and apply mutations
 	if cfg.FixBootstrap {
-		// Storage PVC: clear grastate
-		common.InfoLog("STEP 4a: Clearing grastate.dat on %s", storagePVC)
+		// Storage PVC: neutralize ALL Galera + InnoDB recovery state
+		common.InfoLog("STEP 4a: Neutralizing Galera state on %s", storagePVC)
 		storageScript := `set -e
-echo "=== Current grastate.dat ==="
-cat /var/lib/mysql/grastate.dat 2>/dev/null || echo "not found"
-echo ""
-echo "=== Clearing grastate.dat ==="
-printf '%s\n' \
-  '# GALERA saved state' \
-  'version: 2.1' \
-  'uuid:    00000000-0000-0000-0000-000000000000' \
-  'seqno:   -1' \
-  'safe_to_bootstrap: 0' \
-  > /var/lib/mysql/grastate.dat
-echo "New grastate.dat:"
+echo "=== Neutralizing Galera state ==="
+
+# 1. Reset grastate to null UUID, seqno -1, no bootstrap
+cat > /var/lib/mysql/grastate.dat <<GSEOF
+# GALERA saved state
+version: 2.1
+uuid:    00000000-0000-0000-0000-000000000000
+seqno:   -1
+safe_to_bootstrap: 0
+GSEOF
+echo "grastate.dat reset:"
 cat /var/lib/mysql/grastate.dat
-echo "=== Done ==="
+
+# 2. Remove Galera recovery artifacts
+rm -f /var/lib/mysql/gvwstate.dat
+rm -f /var/lib/mysql/galera.cache
+echo "Removed gvwstate.dat + galera.cache"
+
+# 3. Remove InnoDB redo logs ONLY (prevent --wsrep-recover from extracting seqno)
+# DO NOT remove ibdata1 — required for engine startup and SST
+rm -f /var/lib/mysql/ib_logfile*
+echo "Removed ib_logfile*"
+
+# 4. Verify state neutralization
+grep -q "seqno:   -1" /var/lib/mysql/grastate.dat || { echo "FAIL: grastate seqno not reset"; exit 1; }
+test ! -f /var/lib/mysql/gvwstate.dat || { echo "FAIL: gvwstate.dat still exists"; exit 1; }
+test ! -f /var/lib/mysql/galera.cache || { echo "FAIL: galera.cache still exists"; exit 1; }
+echo "=== State neutralized — operator cannot infer higher seqno ==="
 `
 		if err := g.runHelperWithRetry(ctx, storageHelper, ns, storagePVC, "/var/lib/mysql", storageScript, sa); err != nil {
 			rescue()
@@ -354,69 +386,79 @@ echo "=== Done ==="
 
 	// STEP 9: Verify Galera cluster formation
 	output.Section("Post-Reconfigure Verification")
-	g.verifyCluster(ctx, targetPod, int(originalReplicas))
+	if err := g.verifyCluster(ctx, targetPod, int(originalReplicas)); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-// verifyCluster checks full cluster convergence after reconfigure.
-func (g *galeraReconfigure) verifyCluster(ctx context.Context, targetPod string, expectedReplicas int) {
+// verifyCluster polls for full cluster convergence after reconfigure.
+// Returns error if cluster does not converge within timeout.
+// Requires: target Synced + at least one other Synced + cluster_size == replicas.
+func (g *galeraReconfigure) verifyCluster(ctx context.Context, targetPod string, expectedReplicas int) error {
 	cfg := g.p.Config()
 	ns := cfg.Namespace
 
-	targetSynced := false
-	otherSynced := false
-	var clusterSize int
+	// Poll for up to 120s — SST can take time
+	common.InfoLog("Polling for cluster convergence (up to 120s)...")
+	for poll := 0; poll < 24; poll++ {
+		targetSynced := false
+		otherSynced := false
+		var clusterSize int
 
+		for i := 0; i < expectedReplicas; i++ {
+			podName := fmt.Sprintf("%s-%d", cfg.ClusterName, i)
+			probe := g.probeWsrep(ctx, podName, ns)
+			if !probe.ExecOK {
+				continue
+			}
+			synced := probe.WsrepReady != nil && *probe.WsrepReady &&
+				probe.WsrepConnected != nil && *probe.WsrepConnected &&
+				probe.StateComment == "Synced"
+
+			if podName == targetPod && synced {
+				targetSynced = true
+			} else if podName != targetPod && synced {
+				otherSynced = true
+			}
+			if probe.ClusterSize > clusterSize {
+				clusterSize = probe.ClusterSize
+			}
+		}
+
+		if targetSynced && otherSynced && clusterSize == expectedReplicas {
+			// Log individual node status
+			for i := 0; i < expectedReplicas; i++ {
+				podName := fmt.Sprintf("%s-%d", cfg.ClusterName, i)
+				probe := g.probeWsrep(ctx, podName, ns)
+				if probe.ExecOK {
+					output.Success("Node %s: Synced, cluster_size=%d", podName, probe.ClusterSize)
+				}
+			}
+			output.Section("Verdict")
+			output.Success("Reconfigure successful: cluster reformed with %d nodes, all Synced", clusterSize)
+			return nil
+		}
+
+		if poll < 23 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	// Timeout — print final state for diagnostics
+	output.Section("Verdict — FAILED")
 	for i := 0; i < expectedReplicas; i++ {
 		podName := fmt.Sprintf("%s-%d", cfg.ClusterName, i)
 		probe := g.probeWsrep(ctx, podName, ns)
-		if !probe.ExecOK {
-			common.WarnLog("Verification: %s wsrep probe failed", podName)
-			continue
-		}
-
-		synced := probe.WsrepReady != nil && *probe.WsrepReady &&
-			probe.WsrepConnected != nil && *probe.WsrepConnected &&
-			probe.StateComment == "Synced"
-
-		if podName == targetPod {
-			if synced {
-				targetSynced = true
-				output.Success("Target %s: wsrep_ready=ON, Synced, cluster_size=%d", podName, probe.ClusterSize)
-			} else {
-				common.WarnLog("Target %s: NOT synced (ready=%v connected=%v state=%s)",
-					podName, probe.WsrepReady, probe.WsrepConnected, probe.StateComment)
-			}
+		if probe.ExecOK {
+			common.WarnLog("%s: ready=%v connected=%v state=%s cluster_size=%d",
+				podName, probe.WsrepReady, probe.WsrepConnected, probe.StateComment, probe.ClusterSize)
 		} else {
-			if synced {
-				otherSynced = true
-				output.Success("Node %s: Synced, cluster_size=%d", podName, probe.ClusterSize)
-			} else {
-				common.WarnLog("Node %s: NOT synced (ready=%v connected=%v state=%s)",
-					podName, probe.WsrepReady, probe.WsrepConnected, probe.StateComment)
-			}
-		}
-		if probe.ClusterSize > clusterSize {
-			clusterSize = probe.ClusterSize
+			common.WarnLog("%s: wsrep probe failed", podName)
 		}
 	}
-
-	// Final verdict
-	output.Section("Verdict")
-	if targetSynced && otherSynced && clusterSize == expectedReplicas {
-		output.Success("Reconfigure successful: cluster reformed with %d nodes, target is Synced", clusterSize)
-	} else {
-		if !targetSynced {
-			common.WarnLog("Target instance did not reach Synced — cluster may still be converging")
-		}
-		if !otherSynced {
-			common.WarnLog("No other node is Synced — cluster did NOT converge (FAIL)")
-		}
-		if clusterSize < expectedReplicas {
-			common.WarnLog("cluster_size=%d < expected %d — not all nodes joined", clusterSize, expectedReplicas)
-		}
-	}
+	return fmt.Errorf("FAIL: cluster did not converge within 120s — target may still be syncing or bootstrap intent was not fully neutralized")
 }
 
 // probeWsrep queries wsrep state on a pod (local to reconfigure, not shared with repair).
