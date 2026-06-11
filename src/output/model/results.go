@@ -2,6 +2,43 @@ package model
 
 import "time"
 
+// Classification is the recovery classification of a database instance — the
+// answer to "can this PVC ever be authoritative again?". It is a projection over
+// signals triage already computes (timeline, LSN, control-data source, SafeToHeal,
+// primary identity), computed fail-closed: anything not provably disposable is Unknown.
+type Classification string
+
+const (
+	ClassAuthoritative Classification = "authoritative" // holds the winning data; never destroy
+	ClassRecoverable   Classification = "recoverable"   // behind but can catch up by streaming; leave alone
+	ClassDisposable    Classification = "disposable"    // diverged / dead-timeline; re-clone is its only path home
+	ClassUnknown       Classification = "unknown"       // cannot prove disposability; fail closed (refuse)
+)
+
+// DiskStats is the per-instance disk breakdown. Source records how it was obtained
+// so an unreadable instance reports an explicit state, never a silent zero.
+type DiskStats struct {
+	Source      string `json:"source"`                // "exec" | "pvc_probe" | "pvc_capacity_only" | "none"
+	TotalBytes  int64  `json:"totalBytes"`            // PVC capacity — always available from the PVC object
+	UsedBytes   int64  `json:"usedBytes,omitempty"`   // df used
+	FreeBytes   int64  `json:"freeBytes,omitempty"`   // df free
+	UsedPercent int    `json:"usedPercent,omitempty"` // df used %
+	WALBytes    int64  `json:"walBytes,omitempty"`    // size of pg_wal
+	DataBytes   int64  `json:"dataBytes,omitempty"`   // pgdata minus pg_wal — the actual database
+	WALSegments int    `json:"walSegments,omitempty"` // pg_wal segment count
+}
+
+// Recovery is a projection over the per-instance Classifications: whether the
+// cluster is in a breakable deadlock and what the breaker may act on. The model
+// states WHAT must be recoverable; escrow providers (not this layer) decide HOW.
+type Recovery struct {
+	Blocked     bool     `json:"blocked"`               // disk-full freeze caused by a disposable instance, authority not running
+	Reason      string   `json:"reason,omitempty"`      // "disk_full_disposable_replica" | "ambiguous_authority" | ""
+	Authority   string   `json:"authority,omitempty"`   // authoritative pod, or "" if ambiguous
+	Disposable  []string `json:"disposable,omitempty"`  // pods classified disposable
+	RecoverySet []string `json:"recoverySet,omitempty"` // PVCs that must be escrow-reversible before any mutation
+}
+
 // InstanceAssessment holds the triage assessment for a single database instance.
 type InstanceAssessment struct {
 	Pod            string   `json:"pod"`
@@ -13,9 +50,10 @@ type InstanceAssessment struct {
 	Recommendation string   `json:"recommendation"`
 
 	// CNPG-specific
-	IsPrimary bool   `json:"isPrimary,omitempty"`
-	Timeline  int64  `json:"timeline,omitempty"`
-	LSN       string `json:"lsn,omitempty"`
+	IsPrimary      bool           `json:"isPrimary,omitempty"`
+	Timeline       int64          `json:"timeline,omitempty"`
+	LSN            string         `json:"lsn,omitempty"`
+	Classification Classification `json:"classification,omitempty"` // authoritative|recoverable|disposable|unknown
 
 	// Galera-specific
 	IsInPrimary        bool   `json:"isInPrimary,omitempty"`
@@ -31,7 +69,10 @@ type InstanceAssessment struct {
 	WsrepReady         string `json:"wsrepReady,omitempty"`
 	WsrepClusterStatus string `json:"wsrepClusterStatus,omitempty"`
 	CrashReason        string `json:"crashReason,omitempty"`
-	DiskPct            int    `json:"diskPct"`
+	DiskPct            int    `json:"diskPct"` // legacy single percent (Galera); use Disk for the full breakdown
+
+	// Per-instance disk breakdown (CNPG; populated for down instances via the PVC probe)
+	Disk *DiskStats `json:"disk,omitempty"`
 }
 
 // DataComparison holds the cross-instance data comparison results.
@@ -67,6 +108,9 @@ type TriageResult struct {
 	ClusterPhase   string               `json:"clusterPhase"`
 	ReadyCount     int                  `json:"readyCount"`
 	TotalCount     int                  `json:"totalCount"`
+
+	// Recovery classification + deadlock assessment — a projection over Assessments (CNPG)
+	Recovery *Recovery `json:"recovery,omitempty"`
 
 	// Galera-specific
 	AllNodesDown     bool                `json:"allNodesDown,omitempty"`
@@ -106,18 +150,18 @@ type RestoreResult struct {
 
 // BootstrapDecision captures the eligibility analysis for a Galera bootstrap.
 type BootstrapDecision struct {
-	Eligible            bool            `json:"eligible"`
-	Reason              string          `json:"reason"`
-	CandidatePod        string          `json:"candidatePod"`
-	CandidateSeqno      int64           `json:"candidateSeqno"`
-	CandidateUUID       string          `json:"candidateUuid"`
-	AmbiguityDetected   bool            `json:"ambiguityDetected"`
-	ForceRequired       bool            `json:"forceRequired"`
-	SafeToProceed       bool            `json:"safeToProceed"`
-	Competitors         []string        `json:"competitors,omitempty"`
-	WsrepRecoverApplied bool            `json:"wsrepRecoverApplied,omitempty"`
-	OriginalCandidate   string          `json:"originalCandidate,omitempty"`
-	LineageGroups       []LineageGroup  `json:"lineageGroups,omitempty"`
+	Eligible            bool           `json:"eligible"`
+	Reason              string         `json:"reason"`
+	CandidatePod        string         `json:"candidatePod"`
+	CandidateSeqno      int64          `json:"candidateSeqno"`
+	CandidateUUID       string         `json:"candidateUuid"`
+	AmbiguityDetected   bool           `json:"ambiguityDetected"`
+	ForceRequired       bool           `json:"forceRequired"`
+	SafeToProceed       bool           `json:"safeToProceed"`
+	Competitors         []string       `json:"competitors,omitempty"`
+	WsrepRecoverApplied bool           `json:"wsrepRecoverApplied,omitempty"`
+	OriginalCandidate   string         `json:"originalCandidate,omitempty"`
+	LineageGroups       []LineageGroup `json:"lineageGroups,omitempty"`
 }
 
 // LineageGroup represents a set of nodes sharing a recovery UUID lineage.

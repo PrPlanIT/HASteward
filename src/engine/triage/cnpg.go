@@ -74,7 +74,9 @@ type cnpgTriageData struct {
 	controlData        []controlData
 	streamingReplicas  []string
 	replicationInfo    []replicaInfo
-	diskUsage          map[string]int // pod -> percent used
+	diskUsage          map[string]int // pod -> percent used (legacy)
+	diskStats          map[string]*model.DiskStats
+	pvcCapacity        map[string]int64 // pod -> PVC capacity bytes (always available)
 	pvcStates          map[string]string
 	danglingPVCs       []string
 	healthyPVCs        []string
@@ -110,6 +112,8 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 	ns := t.p.Config().Namespace
 	data := &cnpgTriageData{
 		diskUsage:    make(map[string]int),
+		diskStats:    make(map[string]*model.DiskStats),
+		pvcCapacity:  make(map[string]int64),
 		pvcStates:    make(map[string]string),
 		crashReasons: make(map[string]string),
 	}
@@ -160,6 +164,9 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 			data.pvcStates[name] = "MISSING"
 		} else {
 			data.pvcStates[name] = string(pvc.Status.Phase)
+			if q, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+				data.pvcCapacity[name] = q.Value()
+			}
 		}
 	}
 
@@ -254,11 +261,15 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 
 		imageName := k8s.GetNestedString(t.p.Cluster(), "spec", "imageName")
 		sa := k8s.ServiceAccountFromPods(data.runningPods)
-		probeResults := t.runPVCProbes(ctx, probeInstances, imageName, ns, sa)
+		probeResults, probeDisks := t.runPVCProbes(ctx, probeInstances, imageName, ns, sa)
 
 		for name, cd := range probeResults {
 			cd.CrashReason = data.crashReasons[name]
 			healthyControlData = append(healthyControlData, cd)
+		}
+		for name, ds := range probeDisks {
+			cnpgFillTotal(ds, data.pvcCapacity[name])
+			data.diskStats[name] = ds
 		}
 	}
 
@@ -332,17 +343,36 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 		t.collectWALInfo(ctx, data, currentPrimary, ns)
 	}
 
-	// Disk space on running instances
+	// Disk breakdown on running instances (fast path via exec).
 	output.Section("Disk Space")
 	for _, pod := range data.runningPods {
 		result, err := k8s.ExecCommand(ctx, pod.Name, ns, "postgres",
-			[]string{"df", "-h", "/var/lib/postgresql/data"})
+			[]string{"sh", "-c", cnpgDiskScript})
 		if err != nil {
 			output.Printf("%s: unable to check\n", pod.Name)
 			continue
 		}
-		output.Printf("%s:\n%s\n", pod.Name, result.Stdout)
-		data.diskUsage[pod.Name] = cnpgParseDiskPercent(result.Stdout)
+		ds := parseDiskStats(result.Stdout, "exec")
+		cnpgFillTotal(ds, data.pvcCapacity[pod.Name])
+		data.diskStats[pod.Name] = ds
+		data.diskUsage[pod.Name] = ds.UsedPercent
+		output.Printf("%s: %s used / %s total (%d%%) — wal %s, data %s, %d segs\n",
+			pod.Name, output.FormatBytes(ds.UsedBytes), output.FormatBytes(ds.TotalBytes),
+			ds.UsedPercent, output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes),
+			ds.WALSegments)
+	}
+
+	// Backfill: any instance not covered by exec or PVC probe still reports its true
+	// capacity (from the PVC object) — never a silent zero.
+	for _, name := range data.expectedInstances {
+		if data.diskStats[name] != nil {
+			continue
+		}
+		if capBytes := data.pvcCapacity[name]; capBytes > 0 {
+			data.diskStats[name] = &model.DiskStats{Source: "pvc_capacity_only", TotalBytes: capBytes}
+		} else {
+			data.diskStats[name] = &model.DiskStats{Source: "none"}
+		}
 	}
 
 	return data, nil
@@ -425,9 +455,10 @@ func (t *cnpgTriage) collectWALInfo(ctx context.Context, data *cnpgTriageData, p
 
 // runPVCProbes creates ephemeral probe pods to read pg_controldata from PVCs
 // of non-running instances.
-func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget, imageName, ns, sa string) map[string]controlData {
+func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget, imageName, ns, sa string) (map[string]controlData, map[string]*model.DiskStats) {
 	c := k8s.GetClients()
 	results := make(map[string]controlData)
+	disks := make(map[string]*model.DiskStats)
 	uid := int64(26)
 
 	for _, tgt := range targets {
@@ -448,9 +479,11 @@ func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget
 					FSGroup:    &uid,
 				},
 				Containers: []corev1.Container{{
-					Name:    "probe",
-					Image:   imageName,
-					Command: []string{"pg_controldata", "/var/lib/postgresql/data/pgdata"},
+					Name:  "probe",
+					Image: imageName,
+					// Read pg_controldata AND the disk breakdown in one read-only pass,
+					// so stranded (down / crash-looping) instances still report true usage.
+					Command: []string{"sh", "-c", "pg_controldata /var/lib/postgresql/data/pgdata 2>/dev/null; " + cnpgDiskScript},
 					VolumeMounts: []corev1.VolumeMount{{
 						Name:      "pgdata",
 						MountPath: "/var/lib/postgresql/data",
@@ -479,8 +512,11 @@ func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget
 		}
 
 		// Wait for probe to complete
-		cd := t.waitAndCollectProbe(ctx, probeName, tgt.Name, ns)
+		cd, ds := t.waitAndCollectProbe(ctx, probeName, tgt.Name, ns)
 		results[tgt.Name] = cd
+		if ds != nil {
+			disks[tgt.Name] = ds
+		}
 
 		// Cleanup
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, probeName, metav1.DeleteOptions{
@@ -488,10 +524,10 @@ func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget
 		})
 	}
 
-	return results
+	return results, disks
 }
 
-func (t *cnpgTriage) waitAndCollectProbe(ctx context.Context, probeName, instanceName, ns string) controlData {
+func (t *cnpgTriage) waitAndCollectProbe(ctx context.Context, probeName, instanceName, ns string) (controlData, *model.DiskStats) {
 	c := k8s.GetClients()
 
 	// Poll for completion (30 retries, 5s delay = 150s max)
@@ -515,11 +551,12 @@ func (t *cnpgTriage) waitAndCollectProbe(ctx context.Context, probeName, instanc
 	if err != nil || len(logBytes) == 0 {
 		return controlData{Pod: instanceName, Source: "none", ClusterState: "unknown",
 			Timeline: "unknown", CheckpointLocation: "unknown", CheckpointTime: "unknown",
-			MinRecoveryEnd: "unknown"}
+			MinRecoveryEnd: "unknown"}, nil
 	}
 
 	cd := parseControlData(instanceName, "pvc_probe", string(logBytes))
-	return cd
+	ds := parseDiskStats(string(logBytes), "pvc_probe")
+	return cd, ds
 }
 
 // --- Analyze ---
@@ -580,6 +617,16 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		ReadyCount:     readyCount,
 		TotalCount:     int(t.p.Instances()),
 	}
+
+	// CNPG authority status (mirrors the Galera pattern) + recovery projection.
+	if comparison.SafeToHeal && currentPrimary != "" {
+		result.AuthorityStatus = "unambiguous"
+		result.RecommendedDonor = cnpgOrdinal(currentPrimary)
+	} else {
+		result.AuthorityStatus = "ambiguous"
+		result.RecommendedDonor = "none"
+	}
+	result.Recovery = deriveRecovery(assessments, comparison, currentPrimary, result.ClusterPhase, data.primaryIsRunning)
 
 	// Display
 	t.triageDisplay(data, result)
@@ -678,6 +725,9 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		behindLSN := sameTL && instLSNVal < pLSNVal
 		aheadLSN := sameTL && instLSNVal > pLSNVal
 		aheadTL := instTL != "unknown" && pTL != "unknown" && parseTimelineInt(instTL) > parseTimelineInt(pTL)
+
+		isAuthority := inst.Pod == comparison.MostAdvanced
+		classification := classifyInstance(isPrimary, isAuthority, hasData, comparison.SafeToHeal, behindTL, sameTL)
 
 		var notes []string
 		var recommendation string
@@ -790,9 +840,12 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			IsPrimary:      isPrimary,
 			Timeline:       parseTimelineInt(instTL),
 			LSN:            instLSN,
+			Classification: classification,
 			Notes:          notes,
 			Recommendation: recommendation,
 			NeedsHeal:      needsHeal,
+			DiskPct:        diskPct,
+			Disk:           data.diskStats[inst.Pod],
 		})
 	}
 
@@ -894,9 +947,40 @@ func (t *cnpgTriage) triageDisplay(data *cnpgTriageData, result *model.TriageRes
 		if a.IsPrimary {
 			primaryTag = " [PRIMARY]"
 		}
-		output.Printf("%s%s: %s\n", a.Pod, primaryTag, strings.Join(a.Notes, ", "))
+		classTag := ""
+		if a.Classification != "" {
+			classTag = " {" + string(a.Classification) + "}"
+		}
+		output.Printf("%s%s%s: %s\n", a.Pod, primaryTag, classTag, strings.Join(a.Notes, ", "))
 		output.Printf("  Timeline: %d | LSN: %s\n", a.Timeline, a.LSN)
+		if d := a.Disk; d != nil {
+			output.Printf("  Disk: %s/%s (%d%%) — wal %s, data %s, %d segs [%s]\n",
+				output.FormatBytes(d.UsedBytes), output.FormatBytes(d.TotalBytes), d.UsedPercent,
+				output.FormatBytes(d.WALBytes), output.FormatBytes(d.DataBytes), d.WALSegments, d.Source)
+		}
 		output.Printf("  >> %s\n", a.Recommendation)
+	}
+
+	// Recovery assessment (classification projection)
+	if r := result.Recovery; r != nil {
+		output.Section("Recovery Assessment")
+		auth := r.Authority
+		if auth == "" {
+			auth = "(ambiguous)"
+		}
+		output.Printf("Authority: %s\n", auth)
+		if len(r.Disposable) > 0 {
+			output.Printf("Disposable: %s\n", strings.Join(r.Disposable, ", "))
+		}
+		switch {
+		case r.Blocked:
+			output.Printf("Deadlock: BLOCKED (%s)\n", r.Reason)
+			output.Printf("Recovery set (must be escrow-reversible): %s\n", strings.Join(r.RecoverySet, ", "))
+			output.Printf(">> hasteward repair -e cnpg -c %s -n %s --unwedge\n",
+				t.p.Config().ClusterName, t.p.Config().Namespace)
+		case r.Reason == "ambiguous_authority":
+			output.Println("Authority ambiguous — deadlock breaker unavailable (refuse).")
+		}
 	}
 
 	// Suggested commands
@@ -968,27 +1052,162 @@ func parseTimelineInt(tl string) int64 {
 	return n
 }
 
-func cnpgParseDiskPercent(dfOutput string) int {
-	lines := strings.Split(strings.TrimSpace(dfOutput), "\n")
-	if len(lines) < 2 {
-		return -1
-	}
-	fields := strings.Fields(lines[len(lines)-1])
-	if len(fields) < 5 {
-		return -1
-	}
-	pctStr := strings.TrimSuffix(fields[4], "%")
-	pct, err := strconv.Atoi(pctStr)
-	if err != nil {
-		return -1
-	}
-	return pct
-}
-
 func joinCNPGProbeNames(targets []cnpgProbeTarget) string {
 	names := make([]string, len(targets))
 	for i, t := range targets {
 		names[i] = t.Name
 	}
 	return strings.Join(names, ", ")
+}
+
+// --- Disk breakdown ---
+
+// cnpgDiskScript collects a df + du breakdown of a mounted pgdata volume. It is
+// read-only and needs no running postgres, so it works on a stranded PVC probe
+// (crash-looping / pod-gone instances) exactly as on a live pod — the universal
+// disk collector. Combined with pg_controldata it reuses the same probe pod.
+const cnpgDiskScript = `echo "===DF==="; df -k /var/lib/postgresql/data 2>/dev/null | tail -1
+echo "===WAL==="; du -sk /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | tail -1
+echo "===PGDATA==="; du -sk /var/lib/postgresql/data/pgdata 2>/dev/null | tail -1
+echo "===SEGMENTS==="; ls -1 /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | grep -cE '^[0-9A-F]{24}$'`
+
+// parseDiskStats parses cnpgDiskScript output into a DiskStats. Source records how
+// the data was obtained so an unreadable instance is explicit, never a silent zero.
+func parseDiskStats(raw, source string) *model.DiskStats {
+	ds := &model.DiskStats{Source: source}
+	secs := map[string]string{}
+	cur := ""
+	for _, line := range strings.Split(raw, "\n") {
+		l := strings.TrimSpace(line)
+		switch l {
+		case "===DF===", "===WAL===", "===PGDATA===", "===SEGMENTS===":
+			cur = strings.Trim(l, "=")
+			continue
+		}
+		if cur != "" && l != "" && secs[cur] == "" {
+			secs[cur] = l
+		}
+	}
+	if df := secs["DF"]; df != "" {
+		// Filesystem 1K-blocks Used Available Use% Mounted-on
+		if f := strings.Fields(df); len(f) >= 5 {
+			ds.TotalBytes = kbToBytes(f[1])
+			ds.UsedBytes = kbToBytes(f[2])
+			ds.FreeBytes = kbToBytes(f[3])
+			ds.UsedPercent = parsePct(f[4])
+		}
+	}
+	if w := secs["WAL"]; w != "" {
+		ds.WALBytes = kbToBytes(strings.Fields(w)[0])
+	}
+	if p := secs["PGDATA"]; p != "" {
+		ds.DataBytes = kbToBytes(strings.Fields(p)[0]) - ds.WALBytes
+		if ds.DataBytes < 0 {
+			ds.DataBytes = 0
+		}
+	}
+	if s := secs["SEGMENTS"]; s != "" {
+		ds.WALSegments, _ = strconv.Atoi(strings.TrimSpace(s))
+	}
+	return ds
+}
+
+// cnpgFillTotal backfills TotalBytes from the PVC capacity when df didn't report it.
+func cnpgFillTotal(ds *model.DiskStats, capacityBytes int64) {
+	if ds != nil && ds.TotalBytes == 0 && capacityBytes > 0 {
+		ds.TotalBytes = capacityBytes
+	}
+}
+
+func kbToBytes(s string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n * 1024
+}
+
+func parsePct(s string) int {
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(s), "%"))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// --- Classification + recovery (projection over existing signals) ---
+
+// classifyInstance answers "can this PVC ever be authoritative again?" as a
+// projection over signals triage already computes. It fails closed: anything not
+// provably disposable (unreadable data, split-brain, unknown timeline) is Unknown.
+func classifyInstance(isPrimary, isAuthority, hasData, safeToHeal, behindTL, sameTL bool) model.Classification {
+	if !hasData || !safeToHeal {
+		return model.ClassUnknown // unreadable, or ambiguous authority → refuse
+	}
+	if isPrimary || isAuthority {
+		return model.ClassAuthoritative
+	}
+	if behindTL {
+		return model.ClassDisposable // dead timeline; re-clone is its only path home
+	}
+	if sameTL {
+		return model.ClassRecoverable // same timeline; can rejoin without a wipe
+	}
+	return model.ClassUnknown
+}
+
+// deriveRecovery projects the per-instance classifications into a Recovery block:
+// whether the cluster is in a breakable deadlock and what must be escrow-reversible.
+// Returns nil for a healthy cluster (nothing disposable, no deadlock).
+func deriveRecovery(assessments []model.InstanceAssessment, comparison model.DataComparison,
+	primaryName, clusterPhase string, primaryRunning bool) *model.Recovery {
+
+	if !comparison.SafeToHeal || primaryName == "" {
+		// authority cannot be established unambiguously → refuse
+		return &model.Recovery{Reason: "ambiguous_authority"}
+	}
+
+	var disposable []string
+	diskFullDisposable := false
+	for _, a := range assessments {
+		if a.Classification != model.ClassDisposable {
+			continue
+		}
+		disposable = append(disposable, a.Pod)
+		for _, n := range a.Notes {
+			if strings.Contains(n, "disk full") {
+				diskFullDisposable = true
+			}
+		}
+	}
+	if len(disposable) == 0 {
+		return nil // nothing disposable → no recovery action to describe
+	}
+
+	rec := &model.Recovery{Authority: primaryName, Disposable: disposable}
+
+	// RecoverySet = what must be escrow-reversible before any clear. If the authority
+	// is down, it must be reversible too (it has to boot after we free the replicas).
+	set := make([]string, 0, len(disposable)+1)
+	if !primaryRunning {
+		set = append(set, primaryName)
+	}
+	set = append(set, disposable...)
+	rec.RecoverySet = set
+
+	frozen := strings.Contains(strings.ToLower(clusterPhase), "not enough disk space")
+	if frozen && diskFullDisposable && !primaryRunning {
+		rec.Blocked = true
+		rec.Reason = "disk_full_disposable_replica"
+	}
+	return rec
+}
+
+// cnpgOrdinal extracts the trailing instance ordinal from a CNPG pod name.
+func cnpgOrdinal(pod string) string {
+	if pod == "" {
+		return "none"
+	}
+	parts := strings.Split(pod, "-")
+	return parts[len(parts)-1]
 }
