@@ -44,6 +44,7 @@
 |-------|-|
 | [CLI Reference](docs/reference/CLI.md) | Subcommands and global flags |
 | [Examples](docs/Examples.md) | CLI usage examples for every subcommand |
+| [Container Usage](docs/ContainerUsage.md) | Run HASteward via full `docker run` commands against a cluster |
 | [Backups](docs/Backups.md) | Backup model, snapshot tags, retention |
 | [Safety Gates](docs/SafetyGates.md) | Repair and bootstrap safety matrices |
 | [Operator Mode](docs/Operator.md) | CRDs, annotations, scheduler |

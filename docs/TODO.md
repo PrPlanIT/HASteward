@@ -31,6 +31,23 @@ Configure S3 targets with object lock for ransomware-resistant backups.
 
 ## P1 — High
 
+### Fix escrow tempdir / deadlock on containerized backup-stream
+
+When run as a container, restic can't write temp packs unless `/tmp` is writable
+(`open /tmp/restic-temp-pack-…: no such file or directory`), and the
+`pg_dumpall | restic backup --stdin` pipe then **deadlocks** instead of erroring
+(`fatal error: all goroutines are asleep - deadlock!`). Two fixes:
+
+- **Don't depend on the caller** passing `--tmpfs /tmp` + `RESTIC_CACHE_DIR` — provision a
+  guaranteed-writable tempdir (set `$TMPDIR` / restic temp + cache dirs) inside the escrow path.
+- **Fail fast on a restic error:** close the pipe and propagate instead of blocking the dump
+  writer. See `src/engine/backup/cnpg.go:107` (`BackupDump`) and `src/k8s/stream.go:67`
+  (`ExecPipeOut`).
+
+Workaround documented in `docs/ContainerUsage.md`:
+`--tmpfs /tmp:size=4g -e RESTIC_CACHE_DIR=/backups/.restic-cache`. Hit live healing
+`zitadel-postgres` from a workstation.
+
 ### Standalone engine
 
 Backup/restore for bare database containers not managed by CNPG or MariaDB Operator.
