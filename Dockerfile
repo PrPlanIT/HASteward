@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.26.1-alpine3.23 AS builder
+FROM docker.io/library/golang:1.26.4-alpine3.24 AS builder
 WORKDIR /src
 COPY go.mod ./
 COPY go.sum* ./
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     -o /hasteward ./cmd/hasteward
 
 # Fetch restic binary
-FROM docker.io/library/alpine:3.23.3 AS restic
+FROM docker.io/library/alpine:3.24.0 AS restic
 ARG TARGETOS
 ARG TARGETARCH
 RUN apk add --no-cache curl bzip2 && \
