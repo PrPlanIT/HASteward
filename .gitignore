@@ -1,3 +1,9 @@
 hasteward
 *.exe
 .cache/
+
+# StageFreight generated artifacts — only badges are committed. The rest are
+# per-run outputs (deps reports, lint/security reports, pipeline state, preset
+# cache) that the pipeline regenerates and must not be tracked.
+.stagefreight/*
+!.stagefreight/badges/
