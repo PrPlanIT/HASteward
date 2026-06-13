@@ -62,6 +62,12 @@ type cnpgRepair struct {
 
 func (r *cnpgRepair) Name() string { return "cnpg" }
 
+// OperationLock takes the exclusive cluster lease for the duration of the repair.
+func (r *cnpgRepair) OperationLock(ctx context.Context) (func(), error) {
+	cfg := r.p.Config()
+	return cnpgjob.AcquireClusterLock(ctx, cfg.Namespace, cfg.ClusterName, "repair")
+}
+
 // Assess runs a full triage of the CNPG cluster and discovers heal prerequisites.
 func (r *cnpgRepair) Assess(ctx context.Context) (*model.TriageResult, error) {
 	output.Section("Phase 1: Triage")

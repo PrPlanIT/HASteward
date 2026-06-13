@@ -53,6 +53,12 @@ type galeraRepair struct {
 
 func (g *galeraRepair) Name() string { return "galera" }
 
+// OperationLock is a no-op for Galera — it does not share the CNPG cluster-scoped
+// reconciliation switch / fencedInstances annotation that the lease guards.
+func (g *galeraRepair) OperationLock(ctx context.Context) (func(), error) {
+	return func() {}, nil
+}
+
 // PreAssess is a no-op for Galera — the CNPG disk-full deadlock breaker (Phase 0)
 // does not apply.
 func (g *galeraRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {

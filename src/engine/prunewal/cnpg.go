@@ -60,6 +60,14 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	instanceNum := *cfg.InstanceNumber
 	targetPod := fmt.Sprintf("%s-%d", cfg.ClusterName, instanceNum)
 
+	// Serialize against other HASteward mutations on this cluster (shared reconcile
+	// switch + read-modify-write fencedInstances annotation).
+	release, lockErr := cnpgjob.AcquireClusterLock(ctx, ns, cfg.ClusterName, "prune-wal")
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer release()
+
 	result := &model.PruneWALResult{
 		Engine:   "cnpg",
 		Cluster:  model.ObjectRef{Name: cfg.ClusterName, Namespace: ns},

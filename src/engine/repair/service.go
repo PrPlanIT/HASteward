@@ -15,6 +15,16 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	start := time.Now()
 	result := &model.RepairResult{Engine: r.Name()}
 
+	// Phase -1: Serialize against other HASteward mutations on this cluster. The whole
+	// operation runs under one exclusive cluster lock — repair/unwedge/prune-WAL share the
+	// cnpg.io/reconciliationLoop switch and the read-modify-write fencedInstances
+	// annotation, so concurrent operations would corrupt each other's ownership window.
+	release, err := r.OperationLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	// Phase 0: Deadlock breaker. Inert unless --unwedge and a breakable deadlock is
 	// detected; when it fires it clears disposable datadirs offline (escrow-gated)
 	// so the subsequent Assess finds a healthy primary instead of aborting.
