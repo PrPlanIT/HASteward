@@ -2,14 +2,13 @@ package prunewal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/engine/cnpgjob"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -18,7 +17,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 func init() {
@@ -186,32 +184,6 @@ echo "Total pgdata after prune: $TOTAL_REMAINING"
 echo "=== WAL prune complete ==="
 `
 
-	fenceApplied := false
-	walPodCreated := false
-
-	cleanup := func() {
-		if walPodCreated {
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, walPodName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-		}
-		if fenceApplied {
-			common.WarnLog("WAL prune interrupted — fence left in place for safety. Instance %s is still fenced.", targetPod)
-			common.WarnLog("To remove fence: kubectl annotate cluster %s -n %s cnpg.io/fencedInstances-", cfg.ClusterName, ns)
-		}
-	}
-
-	// Step 1: Fence
-	output.Bullet(0, "1. Fence instance %s", targetPod)
-	if err := w.fenceInstance(ctx, targetPod); err != nil {
-		return nil, fmt.Errorf("failed to fence %s: %w", targetPod, err)
-	}
-	fenceApplied = true
-	time.Sleep(3 * time.Second)
-
-	// Step 2: Create WAL prune pod
-	output.Bullet(0, "2. Create WAL prune pod to clear pg_wal")
-
 	uid, gid := parseInt64(postgresUID), parseInt64(postgresGID)
 
 	walPod := &corev1.Pod{
@@ -247,104 +219,26 @@ echo "=== WAL prune complete ==="
 		},
 	}
 
-	_, err = c.Clientset.CoreV1().Pods(ns).Create(ctx, walPod, metav1.CreateOptions{})
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("failed to create WAL prune pod: %w", err)
-	}
-	walPodCreated = true
-	time.Sleep(2 * time.Second)
-
-	// Step 3: Aggressively delete target pod until WAL prune pod acquires PVC
-	output.Bullet(0, "3. Acquiring PVC from fenced pod")
-	deleteTimeout := cfg.DeleteTimeout
-	if deleteTimeout <= 0 {
-		deleteTimeout = 300
-	}
-
-	acquired := false
-	deleteCount := 0
-	for elapsed := 0; elapsed < deleteTimeout; elapsed++ {
-		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, walPodName, metav1.GetOptions{})
-		phase := "Pending"
-		if hpErr == nil {
-			phase = string(hp.Status.Phase)
-		}
-		if phase == "Running" || phase == "Succeeded" {
-			common.InfoLog("WAL prune pod acquired PVC after %d deletes", deleteCount)
-			acquired = true
-			break
-		}
-		if phase == "Failed" {
-			w.logHealPodOutput(ctx, walPodName)
-			cleanup()
-			return nil, fmt.Errorf("WAL prune pod failed before acquiring PVC")
-		}
-		delErr := c.Clientset.CoreV1().Pods(ns).Delete(ctx, targetPod, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
-		})
-		if delErr == nil {
-			deleteCount++
-		}
-		time.Sleep(1 * time.Second)
+	// Fence → disable reconcile → acquire the PVC → prune WAL → re-enable → unfence,
+	// via the shared primitive repair uses. The reconcile bracket is what makes the
+	// PVC handoff reliable on a responsive cluster (no unwinnable delete race).
+	output.Bullet(0, "Fence, acquire the PVC, prune pg_wal, and restore")
+	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
+		Namespace:          ns,
+		ClusterName:        cfg.ClusterName,
+		TargetPod:          targetPod,
+		TargetPVC:          targetPVC,
+		HelperPod:          walPod,
+		HelperPodName:      walPodName,
+		Label:              "wal-prune",
+		DeleteTimeoutSec:   cfg.DeleteTimeout,
+		CompleteTimeoutSec: 150,
+	}); err != nil {
+		return nil, err
 	}
 
-	if !acquired {
-		cleanup()
-		return nil, fmt.Errorf("timeout: WAL prune pod never acquired PVC after %ds", deleteTimeout)
-	}
-
-	// Step 4: Wait for WAL prune to complete
-	output.Bullet(0, "4. Waiting for WAL prune to complete")
-	succeeded := false
-	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
-		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, walPodName, metav1.GetOptions{})
-		if hpErr != nil {
-			continue
-		}
-		if string(hp.Status.Phase) == "Succeeded" {
-			succeeded = true
-			break
-		}
-		if string(hp.Status.Phase) == "Failed" {
-			w.logHealPodOutput(ctx, walPodName)
-			cleanup()
-			return nil, fmt.Errorf("WAL prune pod FAILED")
-		}
-	}
-
-	if !succeeded {
-		w.logHealPodOutput(ctx, walPodName)
-		cleanup()
-		return nil, fmt.Errorf("WAL prune pod timed out")
-	}
-
-	// Display output
-	w.logHealPodOutput(ctx, walPodName)
-
-	// Cleanup WAL prune pod
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, walPodName, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	walPodCreated = false
-	time.Sleep(3 * time.Second)
-
-	// Step 5: Unfence
-	output.Bullet(0, "5. Removing fence for %s", targetPod)
-	if err := w.unfenceInstance(ctx, targetPod); err != nil {
-		common.WarnLog("Failed to unfence %s: %v", targetPod, err)
-	}
-	fenceApplied = false
-
-	// Delete old pod to clear CrashLoopBackOff
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, targetPod, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	time.Sleep(5 * time.Second)
-
-	// Wait for pod to come back
-	output.Bullet(0, "6. Waiting for %s to come back online", targetPod)
+	// Wait for the operator to recreate + restart the instance on its PVC.
+	output.Bullet(0, "Waiting for %s to come back online", targetPod)
 	for i := 0; i < 30; i++ {
 		time.Sleep(10 * time.Second)
 		pod, podErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
@@ -357,92 +251,6 @@ echo "=== WAL prune complete ==="
 
 	common.WarnLog("%s did not become ready within timeout. CNPG may still be reconciling.", targetPod)
 	return result, nil
-}
-
-// fenceInstance adds a pod to the CNPG fenced instances annotation.
-func (w *cnpgPruner) fenceInstance(ctx context.Context, pod string) error {
-	c := k8s.GetClients()
-	cfg := w.p.Config()
-
-	// Get current fence list
-	obj, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Get(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	annotations := k8s.GetNestedMap(obj, "metadata", "annotations")
-	current := provider.ParseFencedInstances(annotations)
-
-	// Check if already fenced
-	for _, f := range current {
-		if f == pod {
-			common.InfoLog("Instance %s already fenced", pod)
-			return nil
-		}
-	}
-
-	// Add to list
-	newList := append(current, pod)
-	fencedJSON, _ := json.Marshal(newList)
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"cnpg.io/fencedInstances":%q}}}`, string(fencedJSON))
-	_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// unfenceInstance removes a pod from the CNPG fenced instances annotation.
-func (w *cnpgPruner) unfenceInstance(ctx context.Context, pod string) error {
-	c := k8s.GetClients()
-	cfg := w.p.Config()
-
-	// Get current fence list
-	obj, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Get(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	annotations := k8s.GetNestedMap(obj, "metadata", "annotations")
-	current := provider.ParseFencedInstances(annotations)
-
-	// Remove target
-	var remaining []string
-	for _, f := range current {
-		if f != pod {
-			remaining = append(remaining, f)
-		}
-	}
-
-	if len(remaining) == 0 {
-		// Remove annotation entirely
-		patch := `{"metadata":{"annotations":{"cnpg.io/fencedInstances":null}}}`
-		_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-			ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	} else {
-		fencedJSON, _ := json.Marshal(remaining)
-		patch := fmt.Sprintf(`{"metadata":{"annotations":{"cnpg.io/fencedInstances":%q}}}`, string(fencedJSON))
-		_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-			ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	}
-	return err
-}
-
-// logHealPodOutput fetches and displays logs from a heal pod.
-func (w *cnpgPruner) logHealPodOutput(ctx context.Context, podName string) {
-	c := k8s.GetClients()
-	cfg := w.p.Config()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		common.DebugLog("Failed to get heal pod logs: %v", err)
-		return
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	if len(data) > 0 {
-		common.InfoLog("Heal pod output:\n%s", string(data))
-	}
 }
 
 // resolvePVC finds the PVC name for a given CNPG pod.
@@ -511,11 +319,6 @@ func (w *cnpgPruner) discoverPostgresInfo(ctx context.Context, triageResult *mod
 		return "", "", "", fmt.Errorf("could not determine postgres image from cluster")
 	}
 	return image, "26", "26", nil // default postgres UID/GID
-}
-
-// ptr returns a pointer to the given value.
-func ptr[T any](v T) *T {
-	return &v
 }
 
 // parseInt64 parses a string to int64, returning 0 on failure.

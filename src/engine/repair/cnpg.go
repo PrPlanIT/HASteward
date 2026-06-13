@@ -2,9 +2,7 @@ package repair
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +10,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
 	"github.com/PrPlanIT/HASteward/src/engine/backup"
+	"github.com/PrPlanIT/HASteward/src/engine/cnpgjob"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -20,7 +19,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const cnpgDumpFilename = "pgdumpall.sql"
@@ -407,13 +405,16 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 		},
 	}
 
-	if err := r.runOfflinePVCJob(ctx, offlinePVCJob{
-		targetPod:     targetPod,
-		targetPVC:     targetPVC,
-		helperPod:     healPod,
-		helperPodName: healPodName,
-		label:         "heal",
-		completeSec:   cfg.HealTimeout,
+	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
+		Namespace:          ns,
+		ClusterName:        cfg.ClusterName,
+		TargetPod:          targetPod,
+		TargetPVC:          targetPVC,
+		HelperPod:          healPod,
+		HelperPodName:      healPodName,
+		Label:              "heal",
+		DeleteTimeoutSec:   cfg.DeleteTimeout,
+		CompleteTimeoutSec: cfg.HealTimeout,
 	}); err != nil {
 		return err
 	}
@@ -432,92 +433,6 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 
 	common.WarnLog("%s did not become ready within timeout. CNPG may still be reconciling.", targetPod)
 	return nil
-}
-
-// fenceInstance appends a pod to the fenced instances list.
-func (r *cnpgRepair) fenceInstance(ctx context.Context, pod string) error {
-	cfg := r.p.Config()
-	c := k8s.GetClients()
-
-	// Get current fence list
-	obj, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Get(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	annotations := k8s.GetNestedMap(obj, "metadata", "annotations")
-	current := provider.ParseFencedInstances(annotations)
-
-	// Check if already fenced
-	for _, f := range current {
-		if f == pod {
-			common.InfoLog("Instance %s already fenced", pod)
-			return nil
-		}
-	}
-
-	// Add to list
-	newList := append(current, pod)
-	fencedJSON, _ := json.Marshal(newList)
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"cnpg.io/fencedInstances":%q}}}`, string(fencedJSON))
-	_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// unfenceInstance removes a pod from the fenced instances list.
-func (r *cnpgRepair) unfenceInstance(ctx context.Context, pod string) error {
-	cfg := r.p.Config()
-	c := k8s.GetClients()
-
-	// Get current fence list
-	obj, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Get(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	annotations := k8s.GetNestedMap(obj, "metadata", "annotations")
-	current := provider.ParseFencedInstances(annotations)
-
-	// Remove target
-	var remaining []string
-	for _, f := range current {
-		if f != pod {
-			remaining = append(remaining, f)
-		}
-	}
-
-	if len(remaining) == 0 {
-		// Remove annotation entirely
-		patch := `{"metadata":{"annotations":{"cnpg.io/fencedInstances":null}}}`
-		_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-			ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	} else {
-		fencedJSON, _ := json.Marshal(remaining)
-		patch := fmt.Sprintf(`{"metadata":{"annotations":{"cnpg.io/fencedInstances":%q}}}`, string(fencedJSON))
-		_, err = c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Patch(
-			ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	}
-	return err
-}
-
-// logHealPodOutput fetches and displays logs from a heal pod.
-func (r *cnpgRepair) logHealPodOutput(ctx context.Context, podName string) {
-	cfg := r.p.Config()
-	c := k8s.GetClients()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		common.DebugLog("Failed to get heal pod logs: %v", err)
-		return
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	if len(data) > 0 {
-		common.InfoLog("Heal pod output:\n%s", string(data))
-	}
 }
 
 // displayFinalStatus shows the current cluster state after healing.

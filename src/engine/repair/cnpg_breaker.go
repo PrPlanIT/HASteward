@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PrPlanIT/HASteward/src/engine/cnpgjob"
 	"github.com/PrPlanIT/HASteward/src/output"
 
 	corev1 "k8s.io/api/core/v1"
@@ -88,13 +89,16 @@ echo "pgdata cleared."`
 		},
 	}
 
-	if err := r.runOfflinePVCJob(ctx, offlinePVCJob{
-		targetPod:     targetPod,
-		targetPVC:     targetPVC,
-		helperPod:     clearPod,
-		helperPodName: clearPodName,
-		label:         "clear",
-		completeSec:   300,
+	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
+		Namespace:          ns,
+		ClusterName:        cfg.ClusterName,
+		TargetPod:          targetPod,
+		TargetPVC:          targetPVC,
+		HelperPod:          clearPod,
+		HelperPodName:      clearPodName,
+		Label:              "clear",
+		DeleteTimeoutSec:   cfg.DeleteTimeout,
+		CompleteTimeoutSec: 300,
 	}); err != nil {
 		return err
 	}
