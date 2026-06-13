@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"syscall"
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -225,6 +226,26 @@ func (e *resticPVCEscrow) Cleanup(ctx context.Context, refs []EscrowRef) error {
 		}
 	}
 	return nil
+}
+
+// EstimateCaptureBytes sums each PVC's used bytes: a PVC-files tarball is roughly
+// the used size (restic dedup/compression only reduces it), so the sum is a safe
+// upper-ish estimate for the pre-capture space guard.
+func (e *resticPVCEscrow) EstimateCaptureBytes(recoverySet []string, usedBytes map[string]int64) int64 {
+	var total int64
+	for _, pvc := range recoverySet {
+		total += usedBytes[pvc]
+	}
+	return total
+}
+
+// AvailableBytes statfs the restic repository path for free space.
+func (e *resticPVCEscrow) AvailableBytes() (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(e.cfg.BackupsPath, &st); err != nil {
+		return 0, fmt.Errorf("statfs %s: %w", e.cfg.BackupsPath, err)
+	}
+	return int64(st.Bavail) * st.Bsize, nil
 }
 
 // waitRunning polls until the helper pod is Running (exec needs a live pod),

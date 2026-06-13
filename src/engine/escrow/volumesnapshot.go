@@ -3,6 +3,7 @@ package escrow
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -133,4 +134,17 @@ func (e *volumeSnapshotEscrow) Cleanup(ctx context.Context, refs []EscrowRef) er
 		}
 	}
 	return nil
+}
+
+// EstimateCaptureBytes is ~0: a CSI VolumeSnapshot is copy-on-write — it
+// references existing blocks, it does not copy the volume.
+func (e *volumeSnapshotEscrow) EstimateCaptureBytes(recoverySet []string, usedBytes map[string]int64) int64 {
+	return 0
+}
+
+// AvailableBytes: a CoW snapshot consumes negligible host-side space up front, so
+// there is no budget to check — report effectively unbounded, making the space
+// guard a no-op for this provider.
+func (e *volumeSnapshotEscrow) AvailableBytes() (int64, error) {
+	return math.MaxInt64, nil
 }

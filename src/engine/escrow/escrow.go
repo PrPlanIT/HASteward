@@ -49,4 +49,16 @@ type EscrowProvider interface {
 	// Cleanup releases escrow resources once the rollback window has closed
 	// (e.g. the cluster is confirmed healthy). Best-effort; never gates safety.
 	Cleanup(ctx context.Context, refs []EscrowRef) error
+
+	// EstimateCaptureBytes returns the escrow-store bytes Capture will consume for
+	// the recovery set, given each PVC's used size (from triage's DiskStats). A
+	// copy-on-write provider (VolumeSnapshot) returns ~0; a full-copy provider
+	// (ResticPVC) returns the sum. Paired with AvailableBytes for a fail-closed
+	// space check BEFORE any capture, so the operator sees "requires X, only Y
+	// available" rather than discovering a full repo mid-escrow.
+	EstimateCaptureBytes(recoverySet []string, usedBytes map[string]int64) int64
+
+	// AvailableBytes returns free space in the escrow backing store, or an error if
+	// it cannot be determined.
+	AvailableBytes() (int64, error)
 }
