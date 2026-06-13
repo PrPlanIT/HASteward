@@ -2,6 +2,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,6 +20,13 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	// so the subsequent Assess finds a healthy primary instead of aborting.
 	sink.Step("pre-assess", "running")
 	if _, err := r.PreAssess(ctx); err != nil {
+		// A dry-run preview is a clean stop, not a failure: do not fall through to
+		// Assess (which aborts while the cluster is still frozen).
+		if errors.Is(err, errDryRunPreview) {
+			sink.Step("pre-assess", "done")
+			result.Duration = time.Since(start)
+			return result, nil
+		}
 		return nil, err
 	}
 	sink.Step("pre-assess", "done")

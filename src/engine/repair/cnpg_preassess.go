@@ -2,6 +2,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +22,11 @@ import (
 // breakerReserveBytes is headroom that must remain free in the escrow store
 // beyond the capture estimate, so an escrow cannot fill the repository to the brim.
 const breakerReserveBytes int64 = 1 << 30 // 1 GiB
+
+// errDryRunPreview is returned by PreAssess in --dry-run mode after it previews
+// the plan, so the repair service stops cleanly instead of falling through to
+// Assess (which would abort — the cluster is still frozen, by design).
+var errDryRunPreview = errors.New("unwedge dry-run: preview complete, no changes made")
 
 // PreAssess is repair Phase 0: the CNPG deadlock breaker. It is INERT unless
 // --unwedge (cfg.DeadlockBreaker) is set AND triage reports a breakable deadlock
@@ -55,6 +61,7 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 		return nil, fmt.Errorf("unwedge REFUSED: deadlock present but authority is ambiguous or no disposable target — manual review required")
 	}
 
+	common.InfoLog("Breakable deadlock detected: authority=%s disposable=%v recoverySet=%v", rec.Authority, rec.Disposable, rec.RecoverySet)
 	output.Section("Phase 0: Deadlock breaker (--unwedge)")
 	output.Field("Authority", rec.Authority)
 	output.Field("Disposable", strings.Join(rec.Disposable, ", "))
@@ -79,11 +86,13 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 	output.Field("Escrow", fmt.Sprintf("%s — ~%s needed, %s available", prov.Name(), output.FormatBytes(est), output.FormatBytes(avail)))
 
 	if cfg.DryRun {
+		common.InfoLog("DRY RUN: would escrow %v (~%s) via %s, clear %v, preserve authority %s — no changes made",
+			rec.RecoverySet, output.FormatBytes(est), prov.Name(), rec.Disposable, rec.Authority)
 		output.Section("Dry run — no escrow captured, no datadir cleared")
 		output.Field("Would clear (disposable)", strings.Join(rec.Disposable, ", "))
 		output.Field("Would preserve (authority)", rec.Authority)
 		output.Field("Would escrow via", fmt.Sprintf("%s (~%s)", prov.Name(), output.FormatBytes(est)))
-		return t, nil
+		return t, errDryRunPreview
 	}
 
 	// 3. Capture + verify the escrow (the rollback that authorizes the clear).
