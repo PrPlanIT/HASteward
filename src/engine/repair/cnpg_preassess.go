@@ -147,10 +147,66 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 		return nil, fmt.Errorf("unwedge: datadirs cleared but cluster did not recover; escrow %v RETAINED: %w", escrowIDs(refs), err)
 	}
 
-	output.Success("Deadlock broken: %d disposable datadir(s) cleared, cluster unfrozen, authority %s up", len(rec.Disposable), rec.Authority)
+	common.InfoLog("Cluster unfrozen, authority %s up — re-cloning %d cleared disposable(s)", rec.Authority, len(rec.Disposable))
+
+	// 8. Re-clone each cleared disposable from the now-up primary. CNPG will NOT
+	//    pg_basebackup an emptied EXISTING PVC (it pg_rewinds and reconcile-loops),
+	//    and the normal heal plan classifies a cleared replica needsHeal=false — so
+	//    the breaker owns the full break, healing the disposables it cleared rather
+	//    than leaving them stuck. Reuses the standard healInstance (fence → clear →
+	//    pg_basebackup → unfence) with a live heal config (the primary is up now).
+	healCfg, err := r.discoverHealConfigLive(ctx)
+	if err != nil {
+		return confirm, fmt.Errorf("unwedge: cluster unfrozen but heal config unavailable (escrow %v RETAINED): %w", escrowIDs(refs), err)
+	}
+	for _, inst := range rec.Disposable {
+		if err := r.healInstance(ctx, inst, inst, healCfg); err != nil {
+			return confirm, fmt.Errorf("unwedge: %s cleared but re-clone failed (escrow %v RETAINED): %w", inst, escrowIDs(refs), err)
+		}
+	}
+
+	output.Success("Deadlock broken: cleared + re-cloned %d disposable(s); authority %s up", len(rec.Disposable), rec.Authority)
 	// Escrow is intentionally NOT cleaned up here: the rollback window stays open
 	// until the cluster is confirmed healthy (a later phase / the operator).
 	return confirm, nil
+}
+
+// discoverHealConfigLive builds the heal prerequisites from a LIVE cluster fetch
+// (the cached r.p.Cluster() is stale after the unfreeze). CNPG runs postgres as
+// uid/gid 26; the rest comes from the now-up primary.
+func (r *cnpgRepair) discoverHealConfigLive(ctx context.Context) (*healConfig, error) {
+	cfg := r.p.Config()
+	c := k8s.GetClients()
+
+	cl, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("re-fetch cluster: %w", err)
+	}
+	primary := k8s.GetNestedString(cl, "status", "currentPrimary")
+	if primary == "" {
+		return nil, fmt.Errorf("no current primary after unfreeze")
+	}
+	pp, err := c.Clientset.CoreV1().Pods(cfg.Namespace).Get(ctx, primary, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("primary pod %s: %w", primary, err)
+	}
+
+	uid := "26"
+	if res, e := k8s.ExecCommand(ctx, primary, cfg.Namespace, "postgres", []string{"id", "-u", "postgres"}); e == nil {
+		uid = strings.TrimSpace(res.Stdout)
+	}
+	gid := "26"
+	if res, e := k8s.ExecCommand(ctx, primary, cfg.Namespace, "postgres", []string{"id", "-g", "postgres"}); e == nil {
+		gid = strings.TrimSpace(res.Stdout)
+	}
+
+	return &healConfig{
+		primaryIP:      pp.Status.PodIP,
+		postgresUID:    uid,
+		postgresGID:    gid,
+		imageName:      k8s.GetNestedString(cl, "spec", "imageName"),
+		serviceAccount: pp.Spec.ServiceAccountName,
+	}, nil
 }
 
 // usedBytesByPVC pulls each recovery-set PVC's used bytes from triage's DiskStats,
