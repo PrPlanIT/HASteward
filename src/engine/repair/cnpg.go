@@ -311,40 +311,13 @@ func (r *cnpgRepair) healInstance(ctx context.Context, targetPod, targetPVC stri
 	caSecret := cfg.ClusterName + "-ca"
 	replSecret := cfg.ClusterName + "-replication"
 
-	fenceApplied := false
-	healPodCreated := false
-
 	output.Section("Healing " + targetPod)
 	output.Bullet(0, "1. Fence instance (CNPG stops managing it)")
-	output.Bullet(0, "2. Create heal pod, then aggressively delete fenced pod")
+	output.Bullet(0, "2. Disable reconcile loop so the operator yields the PVC")
 	output.Bullet(0, "3. Clear pgdata on PVC %s (PVC preserved)", targetPVC)
 	output.Bullet(0, "4. Run pg_basebackup from primary (%s)", hcfg.primaryIP)
-	output.Bullet(0, "5. Remove fence (CNPG takes over the replica)")
+	output.Bullet(0, "5. Remove fence + re-enable reconcile (CNPG takes over the replica)")
 
-	// Cleanup function for rescue on error
-	cleanup := func() {
-		if healPodCreated {
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, healPodName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			common.InfoLog("Heal pod %s deleted", healPodName)
-		}
-		if fenceApplied {
-			common.WarnLog("HEAL FAILED - fence left in place for safety. Instance %s is still fenced.", targetPod)
-			common.WarnLog("To remove fence: kubectl annotate cluster %s -n %s cnpg.io/fencedInstances-", cfg.ClusterName, ns)
-		}
-	}
-
-	// STEP 1: Fence the instance
-	common.InfoLog("STEP 1: Fencing %s", targetPod)
-	if err := r.fenceInstance(ctx, targetPod); err != nil {
-		return fmt.Errorf("failed to fence %s: %w", targetPod, err)
-	}
-	fenceApplied = true
-	time.Sleep(3 * time.Second)
-
-	// STEP 2: Create heal pod
-	common.InfoLog("STEP 2: Creating heal pod %s", healPodName)
 	uid, _ := strconv.ParseInt(hcfg.postgresUID, 10, 64)
 	gid, _ := strconv.ParseInt(hcfg.postgresGID, 10, 64)
 
@@ -434,122 +407,18 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 		},
 	}
 
-	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, healPod, metav1.CreateOptions{})
-	if err != nil {
-		cleanup()
-		return fmt.Errorf("failed to create heal pod: %w", err)
-	}
-	healPodCreated = true
-	time.Sleep(2 * time.Second)
-
-	// STEP 3: Aggressively delete target pod until heal pod acquires PVC
-	common.InfoLog("STEP 3: Aggressively deleting %s until heal pod acquires PVC", targetPod)
-	deleteTimeout := cfg.DeleteTimeout
-	if deleteTimeout <= 0 {
-		deleteTimeout = 300
+	if err := r.runOfflinePVCJob(ctx, offlinePVCJob{
+		targetPod:     targetPod,
+		targetPVC:     targetPVC,
+		helperPod:     healPod,
+		helperPodName: healPodName,
+		label:         "heal",
+		completeSec:   cfg.HealTimeout,
+	}); err != nil {
+		return err
 	}
 
-	deleteCount := 0
-	acquired := false
-	for elapsed := 0; elapsed < deleteTimeout; elapsed++ {
-		// Check heal pod status
-		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, healPodName, metav1.GetOptions{})
-		phase := "Pending"
-		if hpErr == nil {
-			phase = string(hp.Status.Phase)
-		}
-
-		if phase == "Running" || phase == "Succeeded" {
-			common.InfoLog("Heal pod acquired PVC after %d deletes", deleteCount)
-			acquired = true
-			break
-		}
-		if phase == "Failed" {
-			r.logHealPodOutput(ctx, healPodName)
-			cleanup()
-			return fmt.Errorf("heal pod failed before acquiring PVC")
-		}
-
-		// Delete target pod
-		delErr := c.Clientset.CoreV1().Pods(ns).Delete(ctx, targetPod, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
-		})
-		if delErr == nil {
-			deleteCount++
-		}
-		if deleteCount > 0 && deleteCount%10 == 0 {
-			common.DebugLog("Deleted %d times, heal pod status: %s", deleteCount, phase)
-		}
-
-		time.Sleep(1 * time.Second)
-	}
-
-	if !acquired {
-		r.logHealPodOutput(ctx, healPodName)
-		cleanup()
-		return fmt.Errorf("timeout: heal pod never acquired PVC after %ds", deleteTimeout)
-	}
-
-	// STEP 4: Wait for heal pod to complete pg_basebackup
-	common.InfoLog("STEP 4: Waiting for heal pod to complete pg_basebackup")
-	healTimeout := cfg.HealTimeout
-	if healTimeout <= 0 {
-		healTimeout = 600
-	}
-
-	succeeded := false
-	for i := 0; i < healTimeout/10; i++ {
-		time.Sleep(10 * time.Second)
-		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, healPodName, metav1.GetOptions{})
-		if hpErr != nil {
-			continue
-		}
-		phase := string(hp.Status.Phase)
-		if phase == "Succeeded" {
-			common.InfoLog("Heal pod completed successfully")
-			succeeded = true
-			break
-		}
-		if phase == "Failed" {
-			r.logHealPodOutput(ctx, healPodName)
-			cleanup()
-			return fmt.Errorf("heal pod FAILED for %s", targetPod)
-		}
-		if i > 0 && i%6 == 0 {
-			common.InfoLog("Heal pod still running... (%ds elapsed)", (i+1)*10)
-		}
-	}
-
-	if !succeeded {
-		r.logHealPodOutput(ctx, healPodName)
-		cleanup()
-		return fmt.Errorf("heal pod timed out after %ds for %s", healTimeout, targetPod)
-	}
-
-	// Fetch and display heal pod logs
-	r.logHealPodOutput(ctx, healPodName)
-
-	// Cleanup heal pod
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, healPodName, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	healPodCreated = false
-	time.Sleep(5 * time.Second)
-
-	// STEP 5: Remove fence (only our target, preserve others)
-	common.InfoLog("STEP 5: Removing fence for %s", targetPod)
-	if err := r.unfenceInstance(ctx, targetPod); err != nil {
-		common.WarnLog("Failed to unfence %s: %v", targetPod, err)
-	}
-	fenceApplied = false
-
-	// Delete old pod to clear CrashLoopBackOff history
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, targetPod, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	time.Sleep(5 * time.Second)
-
-	// Wait for pod to come back online
+	// Wait for the operator to recreate + start the healed replica on its PVC.
 	common.InfoLog("Waiting for %s to come back online", targetPod)
 	for i := 0; i < 30; i++ {
 		time.Sleep(10 * time.Second)
