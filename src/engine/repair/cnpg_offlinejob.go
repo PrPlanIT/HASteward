@@ -79,12 +79,12 @@ func (r *cnpgRepair) runOfflinePVCJob(ctx context.Context, job offlinePVCJob) er
 
 	// STEP 2: Disable the reconciliation loop so the operator stops recreating the
 	// instance pod (the unwinnable PVC race). ALWAYS re-enabled on return.
-	if err := r.setReconciliationLoop(ctx, false); err != nil {
+	if err := r.setReconciliationLoop(ctx, true /* disabled */); err != nil {
 		cleanup()
 		return fmt.Errorf("failed to disable reconciliation loop: %w", err)
 	}
 	defer func() {
-		if err := r.setReconciliationLoop(ctx, true); err != nil {
+		if err := r.setReconciliationLoop(ctx, false /* re-enabled */); err != nil {
 			common.WarnLog("CRITICAL: failed to re-enable reconciliation loop on cluster %s: %v", cfg.ClusterName, err)
 			common.WarnLog("Re-enable manually: kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop-", cfg.ClusterName, ns)
 		}
