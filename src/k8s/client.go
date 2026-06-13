@@ -30,6 +30,14 @@ var (
 	MariaDBGVR = schema.GroupVersionResource{
 		Group: "k8s.mariadb.com", Version: "v1alpha1", Resource: "mariadbs",
 	}
+	// VolumeSnapshot CRDs (external-snapshotter). PVCs and StorageClasses are
+	// core/storage typed via Clientset, so only the snapshot kinds need a GVR.
+	VolumeSnapshotGVR = schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
+	}
+	VolumeSnapshotClassGVR = schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotclasses",
+	}
 )
 
 // SecretGVK is the GVK for core/v1 Secrets (used by unstructured lookups).
