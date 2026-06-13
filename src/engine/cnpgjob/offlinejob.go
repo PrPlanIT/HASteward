@@ -64,6 +64,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 
 	helperCreated := false
 	fenceApplied := false
+	reconcileDisabled := false
 
 	cleanup := func() {
 		if helperCreated {
@@ -89,17 +90,16 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	time.Sleep(3 * time.Second)
 
 	// STEP 2: Disable the reconciliation loop so the operator stops recreating the
-	// instance pod (the unwinnable PVC race). ALWAYS re-enabled on return.
+	// instance pod (the unwinnable PVC race). The deferred restore is the GUARANTEED
+	// safety net: it runs on every exit path — including panic and, crucially, context
+	// cancellation (via a DETACHED context) — and retries, because a cluster left with
+	// reconciliation disabled is the worst outcome this primitive can produce.
 	if err := SetReconciliationLoop(ctx, ns, job.ClusterName, true /* disabled */); err != nil {
 		cleanup()
 		return fmt.Errorf("failed to disable reconciliation loop: %w", err)
 	}
-	defer func() {
-		if err := SetReconciliationLoop(ctx, ns, job.ClusterName, false /* re-enabled */); err != nil {
-			common.WarnLog("CRITICAL: failed to re-enable reconciliation loop on cluster %s: %v", job.ClusterName, err)
-			common.WarnLog("Re-enable manually: kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop-", job.ClusterName, ns)
-		}
-	}()
+	reconcileDisabled = true
+	defer restoreReconciliation(job.ClusterName, ns, &reconcileDisabled)
 
 	// STEP 3: Create the helper pod. It stays Pending until the PVC is free.
 	common.InfoLog("STEP 2: Creating %s pod %s", job.Label, job.HelperPodName)
@@ -188,16 +188,52 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	helperCreated = false
 	time.Sleep(3 * time.Second)
 
-	// STEP 6: Unfence. On return the deferred reconcile re-enable lets the operator
-	// recreate and start the instance on its preserved (now-prepared) PVC. There is no
-	// stale instance pod to clean up — reconciliation was off, so none was ever made.
-	common.InfoLog("STEP 5: Removing fence for %s", job.TargetPod)
+	// STEP 6: Restore the operator BEFORE handing the instance back. Re-enabling
+	// reconciliation first exits the hazardous "reconcile disabled" state as early as
+	// possible: if anything dies between here and the unfence, the cluster is left in the
+	// SAFE state (reconcile on, instance still fenced) rather than the dangerous one
+	// (reconcile off, instance live). On success this makes the deferred restore a no-op.
+	common.InfoLog("STEP 5: Re-enabling reconciliation on %s", job.ClusterName)
+	if err := SetReconciliationLoop(ctx, ns, job.ClusterName, false /* re-enabled */); err != nil {
+		// Leave reconcileDisabled=true so the deferred safety net retries on a detached ctx.
+		common.WarnLog("re-enable on the success path failed; deferred safety net will retry: %v", err)
+	} else {
+		reconcileDisabled = false
+	}
+
+	// STEP 7: Unfence — hand the instance to the now-live operator, which recreates and
+	// starts it on its preserved (now-prepared) PVC. No stale instance pod to clean up —
+	// reconciliation was off during the handoff, so none was ever made.
+	common.InfoLog("STEP 6: Removing fence for %s", job.TargetPod)
 	if err := Unfence(ctx, ns, job.ClusterName, job.TargetPod); err != nil {
 		common.WarnLog("Failed to unfence %s: %v", job.TargetPod, err)
 	}
 	fenceApplied = false
 
 	return nil
+}
+
+// restoreReconciliation re-enables the reconciliation loop as a GUARANTEED safety net,
+// using a DETACHED context so it runs even when the caller's ctx was cancelled — the very
+// situation in which an inline re-enable would also fail and silently leave the cluster
+// unreconciled. It retries, and no-ops if the success path already restored it.
+func restoreReconciliation(cluster, ns string, stillDisabled *bool) {
+	if !*stillDisabled {
+		return
+	}
+	for attempt := 1; attempt <= 5; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := SetReconciliationLoop(ctx, ns, cluster, false /* re-enabled */)
+		cancel()
+		if err == nil {
+			*stillDisabled = false
+			return
+		}
+		common.WarnLog("attempt %d/5: failed to re-enable reconciliation on %s: %v", attempt, cluster, err)
+		time.Sleep(3 * time.Second)
+	}
+	common.WarnLog("CRITICAL: could not re-enable reconciliation on cluster %s after 5 attempts.", cluster)
+	common.WarnLog("Re-enable manually: kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop-", cluster, ns)
 }
 
 // Fence appends a pod to the cluster's cnpg.io/fencedInstances annotation.
