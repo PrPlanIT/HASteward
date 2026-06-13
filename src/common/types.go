@@ -38,4 +38,5 @@ type Config struct {
 	DeleteTimeout  int
 	Kubeconfig     string
 	Verbose        bool
+	DryRun         bool // preview destructive actions without executing (set from --dry-run)
 }

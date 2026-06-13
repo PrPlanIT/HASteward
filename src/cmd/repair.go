@@ -20,6 +20,13 @@ var repairCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		Cfg.DryRun = IsDryRun()
+
+		// The deadlock breaker's verified escrow IS the rollback that authorizes a
+		// destructive datadir clear, so it can never be skipped.
+		if Cfg.Unwedge && Cfg.NoEscrow {
+			return fmt.Errorf("--unwedge cannot be combined with --no-escrow: the verified escrow is the rollback that authorizes clearing a datadir")
+		}
 
 		if !Cfg.NoEscrow {
 			if Cfg.BackupsPath == "" {

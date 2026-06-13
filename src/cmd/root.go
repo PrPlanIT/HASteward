@@ -53,6 +53,7 @@ func init() {
 	pf.StringVar(&Cfg.BackupsPath, "backups-path", common.Env("BACKUPS_PATH", ""), "Restic repository path or URL")
 	pf.StringVar(&Cfg.ResticPassword, "restic-password", common.EnvRaw("RESTIC_PASSWORD", common.Env("RESTIC_PASSWORD", "")), "Restic repository encryption password")
 	pf.BoolVar(&Cfg.NoEscrow, "no-escrow", common.EnvBool("NO_ESCROW", false), "Skip pre-repair escrow backup")
+	pf.BoolVar(&Cfg.Unwedge, "unwedge", common.EnvBool("UNWEDGE", false), "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
 	pf.BoolVar(&Cfg.WipeDatadir, "wipe-datadir", common.EnvBool("WIPE_DATADIR", false),
 		"Wipe entire datadir on target instance (not just grastate). Forces full SST\n"+
 			"reseed from donor. Use when local data is irrecoverably corrupted. Requires\n"+

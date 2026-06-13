@@ -78,6 +78,14 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 	}
 	output.Field("Escrow", fmt.Sprintf("%s — ~%s needed, %s available", prov.Name(), output.FormatBytes(est), output.FormatBytes(avail)))
 
+	if cfg.DryRun {
+		output.Section("Dry run — no escrow captured, no datadir cleared")
+		output.Field("Would clear (disposable)", strings.Join(rec.Disposable, ", "))
+		output.Field("Would preserve (authority)", rec.Authority)
+		output.Field("Would escrow via", fmt.Sprintf("%s (~%s)", prov.Name(), output.FormatBytes(est)))
+		return t, nil
+	}
+
 	// 3. Capture + verify the escrow (the rollback that authorizes the clear).
 	refs, err := prov.Capture(ctx, rec.RecoverySet)
 	if err != nil {
