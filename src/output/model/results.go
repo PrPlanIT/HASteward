@@ -69,7 +69,7 @@ type InstanceAssessment struct {
 	WsrepReady         string `json:"wsrepReady,omitempty"`
 	WsrepClusterStatus string `json:"wsrepClusterStatus,omitempty"`
 	CrashReason        string `json:"crashReason,omitempty"`
-	DiskPct            int    `json:"diskPct"` // legacy single percent (Galera); use Disk for the full breakdown
+	DiskPct            int    `json:"diskPct,omitempty"` // legacy single percent (Galera only); CNPG omits this and uses Disk. omitempty also drops a misleading 0 from an absent/failed probe.
 
 	// Per-instance disk breakdown (CNPG; populated for down instances via the PVC probe)
 	Disk *DiskStats `json:"disk,omitempty"`

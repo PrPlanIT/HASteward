@@ -714,7 +714,13 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		isCrashloop := crashloopSet[inst.Pod]
 		isStreaming := streamingSet[inst.Pod]
 		diskFull := inst.CrashReason == "disk_full"
+		// Prefer the universal PVC-probe breakdown (real even for down instances)
+		// over the running-pod df map (0 when the instance is down). One collector,
+		// two consumers: the breakdown feeds both these notes and the Disk field.
 		diskPct := data.diskUsage[inst.Pod]
+		if ds := data.diskStats[inst.Pod]; ds != nil && (ds.Source == "exec" || ds.Source == "pvc_probe") {
+			diskPct = ds.UsedPercent
+		}
 		hasData := inst.Source != "none"
 		instTL := strings.TrimSpace(inst.Timeline)
 		instLSN := strings.TrimSpace(inst.CheckpointLocation)
@@ -844,7 +850,6 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			Notes:          notes,
 			Recommendation: recommendation,
 			NeedsHeal:      needsHeal,
-			DiskPct:        diskPct,
 			Disk:           data.diskStats[inst.Pod],
 		})
 	}
