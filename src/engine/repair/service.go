@@ -14,6 +14,15 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	start := time.Now()
 	result := &model.RepairResult{Engine: r.Name()}
 
+	// Phase 0: Deadlock breaker. Inert unless --unwedge and a breakable deadlock is
+	// detected; when it fires it clears disposable datadirs offline (escrow-gated)
+	// so the subsequent Assess finds a healthy primary instead of aborting.
+	sink.Step("pre-assess", "running")
+	if _, err := r.PreAssess(ctx); err != nil {
+		return nil, err
+	}
+	sink.Step("pre-assess", "done")
+
 	// Phase 1: Assess
 	sink.Step("assess", "running")
 	triage, err := r.Assess(ctx)

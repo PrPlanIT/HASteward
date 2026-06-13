@@ -53,6 +53,12 @@ type galeraRepair struct {
 
 func (g *galeraRepair) Name() string { return "galera" }
 
+// PreAssess is a no-op for Galera — the CNPG disk-full deadlock breaker (Phase 0)
+// does not apply.
+func (g *galeraRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {
+	return nil, nil
+}
+
 // Assess runs a full triage of the Galera cluster.
 func (g *galeraRepair) Assess(ctx context.Context) (*model.TriageResult, error) {
 	output.Section("Phase 1: Triage")

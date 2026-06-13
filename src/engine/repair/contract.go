@@ -9,6 +9,9 @@ import (
 // Repairer is the engine-specific hook contract for repair operations.
 type Repairer interface {
 	Name() string
+	// PreAssess is repair Phase 0 — the deadlock breaker. Inert (returns nil)
+	// unless enabled (--unwedge) and a breakable deadlock is detected.
+	PreAssess(ctx context.Context) (*model.TriageResult, error)
 	Assess(ctx context.Context) (*model.TriageResult, error)
 	SafetyGate(ctx context.Context, triage *model.TriageResult) error
 	Escrow(ctx context.Context, triage *model.TriageResult) error

@@ -30,6 +30,7 @@ type Config struct {
 	FixBootstrap   bool // Reconfigure: clear grastate + remove bootstrap config on target instance
 	BackupsPath    string
 	NoEscrow       bool
+	Unwedge        bool // --unwedge: enable the CNPG disk-full deadlock breaker (escrow-gated offline datadir clear)
 	BackupMethod   string
 	Snapshot       string // Restic snapshot ID or "latest" (for restore)
 	ResticPassword string // Restic repository encryption password
