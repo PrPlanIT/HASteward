@@ -733,7 +733,13 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		aheadTL := instTL != "unknown" && pTL != "unknown" && parseTimelineInt(instTL) > parseTimelineInt(pTL)
 
 		isAuthority := inst.Pod == comparison.MostAdvanced
-		classification := classifyInstance(isPrimary, isAuthority, hasData, comparison.SafeToHeal, behindTL, sameTL)
+		// Same-timeline but behind AND not streaming = cannot catch up by replication:
+		// the WAL it needs has been recycled (shows as crash-looping or idle-not-streaming),
+		// so its only path home is a re-clone — disposable + needs heal, not "recoverable,
+		// wait for streaming". Disk-full (the breaker's deadlock domain) and just-missing
+		// pods (CNPG may recreate them and they may then stream) keep their own handling.
+		stranded := sameTL && behindLSN && !isStreaming && !isMissing && !diskFull
+		classification := classifyInstance(isPrimary, isAuthority, hasData, comparison.SafeToHeal, behindTL, sameTL, stranded)
 
 		var notes []string
 		var recommendation string
@@ -809,10 +815,11 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 					"CNPG should recreate the pod. If it does not, check cluster phase. " +
 					"May catch up via streaming if WAL is still available."
 			case isCrashloop:
-				notes = append(notes, "crash-looping")
-				recommendation = fmt.Sprintf("Same timeline but crash-looping. Check pod logs for root cause. "+
-					"If WAL is still available, may recover on restart. "+
-					"Otherwise needs heal.\n\n  %s", healCmd)
+				needsHeal = true
+				notes = append(notes, "crash-looping, not streaming")
+				recommendation = fmt.Sprintf("Same timeline but crash-looping and not streaming — the WAL needed to "+
+					"catch up has most likely been recycled, so it cannot rejoin by replication. Check pod logs to "+
+					"confirm the root cause, then heal (re-clone from primary).\n\n  %s", healCmd)
 			default:
 				needsHeal = true
 				recommendation = fmt.Sprintf("Not streaming. May catch up if WAL is still available. "+
@@ -1145,18 +1152,23 @@ func parsePct(s string) int {
 // classifyInstance answers "can this PVC ever be authoritative again?" as a
 // projection over signals triage already computes. It fails closed: anything not
 // provably disposable (unreadable data, split-brain, unknown timeline) is Unknown.
-func classifyInstance(isPrimary, isAuthority, hasData, safeToHeal, behindTL, sameTL bool) model.Classification {
+//
+// stranded marks a same-timeline replica that is behind and cannot catch up by
+// replication — the WAL it needs has been recycled (it shows as crash-looping or
+// idle-not-streaming). Same timeline, but a re-clone is its only path home, so it
+// is disposable, not recoverable.
+func classifyInstance(isPrimary, isAuthority, hasData, safeToHeal, behindTL, sameTL, stranded bool) model.Classification {
 	if !hasData || !safeToHeal {
 		return model.ClassUnknown // unreadable, or ambiguous authority → refuse
 	}
 	if isPrimary || isAuthority {
 		return model.ClassAuthoritative
 	}
-	if behindTL {
-		return model.ClassDisposable // dead timeline; re-clone is its only path home
+	if behindTL || stranded {
+		return model.ClassDisposable // dead timeline, or same-TL but WAL-stranded; re-clone is its only path home
 	}
 	if sameTL {
-		return model.ClassRecoverable // same timeline; can rejoin without a wipe
+		return model.ClassRecoverable // same timeline, streaming/current; rejoins without a wipe
 	}
 	return model.ClassUnknown
 }

@@ -12,22 +12,25 @@ func TestClassifyInstance(t *testing.T) {
 	tests := []struct {
 		name                                        string
 		isPrimary, isAuthority, hasData, safeToHeal bool
-		behindTL, sameTL                            bool
+		behindTL, sameTL, stranded                  bool
 		want                                        model.Classification
 	}{
-		{"unreadable -> unknown (fail closed)", false, false, false, true, true, false, model.ClassUnknown},
-		{"split-brain -> unknown (fail closed)", false, false, true, false, true, false, model.ClassUnknown},
-		{"primary -> authoritative", true, true, true, true, false, false, model.ClassAuthoritative},
-		{"most-advanced non-primary -> authoritative", false, true, true, true, false, true, model.ClassAuthoritative},
-		{"behind timeline -> disposable", false, false, true, true, true, false, model.ClassDisposable},
-		{"same timeline -> recoverable", false, false, true, true, false, true, model.ClassRecoverable},
-		{"unknown timeline -> unknown (fail closed)", false, false, true, true, false, false, model.ClassUnknown},
+		{"unreadable -> unknown (fail closed)", false, false, false, true, true, false, false, model.ClassUnknown},
+		{"split-brain -> unknown (fail closed)", false, false, true, false, true, false, false, model.ClassUnknown},
+		{"primary -> authoritative", true, true, true, true, false, false, false, model.ClassAuthoritative},
+		{"most-advanced non-primary -> authoritative", false, true, true, true, false, true, false, model.ClassAuthoritative},
+		{"behind timeline -> disposable", false, false, true, true, true, false, false, model.ClassDisposable},
+		{"same timeline, streaming -> recoverable", false, false, true, true, false, true, false, model.ClassRecoverable},
+		{"same timeline but stranded (WAL recycled) -> disposable", false, false, true, true, false, true, true, model.ClassDisposable},
+		{"unknown timeline -> unknown (fail closed)", false, false, true, true, false, false, false, model.ClassUnknown},
 		// a behind-timeline instance is NEVER disposable if it's somehow the authority
-		{"authority wins over behind-timeline", false, true, true, true, true, false, model.ClassAuthoritative},
+		{"authority wins over behind-timeline", false, true, true, true, true, false, false, model.ClassAuthoritative},
+		// stranded likewise never overrides authority
+		{"authority wins over stranded", false, true, true, true, false, true, true, model.ClassAuthoritative},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyInstance(tt.isPrimary, tt.isAuthority, tt.hasData, tt.safeToHeal, tt.behindTL, tt.sameTL)
+			got := classifyInstance(tt.isPrimary, tt.isAuthority, tt.hasData, tt.safeToHeal, tt.behindTL, tt.sameTL, tt.stranded)
 			if got != tt.want {
 				t.Errorf("classifyInstance() = %q, want %q", got, tt.want)
 			}
