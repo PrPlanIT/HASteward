@@ -61,9 +61,14 @@ type wsrepStatus struct {
 }
 
 // effectiveSeqno holds the best seqno from multiple sources for one instance.
+// Known is true ONLY when Value came from a trustworthy, positive source. A
+// node whose position could not be read (belly-up/wedged, all sources absent)
+// has Known=false and MUST NOT be treated as seqno 0 — it is undeterminable,
+// and authority cannot be declared while any node is unknown.
 type effectiveSeqno struct {
 	Value  int64
 	Source string
+	Known  bool
 }
 
 // galeraTriageData holds all data collected during the triage collection phase.
@@ -75,6 +80,9 @@ type galeraTriageData struct {
 	crashloopPods   []corev1.Pod
 	grastateData    []grastate
 	wsrepMap        map[string]*wsrepStatus
+	logRecovered    map[string]int64  // pod -> seqno scraped from mariadbd log (GCache estimate — HINT only)
+	logRecUUID      map[string]string // pod -> cluster UUID scraped from mariadbd log
+	wsrepRecovered  map[string]int64  // pod -> EXACT seqno from a fresh fenced --wsrep-recover (AUTHORITATIVE)
 	effectiveSeqnos map[string]*effectiveSeqno
 	diskUsage       map[string]int
 	pvcStates       map[string]map[string]string // node -> {"storage": "Bound", "galera": "Bound"}
@@ -82,6 +90,7 @@ type galeraTriageData struct {
 	allNodesDown    bool
 	anyNodeReady    bool
 	primaryMembers  []string
+	recoveryUUIDs   []string // non-zero cluster UUIDs seen in the operator's galeraRecovery
 	bestSeqnoNode   string
 	bestSeqnoValue  int64
 }
@@ -110,6 +119,9 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 	ns := t.p.Config().Namespace
 	data := &galeraTriageData{
 		wsrepMap:        make(map[string]*wsrepStatus),
+		logRecovered:    make(map[string]int64),
+		logRecUUID:      make(map[string]string),
+		wsrepRecovered:  make(map[string]int64),
 		effectiveSeqnos: make(map[string]*effectiveSeqno),
 		diskUsage:       make(map[string]int),
 		pvcStates:       make(map[string]map[string]string),
@@ -289,7 +301,8 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 					") ORDER BY VARIABLE_NAME"})
 		if err != nil {
 			common.WarnLog("wsrep query failed on %s: %v — wsrep data for this node will be incomplete", pod.Name, err)
-			data.wsrepMap[pod.Name] = &wsrepStatus{}
+			// LastCommitted -1 = unknown. NEVER let a failed query masquerade as seqno 0.
+			data.wsrepMap[pod.Name] = &wsrepStatus{LastCommitted: -1}
 			continue
 		}
 		ws := parseWsrepStatus(result.Stdout)
@@ -299,6 +312,37 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 
 	if len(data.wsrepMap) == 0 {
 		output.Warn("No running+ready pods to query wsrep status from")
+	}
+
+	// --- Belly-up seqno recovery (running pod, but wsrep unreadable) ---
+	// A pod can be Running yet have mysqld wedged (non-Primary, socket dead),
+	// holding the datadir so --wsrep-recover cannot run and grastate is -1.
+	// Its true position was logged at startup ("WSREP: Recovered position:")
+	// or is bounded by the GCache ("found gapless sequence X-Y"). Scrape it —
+	// read-only — so the node isn't silently treated as blind/zero.
+	for _, pod := range data.runningPods {
+		if crashloopNames[pod.Name] {
+			continue
+		}
+		ws := data.wsrepMap[pod.Name]
+		if ws != nil && ws.LastCommitted >= 0 {
+			continue // live query worked; no scrape needed
+		}
+		if gsSeqno := grastateSeqnoFor(data.grastateData, pod.Name); gsSeqno >= 0 {
+			continue // clean grastate already gives a position
+		}
+		seqno, uuid := t.scrapeRecoveredPosition(ctx, ns, pod.Name)
+		if seqno >= 0 {
+			data.logRecovered[pod.Name] = seqno
+			if uuid != "" {
+				data.logRecUUID[pod.Name] = uuid
+			}
+			common.InfoLog("Recovered %s position from mariadbd log: seqno=%d uuid=%s (belly-up fallback)",
+				pod.Name, seqno, uuid)
+		} else {
+			common.WarnLog("%s is running-but-wedged and its position is UNREAD (log rotated); "+
+				"authority will be marked ambiguous until it is fenced + wsrep-recovered", pod.Name)
+		}
 	}
 
 	// --- Crash reasons ---
@@ -320,6 +364,9 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 	output.Section("Effective Seqno (data freshness)")
 	crRecovered := getRecoveryMap(t.p.GaleraRecovery(), "recovered")
 	crState := getRecoveryMap(t.p.GaleraRecovery(), "state")
+	for _, m := range []map[string]interface{}{crRecovered, crState} {
+		data.recoveryUUIDs = append(data.recoveryUUIDs, recoveryUUIDsOf(m)...)
+	}
 
 	for _, gs := range data.grastateData {
 		ws := data.wsrepMap[gs.Pod]
@@ -330,32 +377,30 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		crRecSeqno := getRecoverySeqno(crRecovered, gs.Pod)
 		crStateSeqno := getRecoverySeqno(crState, gs.Pod)
 		grastateSeqno := parseInt64(gs.Seqno, -1)
-
-		candidates := []struct {
-			val    int64
-			source string
-		}{
-			{wsCommitted, "wsrep_last_committed"},
-			{crRecSeqno, "cr_recovered"},
-			{crStateSeqno, "cr_state"},
-			{grastateSeqno, "grastate"},
+		logSeqno := int64(-1)
+		if v, ok := data.logRecovered[gs.Pod]; ok {
+			logSeqno = v
+		}
+		recSeqno := int64(-1)
+		if v, ok := data.wsrepRecovered[gs.Pod]; ok {
+			recSeqno = v
 		}
 
-		best := int64(-1)
-		bestSource := "none"
-		for _, c := range candidates {
-			if c.val > best {
-				best = c.val
-				bestSource = c.source
-			}
+		es := deriveEffectiveSeqno(wsCommitted, crRecSeqno, crStateSeqno, grastateSeqno, logSeqno, recSeqno)
+		data.effectiveSeqnos[gs.Pod] = &es
+
+		knownStr := "KNOWN"
+		if !es.Known {
+			knownStr = "UNKNOWN(no authoritative source — hint only)"
 		}
+		output.Printf("%s: effective_seqno=%d [%s] (src=%s | authoritative: recover=%d live=%d grastate=%d | hints: gcache=%d cr_rec=%d)\n",
+			gs.Pod, es.Value, knownStr, es.Source, recSeqno, wsCommitted, grastateSeqno, logSeqno, crRecSeqno)
 
-		data.effectiveSeqnos[gs.Pod] = &effectiveSeqno{Value: best, Source: bestSource}
-		output.Printf("%s: effective_seqno=%d (source=%s, wsrep_last_committed=%d, cr_recovered=%d, grastate=%d)\n",
-			gs.Pod, best, bestSource, wsCommitted, crRecSeqno, grastateSeqno)
-
-		if best > data.bestSeqnoValue {
-			data.bestSeqnoValue = best
+		// Only a KNOWN (authoritative) position may set the most-advanced node.
+		// A node whose only data is the operator snapshot or a GCache estimate
+		// must never become the bootstrap target by default.
+		if es.Known && es.Value > data.bestSeqnoValue {
+			data.bestSeqnoValue = es.Value
 			data.bestSeqnoNode = gs.Pod
 		}
 	}
@@ -548,6 +593,17 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 			uuidSet[ws.ClusterStateUUID] = true
 		}
 	}
+	// Include UUIDs scraped from belly-up nodes' logs — a wedged node on a
+	// divergent history is invisible to grastate/wsrep and would otherwise
+	// hide the split.
+	for _, u := range data.logRecUUID {
+		if u != "" && u != "00000000-0000-0000-0000-000000000000" {
+			uuidSet[u] = true
+		}
+	}
+	for _, u := range data.recoveryUUIDs {
+		uuidSet[u] = true
+	}
 	if len(uuidSet) > 1 {
 		uuids := make([]string, 0, len(uuidSet))
 		for u := range uuidSet {
@@ -577,12 +633,30 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	if len(data.primaryMembers) > 0 {
 		pmSet := setFromSlice(data.primaryMembers)
 		for name, es := range data.effectiveSeqnos {
-			if !pmSet[name] && es.Value > bestPrimarySeqno && es.Value > 0 {
+			if !pmSet[name] && es.Known && es.Value > bestPrimarySeqno && es.Value > 0 {
 				splitBrain = append(splitBrain,
 					fmt.Sprintf("%s has seqno %d > primary best %d (%s)",
 						name, es.Value, bestPrimarySeqno, bestPrimaryPod))
 			}
 		}
+	}
+
+	// FAIL-CLOSED: any node whose position could not be determined makes the
+	// authority undeterminable. We must NEVER pick a bootstrap target while
+	// blind to a node — it may hold the most-advanced (or a divergent) history,
+	// and bootstrapping past it silently discards committed transactions. This
+	// is the safety net that turns "no evidence of a problem" into "prove it's
+	// safe" — the default must be closed, not open.
+	var unread []string
+	for _, gs := range data.grastateData {
+		if es, ok := data.effectiveSeqnos[gs.Pod]; !ok || !es.Known {
+			unread = append(unread, gs.Pod)
+		}
+	}
+	if len(unread) > 0 {
+		splitBrain = append(splitBrain,
+			"UNREAD SEQNO — authority undeterminable for: "+strings.Join(unread, ", ")+
+				" (fence + --wsrep-recover required before ANY bootstrap)")
 	}
 
 	safe := len(splitBrain) == 0
@@ -929,6 +1003,127 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 
 // --- Helpers ---
 
+// deriveEffectiveSeqno picks a node's effective seqno from its candidate sources
+// and marks whether it is authoritative (Known). Only a fresh --wsrep-recover, a
+// live wsrep_last_committed, or a CLEAN grastate (>0) may establish Known and
+// drive the authority/bootstrap decision. The operator's galeraRecovery snapshot
+// (cr_recovered/cr_state) and the GCache log figure are HINTS only — display,
+// never authoritative — because the operator's numbers are stale/unreliable
+// (they read 3292/3289 when --wsrep-recover proved every node at 552481).
+func deriveEffectiveSeqno(wsCommitted, crRec, crState, grastate, logSeqno, recSeqno int64) effectiveSeqno {
+	type cand struct {
+		val    int64
+		source string
+	}
+	authoritative := []cand{
+		{recSeqno, "wsrep_recover"},
+		{wsCommitted, "wsrep_last_committed"},
+		{grastate, "grastate"},
+	}
+	hints := []cand{
+		{logSeqno, "log_gcache_estimate"},
+		{crRec, "cr_recovered"},
+		{crState, "cr_state"},
+	}
+	best := int64(-1)
+	source := "none"
+	known := false
+	for _, c := range authoritative {
+		if c.val > 0 && c.val > best {
+			best, source, known = c.val, c.source, true
+		}
+	}
+	if !known { // no authoritative read — a hint may fill in a DISPLAY value only
+		for _, c := range hints {
+			if c.val > 0 && c.val > best {
+				best, source = c.val, c.source
+			}
+		}
+	}
+	return effectiveSeqno{Value: best, Source: source, Known: known}
+}
+
+// isAnythingAlive is the fail-SAFE gate for the fenced deep-recovery. It returns
+// true if ANY node is serving or making recovery progress — in which case triage
+// must NOT fence/touch the cluster (you don't defibrillate a conscious patient).
+// Only when this is false — provably nothing live — may triage escalate to the
+// fenced --wsrep-recover. Unsure ⇒ treat as alive (fail-safe): the function
+// returns false only on positive evidence that no member is participating.
+func isAnythingAlive(data *galeraTriageData) bool {
+	if len(data.primaryMembers) > 0 {
+		return true // a Primary component exists — cluster is (at least partly) serving
+	}
+	// Any pod whose mariadb container is Ready is serving, even if our live query
+	// happened to hiccup — do not fence it.
+	for _, pod := range data.runningPods {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Name == "mariadb" && cs.Ready {
+				return true
+			}
+		}
+	}
+	// wsrep local_state >= 1 (Joining/Donor/Joined/Synced) or a Primary status =
+	// participating/progressing.
+	for _, ws := range data.wsrepMap {
+		if ws != nil && (ws.ClusterStatus == "Primary" || ws.LocalState >= 1) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrapeRecoveredPosition reads a running pod's mariadbd log (read-only) and
+// extracts its WSREP position when live queries fail — the belly-up-but-running
+// case where mysqld is wedged non-Primary, holding the datadir so --wsrep-recover
+// cannot run and grastate is -1. Prefers the explicit startup line
+// "WSREP: Recovered position: <uuid>:<seqno>"; falls back to the high end of
+// "Recovering GCache ring buffer: found gapless sequence X-Y" as an upper bound.
+// Returns (-1, "") when the log has rotated past both.
+func (t *galeraTriage) scrapeRecoveredPosition(ctx context.Context, ns, pod string) (int64, string) {
+	c := k8s.GetClients()
+	logReq := c.Clientset.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: "mariadb"})
+	logBytes, err := logReq.DoRaw(ctx)
+	if err != nil || len(logBytes) == 0 {
+		return -1, ""
+	}
+	seqno := int64(-1)
+	uuid := ""
+	for _, line := range strings.Split(string(logBytes), "\n") {
+		if i := strings.Index(line, "Recovered position:"); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("Recovered position:"):])
+			if colon := strings.LastIndex(rest, ":"); colon > 0 {
+				if fields := strings.Fields(rest[colon+1:]); len(fields) > 0 {
+					if s := parseInt64(fields[0], -1); s > seqno {
+						seqno = s
+						uuid = strings.TrimSpace(rest[:colon])
+					}
+				}
+			}
+		} else if i := strings.Index(line, "found gapless sequence"); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("found gapless sequence"):])
+			if dash := strings.LastIndex(rest, "-"); dash > 0 {
+				if fields := strings.Fields(rest[dash+1:]); len(fields) > 0 {
+					if y := parseInt64(fields[0], -1); y > seqno {
+						seqno = y // GCache upper bound — enough to un-blind & compare
+					}
+				}
+			}
+		}
+	}
+	return seqno, uuid
+}
+
+// grastateSeqnoFor returns the parsed grastate seqno for a pod, or -1 if
+// absent/unclean.
+func grastateSeqnoFor(all []grastate, pod string) int64 {
+	for _, gs := range all {
+		if gs.Pod == pod {
+			return parseInt64(gs.Seqno, -1)
+		}
+	}
+	return -1
+}
+
 func parseGrastate(podName, source, raw string) grastate {
 	gs := grastate{
 		Pod: podName, Source: source,
@@ -1036,6 +1231,27 @@ func getRecoveryMap(recovery map[string]interface{}, key string) map[string]inte
 		}
 	}
 	return nil
+}
+
+// recoveryUUIDsOf extracts the distinct non-zero cluster UUIDs from a galera
+// recovery map ({pod: {uuid, seqno}}). Zero/empty UUIDs are placeholders.
+func recoveryUUIDsOf(m map[string]interface{}) []string {
+	var out []string
+	for _, v := range m {
+		entry, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		u, ok := entry["uuid"]
+		if !ok {
+			continue
+		}
+		us := strings.TrimSpace(fmt.Sprintf("%v", u))
+		if us != "" && us != "00000000-0000-0000-0000-000000000000" {
+			out = append(out, us)
+		}
+	}
+	return out
 }
 
 func getRecoverySeqno(m map[string]interface{}, podName string) int64 {

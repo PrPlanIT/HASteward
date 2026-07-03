@@ -29,6 +29,13 @@ const (
 	gcacheThreshold = int64(10000)
 	maxPhantomSeqno = int64(1e12)
 	bootstrapLockAn = "hasteward.prplanit.com/bootstrap-lock"
+	// mariadbDataDirUID owns /var/lib/mysql in the mariadb image. The wsrep-recover
+	// helper MUST run as this uid — mariadbd aborts if started as root.
+	mariadbDataDirUID = int64(999)
+	// galeraProviderSO is the Galera wsrep provider in the mariadb image. Without it
+	// (and wsrep_on=ON) mariadbd logs "WSREP: disabled, skipping position recovery"
+	// and returns no seqno.
+	galeraProviderSO = "/usr/lib/galera/libgalera_smm.so"
 )
 
 var (
@@ -718,8 +725,8 @@ func (b *galeraBootstrap) runWsrepRecover(ctx context.Context, podName, sa strin
 	pvcName := fmt.Sprintf("storage-%s", podName)
 	helperName := fmt.Sprintf("%s-wsrep-%s-%d", cfg.ClusterName, podName, time.Now().Unix())
 
-	rootUser := int64(0)
-	deadline := int64(120)
+	uid := mariadbDataDirUID
+	deadline := int64(150)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      helperName,
@@ -727,16 +734,26 @@ func (b *galeraBootstrap) runWsrepRecover(ctx context.Context, podName, sa strin
 			Labels:    map[string]string{"hasteward": "heal-helper"},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy:        corev1.RestartPolicyNever,
-			ServiceAccountName:   sa,
+			RestartPolicy:         corev1.RestartPolicyNever,
+			ServiceAccountName:    sa,
 			ActiveDeadlineSeconds: &deadline,
+			// Run as the datadir owner (999), NOT root — mariadbd's run-as-root guard
+			// aborts recovery and returns no position otherwise.
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser: &rootUser,
+				RunAsUser:  &uid,
+				RunAsGroup: &uid,
+				FSGroup:    &uid,
 			},
 			Containers: []corev1.Container{{
-				Name:    "wsrep-recover",
-				Image:   image,
-				Command: []string{"sh", "-c", "mariadbd --wsrep-recover --datadir=/var/lib/mysql --log-error-verbosity=3 2>&1; exit 0"},
+				Name:  "wsrep-recover",
+				Image: image,
+				// wsrep_on defaults OFF and the provider isn't auto-loaded in a bare
+				// mariadbd, so both are set explicitly — otherwise mariadbd logs
+				// "WSREP: disabled, skipping position recovery" and yields no seqno.
+				Command: []string{"sh", "-c", fmt.Sprintf(
+					"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
+						"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
+						"--log-error-verbosity=3 2>&1; exit 0", galeraProviderSO)},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "data", MountPath: "/var/lib/mysql"},
 				},
