@@ -22,7 +22,7 @@ func GenerateCLIReference(root *cobra.Command, w io.Writer) error {
 
 	// Global flags
 	if root.PersistentFlags().HasFlags() {
-		fmt.Fprintln(w, "## Global Flags\n")
+		fmt.Fprint(w, "## Global Flags\n\n")
 		fmt.Fprintln(w, "| Flag | Type | Default | Description |")
 		fmt.Fprintln(w, "|------|------|---------|-------------|")
 		root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
@@ -36,7 +36,7 @@ func GenerateCLIReference(root *cobra.Command, w io.Writer) error {
 	}
 
 	// Commands
-	fmt.Fprintln(w, "## Commands\n")
+	fmt.Fprint(w, "## Commands\n\n")
 	for _, cmd := range root.Commands() {
 		if cmd.Hidden || cmd.Name() == "help" || cmd.Name() == "completion" {
 			continue
