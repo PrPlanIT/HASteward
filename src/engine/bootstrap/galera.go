@@ -147,67 +147,91 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 		}
 	}
 
-	// Gate 2: Must have a best candidate
-	if triageResult.BestSeqnoNode == nil {
+	// Gate 2: a pre-fence candidate — OR a recoverable belly-up cluster.
+	//
+	// A Known best-seqno node normally names the bootstrap candidate up front. But
+	// a fully belly-up cluster — every mysqld crashed while holding its datadir, so
+	// grastate is -1 and NO node has a Known seqno — has none. That is exactly the
+	// case the fenced wsrep_recover exists to resolve: it re-derives each node's
+	// real uuid:seqno from InnoDB. So rather than abort, proceed into the fence +
+	// wsrep_recover and let selectCandidate establish authority from those
+	// AUTHORITATIVE positions; the post-recover gate in executeBootstrap then
+	// refuses a split-brain/ambiguous result without --force. If wsrep_recover
+	// finds nothing recoverable, the candidate guard aborts (after a harmless fence
+	// of an already-down cluster) and the deferred rescue restores state.
+	bellyUp := triageResult.BestSeqnoNode == nil
+	if bellyUp && len(triageResult.Assessments) == 0 {
+		result.Decision = model.BootstrapDecision{Eligible: false, Reason: "no nodes found to recover"}
+		return result, fmt.Errorf("ABORT: No nodes found. Cannot bootstrap")
+	}
+
+	var candidatePod, candidateUUID string
+	var candidateSeqno int64
+	if !bellyUp {
+		candidate := triageResult.BestSeqnoNode
+		candidatePod, candidateSeqno, candidateUUID = candidate.Pod, candidate.EffectiveSeqno, candidate.UUID
+
+		// Gate 3: ambiguity (multiple nodes at the same seqno). Hint-based — only
+		// meaningful with a Known candidate; belly-up defers this to the
+		// authoritative post-recover gate.
+		var competitors []string
+		for _, a := range triageResult.Assessments {
+			if a.Pod != candidatePod && a.EffectiveSeqno == candidateSeqno && candidateSeqno > 0 {
+				competitors = append(competitors, a.Pod)
+			}
+		}
+		ambiguous := len(competitors) > 0
+
+		// Gate 4: split-brain detection (pre-fence, hint-based).
+		safeToHeal := triageResult.DataComparison.SafeToHeal
+		forceRequired := ambiguous || !safeToHeal
+
 		result.Decision = model.BootstrapDecision{
-			Eligible: false,
-			Reason:   "no bootstrap candidate found — could not determine best seqno node",
+			Eligible:          true,
+			Reason:            "all nodes down, bootstrap candidate identified",
+			CandidatePod:      candidatePod,
+			CandidateSeqno:    candidateSeqno,
+			CandidateUUID:     candidateUUID,
+			AmbiguityDetected: ambiguous,
+			ForceRequired:     forceRequired,
+			SafeToProceed:     !forceRequired || cfg.Force,
+			Competitors:       competitors,
 		}
-		return result, fmt.Errorf("ABORT: Could not determine best seqno node. Cannot bootstrap")
-	}
 
-	candidate := triageResult.BestSeqnoNode
-	candidateSeqno := candidate.EffectiveSeqno
-
-	// Gate 3: Check for ambiguity (multiple nodes at same seqno)
-	var competitors []string
-	for _, a := range triageResult.Assessments {
-		if a.Pod != candidate.Pod && a.EffectiveSeqno == candidateSeqno && candidateSeqno > 0 {
-			competitors = append(competitors, a.Pod)
+		if ambiguous {
+			common.WarnLog("AMBIGUITY: Multiple nodes at seqno %d: %s and %v", candidateSeqno, candidatePod, competitors)
+			if !cfg.Force {
+				result.Decision.Reason = fmt.Sprintf("ambiguous: %s and %v all at seqno %d — use --force to pick %s",
+					candidatePod, competitors, candidateSeqno, candidatePod)
+				return result, fmt.Errorf("ABORT: Ambiguous bootstrap candidate. Multiple nodes at seqno %d. Re-run with --force to select %s",
+					candidateSeqno, candidatePod)
+			}
+			common.WarnLog("force=true — proceeding with %s despite ambiguity", candidatePod)
 		}
-	}
-	ambiguous := len(competitors) > 0
-
-	// Gate 4: Split-brain detection
-	safeToHeal := triageResult.DataComparison.SafeToHeal
-
-	forceRequired := ambiguous || !safeToHeal
-	safeToProceed := !forceRequired || cfg.Force
-
-	result.Decision = model.BootstrapDecision{
-		Eligible:          true,
-		Reason:            "all nodes down, bootstrap candidate identified",
-		CandidatePod:      candidate.Pod,
-		CandidateSeqno:    candidateSeqno,
-		CandidateUUID:     candidate.UUID,
-		AmbiguityDetected: ambiguous,
-		ForceRequired:     forceRequired,
-		SafeToProceed:     safeToProceed,
-		Competitors:       competitors,
-	}
-
-	if ambiguous {
-		common.WarnLog("AMBIGUITY: Multiple nodes at seqno %d: %s and %v",
-			candidateSeqno, candidate.Pod, competitors)
-		if !cfg.Force {
-			result.Decision.Reason = fmt.Sprintf("ambiguous: %s and %v all at seqno %d — use --force to pick %s",
-				candidate.Pod, competitors, candidateSeqno, candidate.Pod)
-			return result, fmt.Errorf("ABORT: Ambiguous bootstrap candidate. Multiple nodes at seqno %d. Re-run with --force to select %s",
-				candidateSeqno, candidate.Pod)
+		if !safeToHeal && !cfg.Force {
+			result.Decision.Reason = "split-brain detected — use --force to override"
+			return result, fmt.Errorf("ABORT: Split-brain detected. Re-run with --force to override")
 		}
-		common.WarnLog("force=true — proceeding with %s despite ambiguity", candidate.Pod)
+		output.Success("Bootstrap candidate: %s (seqno: %d, uuid: %s)", candidatePod, candidateSeqno, candidateUUID)
+	} else {
+		common.WarnLog("Belly-up cluster: no Known seqno on any node (grastate -1). Fencing + wsrep_recover will establish authority from authoritative positions.")
+		result.Decision = model.BootstrapDecision{
+			Eligible:      true,
+			Reason:        "belly-up — authority to be established by fenced wsrep_recover",
+			SafeToProceed: true, // the post-recover gate enforces --force on a real split-brain
+		}
+		output.Info("Belly-up recovery: authoritative candidate will be chosen from wsrep_recover results")
 	}
-
-	if !safeToHeal && !cfg.Force {
-		result.Decision.Reason = "split-brain detected — use --force to override"
-		return result, fmt.Errorf("ABORT: Split-brain detected. Re-run with --force to override")
-	}
-
-	output.Success("Bootstrap candidate: %s (seqno: %d, uuid: %s)", candidate.Pod, candidateSeqno, candidate.UUID)
 
 	// Build planned actions
 	stsRef := model.ObjectRef{Kind: "StatefulSet", Namespace: ns, Name: cfg.ClusterName}
 	crRef := clusterRef
+
+	markDesc, patchDesc := "<recovered candidate>", "Patch CR forceClusterBootstrapInPod=<recovered candidate>"
+	if candidatePod != "" {
+		markDesc = candidatePod
+		patchDesc = "Patch CR forceClusterBootstrapInPod=" + candidatePod
+	}
 
 	result.ActionsPlanned = []model.BootstrapAction{
 		{Phase: model.PhaseSuspend, Description: "Suspend MariaDB CR", Resource: &crRef},
@@ -215,8 +239,8 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 		{Phase: model.PhaseScaleDown, Description: "Scale StatefulSet to 0", Resource: &stsRef},
 		{Phase: model.PhaseWsrepRecover, Description: "Run wsrep_recover on all PVCs"},
 		{Phase: model.PhaseSafeBootClear, Description: "Clear stale safe_to_bootstrap flags"},
-		{Phase: model.PhaseBootstrapMark, Description: fmt.Sprintf("Set safe_to_bootstrap=1 on %s PVC", candidate.Pod)},
-		{Phase: model.PhaseClusterPatch, Description: "Patch CR forceClusterBootstrapInPod=" + candidate.Pod, Resource: &crRef},
+		{Phase: model.PhaseBootstrapMark, Description: fmt.Sprintf("Set safe_to_bootstrap=1 on %s PVC", markDesc)},
+		{Phase: model.PhaseClusterPatch, Description: patchDesc, Resource: &crRef},
 		{Phase: model.PhaseScaleUp, Description: fmt.Sprintf("Scale StatefulSet to %d", b.p.Replicas()), Resource: &stsRef},
 		{Phase: model.PhaseWaitReady, Description: "Wait for all pods Ready"},
 		{Phase: model.PhaseCleanup, Description: "Remove forceClusterBootstrapInPod, recovery status, and generation lock", Resource: &crRef},
@@ -232,14 +256,14 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 
 	// Phase 3: Execute
 	output.Section("Bootstrap Phase 3: Execute")
-	if err := b.executeBootstrap(ctx, candidate.Pod, triageResult.Assessments, result); err != nil {
+	if err := b.executeBootstrap(ctx, candidatePod, bellyUp, triageResult.Assessments, result); err != nil {
 		return result, err
 	}
 
 	return result, nil
 }
 
-func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod string, assessments []model.InstanceAssessment, result *model.BootstrapResult) error {
+func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod string, bellyUp bool, assessments []model.InstanceAssessment, result *model.BootstrapResult) error {
 	cfg := b.p.Config()
 	ns := cfg.Namespace
 	c := k8s.GetClients()
@@ -361,6 +385,18 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	if err != nil {
 		rescue()
 		return err
+	}
+
+	// STEP 4.5: Authority gate on the AUTHORITATIVE positions (belly-up path).
+	// wsrep_recover has now established each node's real uuid:seqno. If that reveals
+	// a genuine split-brain (>1 lineage group), refuse to bootstrap without --force:
+	// the fence + recover was to LEARN the truth, and discarding a divergent lineage
+	// is a human decision. A clean single lineage proceeds. (The Known-candidate
+	// path already gated split-brain pre-fence, on hints.) rescue() restores state.
+	if bellyUp && !cfg.Force && len(result.Decision.LineageGroups) > 1 {
+		rescue()
+		return fmt.Errorf("ABORT: wsrep_recover confirms split-brain across %d lineages — authoritative positions reported above. "+
+			"Re-run with --force to bootstrap from the majority lineage (candidate %s)", len(result.Decision.LineageGroups), candidatePod)
 	}
 
 	// Candidate validation guard — ensure selectCandidate returned a pod that exists in assessments
@@ -574,46 +610,7 @@ func (b *galeraBootstrap) selectCandidate(
 ) (string, error) {
 	cfg := b.p.Config()
 
-	// Build lineage groups keyed by UUID
-	groupMap := make(map[string]*model.LineageGroup)
-	for pod, rr := range recovered {
-		// Skip zero UUID (node never joined cluster)
-		if rr.UUID == zeroUUID || rr.UUID == "" {
-			common.WarnLog("Ignoring recovery result for %s: zero/empty UUID (node never joined cluster)", pod)
-			continue
-		}
-		// Skip phantom seqnos
-		if rr.Seqno < 0 || rr.Seqno > maxPhantomSeqno {
-			common.WarnLog("Ignoring recovery seqno for %s: %d (phantom/corrupt)", pod, rr.Seqno)
-			continue
-		}
-
-		g, ok := groupMap[rr.UUID]
-		if !ok {
-			g = &model.LineageGroup{UUID: rr.UUID}
-			groupMap[rr.UUID] = g
-		}
-		g.Members = append(g.Members, pod)
-		if rr.Seqno > g.MaxSeqno || (rr.Seqno == g.MaxSeqno && rr.LastCommitted > g.MaxCommitted) {
-			g.MaxSeqno = rr.Seqno
-			g.MaxCommitted = rr.LastCommitted
-			g.BestNode = pod
-		}
-	}
-
-	// Collect and sort groups by member count descending, then MaxSeqno descending
-	var groups []model.LineageGroup
-	for _, g := range groupMap {
-		sort.Strings(g.Members)
-		groups = append(groups, *g)
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		if len(groups[i].Members) != len(groups[j].Members) {
-			return len(groups[i].Members) > len(groups[j].Members)
-		}
-		return groups[i].MaxSeqno > groups[j].MaxSeqno
-	})
-
+	groups := buildLineageGroups(recovered)
 	result.Decision.LineageGroups = groups
 
 	if len(groups) == 0 {
@@ -708,6 +705,50 @@ func (b *galeraBootstrap) selectCandidate(
 	}
 
 	return candidatePod, nil
+}
+
+// buildLineageGroups partitions wsrep_recover results into lineage groups keyed by
+// cluster UUID, sorted by member count (descending) then MaxSeqno (descending) so
+// groups[0] is the majority lineage. Nodes with a zero/empty UUID (never joined) or
+// a phantom/corrupt seqno are excluded. More than one group means a genuine
+// split-brain — the signal the belly-up authority gate refuses without --force.
+func buildLineageGroups(recovered map[string]wsrepRecoverResult) []model.LineageGroup {
+	groupMap := make(map[string]*model.LineageGroup)
+	for pod, rr := range recovered {
+		if rr.UUID == zeroUUID || rr.UUID == "" {
+			common.WarnLog("Ignoring recovery result for %s: zero/empty UUID (node never joined cluster)", pod)
+			continue
+		}
+		if rr.Seqno < 0 || rr.Seqno > maxPhantomSeqno {
+			common.WarnLog("Ignoring recovery seqno for %s: %d (phantom/corrupt)", pod, rr.Seqno)
+			continue
+		}
+
+		g, ok := groupMap[rr.UUID]
+		if !ok {
+			g = &model.LineageGroup{UUID: rr.UUID}
+			groupMap[rr.UUID] = g
+		}
+		g.Members = append(g.Members, pod)
+		if rr.Seqno > g.MaxSeqno || (rr.Seqno == g.MaxSeqno && rr.LastCommitted > g.MaxCommitted) {
+			g.MaxSeqno = rr.Seqno
+			g.MaxCommitted = rr.LastCommitted
+			g.BestNode = pod
+		}
+	}
+
+	var groups []model.LineageGroup
+	for _, g := range groupMap {
+		sort.Strings(g.Members)
+		groups = append(groups, *g)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if len(groups[i].Members) != len(groups[j].Members) {
+			return len(groups[i].Members) > len(groups[j].Members)
+		}
+		return groups[i].MaxSeqno > groups[j].MaxSeqno
+	})
+	return groups
 }
 
 // runWsrepRecover runs mariadbd --wsrep-recover on a PVC via a helper pod
