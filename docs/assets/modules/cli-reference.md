@@ -95,7 +95,7 @@ bindings actually being shipped, never a stale copy.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--help`, `-h` | `bool` | `false` | help for generate |
-| `--output-dir` | `string` | `docs/modules` | output directory for generated fragments |
+| `--output-dir` | `string` | `docs/assets/modules` | output directory for generated fragments |
 
 ### `hasteward export`
 
