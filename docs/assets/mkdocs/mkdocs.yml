@@ -1,0 +1,120 @@
+# HASteward documentation site — built with MkDocs Material.
+#
+# Local live preview (no toolchain, no pipeline) — run from the repo root:
+#   docker run --rm -it -p 8001:8000 -w /docs -v "$PWD":/docs \
+#     docker.io/squidfunk/mkdocs-material:9 serve -f docs/assets/mkdocs/mkdocs.yml -a 0.0.0.0:8000
+#
+# Built + deployed by StageFreight itself (see .stagefreight.yml docs-site build + docs
+# pages target) to https://hasteward.prplanit.com on release tags.
+
+site_name: HASteward
+site_url: https://hasteward.prplanit.com
+site_description: >-
+  High Availability Steward — a Go CLI and Kubernetes operator for database cluster
+  triage, repair, backup, and restore.
+repo_name: PrPlanIT/HASteward
+repo_url: https://github.com/PrPlanIT/HASteward
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; PrPlanIT
+
+docs_dir: ../..
+
+# Kept in-repo for maintainers, never shipped to the site:
+#   design/planning/  → internal task list / RFCs
+#   assets/modules/   → generated reference fragments (assembled into pages via snippets)
+#   deploy/           → k8s manifests referenced by pages, not pages themselves
+exclude_docs: |
+  design/planning/
+  assets/modules/
+  assets/mkdocs/
+  deploy/
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/logo-192.png
+  favicon: assets/logo-192.png
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+      check_paths: false
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+# ── Navigation ──────────────────────────────────────────────────────────
+nav:
+  - Home: README.md
+  - Usage:
+      - Examples: usage/examples.md
+      - Backups: usage/backups.md
+      - Safety Gates: usage/safety-gates.md
+      - Operator Mode: usage/operator.md
+      - Container Usage: usage/container-usage.md
+  - Design:
+      - Overview: design/index.md
+      - Security Threat Model: design/security.md
+  - Reference:
+      - CLI: config/cli.md
+      - Environment Variables: config/environment.md
+  - About:
+      - Licensing: about/licensing.md

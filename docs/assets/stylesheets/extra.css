@@ -1,0 +1,88 @@
+/* HASteward documentation — brand accents + landing hero (overrides/home.html). */
+
+:root {
+  --hw-teal:       #0d9488; /* teal-600 */
+  --hw-teal-lm:    #14b8a6; /* teal-500 */
+  --hw-teal-light: #2dd4bf; /* teal-400 */
+  --hw-teal-deep:  #0f3d38; /* deep teal */
+}
+
+/* Section headings get a subtle brand underline. */
+.md-typeset h2 {
+  border-bottom: .05rem solid color-mix(in srgb, var(--hw-teal) 35%, transparent);
+  padding-bottom: .2rem;
+}
+
+/* Header logo: give the transparent PNG a little breathing room. */
+.md-header__button.md-logo img { height: 1.9rem; width: auto; }
+
+/* ── Landing splash (full-bleed hero) ─────────────────────────────────
+   Rendered by overrides/home.html in place of the nav/tab area. Full width,
+   brand-teal gradient; the page markdown (feature grid) sits below it. */
+.hw-splash {
+  background: linear-gradient(155deg,
+    var(--hw-teal-deep) 0%, var(--hw-teal) 55%, var(--hw-teal-lm) 100%);
+  color: #fff;
+  padding: 3.6rem 1rem 3.2rem;
+  text-align: center;
+}
+.hw-splash__inner { max-width: 44rem; margin: 0 auto; }
+.hw-splash__logo {
+  width: 128px; height: auto;
+  filter: drop-shadow(0 .15rem .5rem rgba(0,0,0,.28));
+}
+.md-typeset .hw-splash__title {
+  color: #fff; font-weight: 800; font-size: 2.8rem;
+  line-height: 1.1; margin: .45rem 0 .15rem; border: 0;
+}
+.hw-splash__tagline {
+  font-size: 1.16rem; font-style: italic; opacity: .95; margin: 0 0 1rem;
+}
+.hw-splash__lead {
+  font-size: .9rem; line-height: 1.6; opacity: .92;
+  max-width: 38rem; margin: 0 auto 1.5rem;
+}
+.hw-splash__lead code { background: rgba(255,255,255,.16); color: #fff; }
+.hw-splash__cta .md-button {
+  margin: .35rem .3rem 0; color: #fff; border-color: rgba(255,255,255,.65);
+}
+.hw-splash__cta .md-button:hover {
+  background: rgba(255,255,255,.16); border-color: #fff;
+}
+.hw-splash__cta .md-button--primary {
+  background: #fff; color: var(--hw-teal-deep); border-color: #fff;
+}
+.hw-splash__cta .md-button--primary:hover {
+  background: color-mix(in srgb, #fff 88%, var(--hw-teal-light));
+  color: var(--hw-teal-deep);
+}
+.hw-splash__badges {
+  display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
+  gap: .5rem; margin-top: 1.5rem;
+}
+.hw-splash__badges a { display: inline-flex; line-height: 0; }
+.hw-splash__badges img { height: 1.35rem; width: auto; }
+
+/* Feature grid sits directly under the splash. */
+.md-typeset .hw-features { margin-top: 2rem; }
+.md-main__inner:has(.hw-features) { margin-top: 0; }
+.md-typeset .hw-features.grid.cards > ul > li {
+  border-color: color-mix(in srgb, var(--hw-teal) 30%, transparent);
+  transition: border-color .2s, box-shadow .2s, transform .2s;
+}
+.md-typeset .hw-features.grid.cards > ul > li:hover {
+  border-color: var(--hw-teal);
+  box-shadow: 0 .2rem .6rem color-mix(in srgb, var(--hw-teal) 22%, transparent);
+  transform: translateY(-2px);
+}
+
+/* Closing call-to-action strip under the feature grid. */
+.hw-hero-foot {
+  text-align: center;
+  margin: 2.5rem auto 1rem;
+  font-size: 1.05rem;
+}
+
+/* Reference tables (CLI, Environment): keep var names, flags, and defaults intact on
+   one line — the table scrolls horizontally rather than snapping tokens across rows. */
+.md-typeset table code { white-space: nowrap; }

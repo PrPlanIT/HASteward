@@ -45,6 +45,32 @@ builds:
       - "-s -w -X github.com/PrPlanIT/HASteward/src/version.Version={version} -X github.com/PrPlanIT/HASteward/src/version.Commit={sha} -X github.com/PrPlanIT/HASteward/src/version.BuildDate={date}"
     platforms: [linux/amd64, linux/arm64]
 
+  # Reference fragments generated from THIS commit's binary, never a stale copy: stage
+  # the freshly-built hasteward-bin as ./hasteward and run its docs generator. Emits
+  # docs/assets/modules/{cli,env}-reference.md (one per registered generator). worktree:
+  # true lands the tree at docs/assets/modules so narrate commits it and the docs-site
+  # build's mkdocs snippets (--8<-- "assets/modules/…") assemble it into docs/reference/*.
+  - id: reference
+    kind: command
+    stage:
+      from: hasteward-bin
+      as: hasteward
+    command: [./hasteward, docs, generate, --output-dir, "{output}"]
+    outputs:
+      - { type: tree, source: docs/assets/modules, worktree: true }
+
+  # Documentation site: build the MkDocs Material site from docs/ into a `site/`
+  # tree that the `docs` pages target deploys. The mkdocs-material image ships an
+  # ENTRYPOINT ["mkdocs"] that collides with the engine's `sh -c` invocation, so we
+  # pip-install mkdocs-material into a plain python image instead. Local preview:
+  # docker run --rm -p 8001:8000 -v "$PWD":/docs squidfunk/mkdocs-material:9 serve -f docs/assets/mkdocs/mkdocs.yml -a 0.0.0.0:8000
+  - id: docs-site
+    kind: command
+    image: docker.io/library/python:3.12-slim
+    command: "pip install --quiet --root-user-action=ignore mkdocs-material && mkdocs build -f docs/assets/mkdocs/mkdocs.yml --strict --site-dir {output}"
+    outputs:
+      - { type: tree, source: site }
+
 forges:
   - id: gitlab
     provider: gitlab
@@ -150,6 +176,7 @@ targets:
   # ── Primary release (rolling git tag aliases + binaries) ─────────
   - id: primary-release
     kind: release
+    type: latest
     archives: hasteward-binaries
     aliases: ["v{version}", "latest"]
     when: { git_tags: [stable], events: [tag] }
@@ -157,6 +184,7 @@ targets:
   # ── GitHub release (mirror) with binaries ────────────────────────
   - id: github-release
     kind: release
+    type: latest
     mirror: github-mirror
     sync_release: true
     archives: hasteward-binaries
@@ -178,10 +206,38 @@ targets:
     archives: hasteward-binaries-dev
     tag: "dev-{sha:8}"
     aliases: ["latest-dev"]
-    prerelease: true
+    type: prerelease
     retention:
       keep_last: 6
       protect: ["latest-dev"]
+    when: { branches: [main], events: [push] }
+
+  # ── Documentation site → Cloudflare Pages ────────────────────────
+  # Deploys the built docs-site tree to hasteward.prplanit.com. Currently on every main
+  # push (so the deploy can be exercised without cutting a tag); move to
+  # `when: { git_tags: [stable], events: [tag] }` once verified to deploy once per release.
+  # Cloudflare auto-creates the project + wires DNS. Credentials: CLOUDFLARE_API_TOKEN +
+  # CLOUDFLARE_ACCOUNT_ID.
+  - id: docs
+    kind: pages
+    provider: cloudflare
+    project: hasteward-docs
+    build: docs-site
+    domain: hasteward.prplanit.com
+    when: { branches: [main], events: [push] }
+
+  # ── Documentation site → GitHub Pages (test, alongside Cloudflare) ──
+  # Force-pushes the same docs-site tree to the gh-pages branch of the GitHub mirror,
+  # served at https://prplanit.github.io/HASteward/. No custom domain — Cloudflare owns
+  # hasteward.prplanit.com; mkdocs' relative URLs render under the /HASteward/ subpath.
+  # Requires GITHUB_TOKEN (contents:write) AND GitHub Pages enabled on the repo with
+  # source = gh-pages branch (a one-time repo setting force-push alone can't turn on).
+  - id: docs-github
+    kind: pages
+    provider: github
+    project_id: "{var:github_org}/{var:github_repo}"
+    credentials: GITHUB
+    build: docs-site
     when: { branches: [main], events: [push] }
 
 build_cache:
@@ -280,8 +336,7 @@ narrate:
     message: "refresh generated docs and badges"
     add:
       - "README.md"
-      - "docs/modules"
-      - "docs/reference"
+      - "docs/assets/modules"
       - ".stagefreight/badges"
     push: true
     skip_ci: true

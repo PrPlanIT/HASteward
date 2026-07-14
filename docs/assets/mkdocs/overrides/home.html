@@ -1,0 +1,50 @@
+{#-
+  Full-page landing template for docs/README.md (template: home.html). Replaces the
+  nav/tab area with a full-bleed hero; the page's own markdown (feature grid + closing
+  line) renders below. The content block is overridden to suppress Material's
+  auto-injected page-title H1 above the cards.
+-#}
+{% extends "main.html" %}
+
+{% block tabs %}
+<section class="hw-splash md-typeset">
+  <div class="hw-splash__inner">
+    <img src="{{ 'assets/logo-192.png' | url }}" alt="HASteward" class="hw-splash__logo">
+    <h1 class="hw-splash__title">HASteward</h1>
+    <p class="hw-splash__tagline">High Availability, stewarded.</p>
+    <p class="hw-splash__lead">
+      A Go CLI and Kubernetes operator that safely <strong>triages, repairs, backs up, and
+      restores</strong> CNPG (PostgreSQL) and MariaDB/Galera clusters. Backups ride
+      <code>restic</code> — block-level dedup, encryption, compression — and safety gates
+      refuse to turn a bad day into a worse one.
+    </p>
+    <div class="hw-splash__cta">
+      <a href="{{ 'usage/examples/' | url }}" class="md-button md-button--primary">Get Started</a>
+      <a href="{{ 'config/cli/' | url }}" class="md-button">CLI Reference</a>
+      <a href="{{ config.repo_url }}" class="md-button">View on GitHub</a>
+    </div>
+    <div class="hw-splash__badges">
+      <a href="https://hub.docker.com/r/prplanit/hasteward/tags" target="_blank" rel="noopener">
+        <img loading="lazy" alt="Latest version"
+          src="https://img.shields.io/docker/v/prplanit/hasteward?sort=semver&style=flat-square&logo=docker&logoColor=white&label=version&color=0d9488">
+      </a>
+      <a href="https://hub.docker.com/r/prplanit/hasteward" target="_blank" rel="noopener">
+        <img loading="lazy" alt="Docker pulls"
+          src="https://img.shields.io/docker/pulls/prplanit/hasteward?style=flat-square&logo=docker&logoColor=white&label=pulls&color=0d9488">
+      </a>
+      <a href="{{ config.repo_url }}" target="_blank" rel="noopener">
+        <img loading="lazy" alt="GitHub"
+          src="https://img.shields.io/badge/GitHub-source-24292e?style=flat-square&logo=github&logoColor=white">
+      </a>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block content %}
+<div class="md-content" data-md-component="content">
+  <article class="md-content__inner md-typeset">
+    {{ page.content }}
+  </article>
+</div>
+{% endblock %}

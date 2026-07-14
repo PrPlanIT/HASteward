@@ -2,7 +2,7 @@
 
 How to drive HASteward as a **one-shot container** against a Kubernetes cluster — the form you use
 when the binary isn't on `$PATH` (e.g. operating a remote cluster from a workstation). For the bare
-`hasteward <cmd>` form (binary on PATH / in-cluster), see [Examples](Examples.md).
+`hasteward <cmd>` form (binary on PATH / in-cluster), see [Examples](examples.md).
 
 Every command below is a **complete, copy-pasteable `docker run`** — nothing is hidden behind an
 alias. Replace the `<PLACEHOLDERS>`. (If you run these a lot, there's an optional shortcut at the
@@ -211,14 +211,14 @@ workstation. It's cleaner: the Job mounts an `emptyDir` at `/tmp` (restic's temp
 `--tmpfs` needed), a PVC at `/backups` (a durable in-cluster restic repo), and uses a ServiceAccount
 with least-privilege RBAC — no kubeconfig to mount, no host networking.
 
-The manifest is committed at [`docs/k8s/job.yaml`](k8s/job.yaml) — ServiceAccount + ClusterRole(Binding)
+The manifest is committed at [`docs/deploy/k8s/job/job.yaml`](../deploy/k8s/job/job.yaml) — ServiceAccount + ClusterRole(Binding)
 (cluster-wide, so it can operate on DB clusters in any namespace) + a `hasteward-backups` PVC + the
 `hasteward-run` Job.
 
 ```bash
 # 1. One-time: RBAC + ServiceAccount + the backups PVC.
-kubectl apply -f docs/k8s/job.yaml -l app.kubernetes.io/component=rbac
-kubectl apply -f docs/k8s/job.yaml -l app.kubernetes.io/component=storage
+kubectl apply -f docs/deploy/k8s/job/job.yaml -l app.kubernetes.io/component=rbac
+kubectl apply -f docs/deploy/k8s/job/job.yaml -l app.kubernetes.io/component=storage
 
 # 2. One-time: the restic password secret the Job reads.
 kubectl create secret generic hasteward-restic \
@@ -228,7 +228,7 @@ kubectl create secret generic hasteward-restic \
 #    args: ["triage"]  →  ["repair","-i","3","--output","jsonl"]
 #    env:  HASTEWARD_ENGINE / HASTEWARD_CLUSTER / HASTEWARD_NAMESPACE
 kubectl delete job hasteward-run -n <JOB_NAMESPACE> --ignore-not-found
-kubectl apply -f docs/k8s/job.yaml -l app.kubernetes.io/component=job
+kubectl apply -f docs/deploy/k8s/job/job.yaml -l app.kubernetes.io/component=job
 kubectl logs -f job/hasteward-run -n <JOB_NAMESPACE>
 ```
 
