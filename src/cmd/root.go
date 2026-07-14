@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/env"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
@@ -43,38 +44,41 @@ encryption, and compression.`,
 
 func init() {
 	pf := RootCmd.PersistentFlags()
-	pf.StringVarP(&Cfg.Engine, "engine", "e", common.Env("ENGINE", ""), "Database engine: cnpg or galera")
-	pf.StringVarP(&Cfg.ClusterName, "cluster", "c", common.Env("CLUSTER", ""), "Database cluster CR name")
-	pf.StringVarP(&Cfg.Namespace, "namespace", "n", common.Env("NAMESPACE", ""), "Kubernetes namespace")
-	pf.BoolVarP(&Cfg.Force, "force", "f", common.EnvBool("FORCE", false),
+	// Each flag is declared once via env.*, which creates the flag, seeds its default
+	// from the environment, and registers the flag↔variable link for the generated
+	// Environment Variables reference. Type/default/description stay owned by the flag.
+	env.String(pf, &Cfg.Engine, "engine", "e", "ENGINE", "", "Database engine: cnpg or galera")
+	env.String(pf, &Cfg.ClusterName, "cluster", "c", "CLUSTER", "", "Database cluster CR name")
+	env.String(pf, &Cfg.Namespace, "namespace", "n", "NAMESPACE", "", "Kubernetes namespace")
+	env.Bool(pf, &Cfg.Force, "force", "f", "FORCE", false,
 		"Override automatic safety refusal for targeted repair. In ambiguous Galera\n"+
 			"recovery states (divergent UUIDs, split-brain, no clear primary), --donor is\n"+
 			"required to declare the authoritative source node.")
-	pf.StringVar(&Cfg.BackupsPath, "backups-path", common.Env("BACKUPS_PATH", ""), "Restic repository path or URL")
-	pf.StringVar(&Cfg.ResticPassword, "restic-password", common.EnvRaw("RESTIC_PASSWORD", common.Env("RESTIC_PASSWORD", "")), "Restic repository encryption password")
-	pf.BoolVar(&Cfg.NoEscrow, "no-escrow", common.EnvBool("NO_ESCROW", false), "Skip pre-repair escrow backup")
-	pf.BoolVar(&Cfg.Unwedge, "unwedge", common.EnvBool("UNWEDGE", false), "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
-	pf.BoolVar(&Cfg.WipeDatadir, "wipe-datadir", common.EnvBool("WIPE_DATADIR", false),
+	env.String(pf, &Cfg.BackupsPath, "backups-path", "", "BACKUPS_PATH", "", "Restic repository path or URL")
+	env.RawOrPrefixed(pf, &Cfg.ResticPassword, "restic-password", "", "RESTIC_PASSWORD", "", "Restic repository encryption password")
+	env.Bool(pf, &Cfg.NoEscrow, "no-escrow", "", "NO_ESCROW", false, "Skip pre-repair escrow backup")
+	env.Bool(pf, &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
+	env.Bool(pf, &Cfg.WipeDatadir, "wipe-datadir", "", "WIPE_DATADIR", false,
 		"Wipe entire datadir on target instance (not just grastate). Forces full SST\n"+
 			"reseed from donor. Use when local data is irrecoverably corrupted. Requires\n"+
 			"--force and --instance.")
-	pf.BoolVar(&Cfg.FixBootstrap, "fix-bootstrap", common.EnvBool("FIX_BOOTSTRAP", false),
+	env.Bool(pf, &Cfg.FixBootstrap, "fix-bootstrap", "", "FIX_BOOTSTRAP", false,
 		"Reconfigure: clear grastate and remove bootstrap config on target instance.\n"+
 			"Prevents stale local bootstrap behavior during cluster restart.")
-	pf.StringVarP(&Cfg.BackupMethod, "method", "m", common.Env("BACKUP_METHOD", "dump"), "Backup method: dump or native")
-	pf.StringVar(&Cfg.Snapshot, "snapshot", common.Env("SNAPSHOT", "latest"), "Restic snapshot ID or 'latest' (for restore)")
-	pf.IntVar(&Cfg.HealTimeout, "heal-timeout", common.EnvInt("HEAL_TIMEOUT", 600), "Heal wait timeout in seconds")
-	pf.IntVar(&Cfg.DeleteTimeout, "delete-timeout", common.EnvInt("DELETE_TIMEOUT", 300), "Delete wait timeout in seconds")
-	pf.StringVar(&Cfg.Kubeconfig, "kubeconfig", common.EnvRaw("KUBECONFIG", ""), "Path to kubeconfig file")
-	pf.BoolVarP(&Cfg.Verbose, "verbose", "v", common.EnvBool("VERBOSE", false), "Verbose output (debug logging)")
+	env.String(pf, &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
+	env.String(pf, &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
+	env.Int(pf, &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
+	env.Int(pf, &Cfg.DeleteTimeout, "delete-timeout", "", "DELETE_TIMEOUT", 300, "Delete wait timeout in seconds")
+	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
+	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")
 	pf.BoolVar(&dryRun, "dry-run", false, "Show planned actions without executing (destructive commands)")
-	pf.StringVar(&outputMode, "output", common.Env("OUTPUT", "auto"), "Output format: auto, human, json, jsonl")
+	env.String(pf, &outputMode, "output", "", "OUTPUT", "auto", "Output format: auto, human, json, jsonl")
 	pf.Bool("no-color", false, "Disable color output")
 	pf.Bool("debug", false, "Enable debug output")
 
 	// Instance and donor flags need special handling for optional int
-	pf.StringP("instance", "i", common.Env("INSTANCE", ""), "Target specific instance number")
-	pf.StringP("donor", "d", common.Env("DONOR", ""), "Explicit donor instance ordinal (declares authoritative source for repair)")
+	env.StringP(pf, "instance", "i", "INSTANCE", "", "Target specific instance number")
+	env.StringP(pf, "donor", "d", "DONOR", "", "Explicit donor instance ordinal (declares authoritative source for repair)")
 
 	RootCmd.AddCommand(triageCmd, repairCmd, reconfigureCmd, backupCmd, restoreCmd, serveCmd, getCmd, exportCmd, pruneCmd)
 }
