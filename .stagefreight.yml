@@ -213,9 +213,7 @@ targets:
     when: { branches: [main], events: [push] }
 
   # ── Documentation site → Cloudflare Pages ────────────────────────
-  # Deploys the built docs-site tree to hasteward.prplanit.com. Currently on every main
-  # push (so the deploy can be exercised without cutting a tag); move to
-  # `when: { git_tags: [stable], events: [tag] }` once verified to deploy once per release.
+  # Deploys the built docs-site tree to hasteward.prplanit.com, once per release tag.
   # Cloudflare auto-creates the project + wires DNS. Credentials: CLOUDFLARE_API_TOKEN +
   # CLOUDFLARE_ACCOUNT_ID.
   - id: docs
@@ -224,7 +222,7 @@ targets:
     project: hasteward
     build: docs-site
     domain: hasteward.prplanit.com
-    when: { branches: [main], events: [push] }
+    when: { git_tags: [stable], events: [tag] }
 
   # ── Documentation site → GitHub Pages (test, alongside Cloudflare) ──
   # Force-pushes the same docs-site tree to the gh-pages branch of the GitHub mirror,
@@ -238,7 +236,7 @@ targets:
     project_id: "{var:github_org}/{var:github_repo}"
     credentials: GITHUB
     build: docs-site
-    when: { branches: [main], events: [push] }
+    when: { git_tags: [stable], events: [tag] }
 
 build_cache:
   mode: hybrid
