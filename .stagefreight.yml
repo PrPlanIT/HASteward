@@ -230,8 +230,8 @@ targets:
   # Force-pushes the same docs-site tree to the gh-pages branch of the GitHub mirror,
   # served at https://prplanit.github.io/HASteward/. No custom domain — Cloudflare owns
   # hasteward.prplanit.com; mkdocs' relative URLs render under the /HASteward/ subpath.
-  # Requires GITHUB_TOKEN (contents:write) AND GitHub Pages enabled on the repo with
-  # source = gh-pages branch (a one-time repo setting force-push alone can't turn on).
+  # Requires GITHUB_TOKEN (contents:write + Pages/administration). The provider enables
+  # GitHub Pages itself (source = gh-pages) via the API after the push — no manual toggle.
   - id: docs-github
     kind: pages
     provider: github
