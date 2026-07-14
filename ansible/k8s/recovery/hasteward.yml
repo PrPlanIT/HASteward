@@ -1,5 +1,15 @@
 ---
 # hasteward.yml - HASteward (High Availability Steward)
+#
+# ============================================================================
+# *** DEPRECATED - DO NOT USE ***
+# Superseded by the HASteward Go binary/operator in this repo (src/cmd/,
+# `prplanit/hasteward`). This Ansible logic predates the fixed Go recovery
+# engine (trustworthy seqno derivation, fail-closed authority, WAL-stranded
+# classification) and can produce a WRONG assessment on a production DB.
+# Use the binary instead:  hasteward triage -e galera -c <cluster> -n <ns>
+# ============================================================================
+#
 # Ansible playbook that standardizes recovery logic for common stateful services
 # (PostgreSQL, MariaDB) to safely revive stalled replicas where possible.
 #
