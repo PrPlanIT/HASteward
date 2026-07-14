@@ -67,7 +67,7 @@ builds:
   - id: docs-site
     kind: command
     image: docker.io/library/python:3.12-slim
-    command: "pip install --quiet --root-user-action=ignore mkdocs-material && mkdocs build -f docs/assets/mkdocs/mkdocs.yml --strict --site-dir {output}"
+    command: "pip install --quiet --root-user-action=ignore mkdocs-material && mkdocs build -f docs/assets/mkdocs/mkdocs.yml --strict --site-dir $(pwd)/site"
     outputs:
       - { type: tree, source: site }
 

@@ -7,3 +7,4 @@ hasteward
 # cache) that the pipeline regenerates and must not be tracked.
 .stagefreight/*
 !.stagefreight/badges/
+site/
