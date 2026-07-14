@@ -221,7 +221,7 @@ targets:
   - id: docs
     kind: pages
     provider: cloudflare
-    project: hasteward-docs
+    project: hasteward
     build: docs-site
     domain: hasteward.prplanit.com
     when: { branches: [main], events: [push] }
