@@ -636,14 +636,18 @@ func (b *galeraBootstrap) selectCandidate(
 
 	// Within the selected lineage group, find the absolute best node
 	// Priority: highest seqno, then highest lastCommitted
-	bestPod := candidatePod
-	bestSeqno := recovered[candidatePod].Seqno
-	bestCommitted := recovered[candidatePod].LastCommitted
-	bestUUID := recovered[candidatePod].UUID
+	// Seed from nothing and let the first AUTHORITATIVE recover win — never seed
+	// from the original candidate's own result, which may be a failed/hint-backed
+	// (Valid:false) entry whose hint seqno would out-rank a genuine recovered
+	// position and suppress a legitimate override.
+	bestPod := ""
+	bestSeqno := int64(-1)
+	bestCommitted := int64(-1)
+	bestUUID := ""
 
 	for pod, rr := range recovered {
-		if rr.UUID == zeroUUID || rr.UUID == "" || rr.Seqno < 0 || rr.Seqno > maxPhantomSeqno {
-			continue
+		if !isAuthoritativeRecover(rr) {
+			continue // a failed/hint/never-joined recover may not drive authority
 		}
 
 		// If we're preferring majority lineage (default), only consider nodes in that UUID
@@ -651,12 +655,18 @@ func (b *galeraBootstrap) selectCandidate(
 			continue
 		}
 
-		if rr.Seqno > bestSeqno || (rr.Seqno == bestSeqno && rr.LastCommitted > bestCommitted) {
+		if bestPod == "" || rr.Seqno > bestSeqno || (rr.Seqno == bestSeqno && rr.LastCommitted > bestCommitted) {
 			bestPod = pod
 			bestSeqno = rr.Seqno
 			bestCommitted = rr.LastCommitted
 			bestUUID = rr.UUID
 		}
+	}
+
+	// No authoritative recover in the selected lineage — keep the original
+	// candidate rather than override on nothing.
+	if bestPod == "" {
+		return candidatePod, nil
 	}
 
 	if bestPod != originalCandidate {
@@ -681,20 +691,30 @@ func (b *galeraBootstrap) selectCandidate(
 	return candidatePod, nil
 }
 
+// isAuthoritativeRecover reports whether a wsrep_recover result may drive cluster
+// authority. Only a result that is Valid (a real --wsrep-recover that parsed to a
+// concrete position — NOT a failed/hint-backed fallback), carries a real cluster
+// UUID (not zero/empty/"unknown"), and holds a sane seqno (0..maxPhantomSeqno)
+// qualifies. This is the single predicate that keeps HINTS from nominating or
+// overriding the bootstrap target — the same "hints never establish authority"
+// rule triage enforces for seqnos and UUIDs.
+func isAuthoritativeRecover(rr wsrepRecoverResult) bool {
+	return rr.Valid &&
+		rr.UUID != zeroUUID && rr.UUID != "" && rr.UUID != "unknown" &&
+		rr.Seqno >= 0 && rr.Seqno <= maxPhantomSeqno
+}
+
 // buildLineageGroups partitions wsrep_recover results into lineage groups keyed by
 // cluster UUID, sorted by member count (descending) then MaxSeqno (descending) so
-// groups[0] is the majority lineage. Nodes with a zero/empty UUID (never joined) or
-// a phantom/corrupt seqno are excluded. More than one group means a genuine
-// split-brain — the signal the belly-up authority gate refuses without --force.
+// groups[0] is the majority lineage. Only authoritative results participate (see
+// isAuthoritativeRecover) — a failed/hint-backed, never-joined, or phantom-seqno
+// result cannot form a lineage. More than one group means a genuine split-brain —
+// the signal the belly-up authority gate refuses without --force.
 func buildLineageGroups(recovered map[string]wsrepRecoverResult) []model.LineageGroup {
 	groupMap := make(map[string]*model.LineageGroup)
 	for pod, rr := range recovered {
-		if rr.UUID == zeroUUID || rr.UUID == "" {
-			common.WarnLog("Ignoring recovery result for %s: zero/empty UUID (node never joined cluster)", pod)
-			continue
-		}
-		if rr.Seqno < 0 || rr.Seqno > maxPhantomSeqno {
-			common.WarnLog("Ignoring recovery seqno for %s: %d (phantom/corrupt)", pod, rr.Seqno)
+		if !isAuthoritativeRecover(rr) {
+			common.WarnLog("Ignoring recovery result for %s: not an authoritative lineage (uuid=%q seqno=%d valid=%v)", pod, rr.UUID, rr.Seqno, rr.Valid)
 			continue
 		}
 
