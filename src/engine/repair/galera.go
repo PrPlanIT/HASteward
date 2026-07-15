@@ -16,7 +16,6 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -257,13 +256,11 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	// Capture SA from target pod before it gets deleted
 	sa := "default"
 	if targetPodObj, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{}); err == nil {
-		if targetPodObj.Spec.ServiceAccountName != "" {
-			sa = targetPodObj.Spec.ServiceAccountName
-		}
+		sa = k8s.ServiceAccountFromPods([]corev1.Pod{*targetPodObj})
 	}
 
 	storagePVC := g.p.DataPVCName(targetPod)
-	galeraPVC := fmt.Sprintf("galera-%s", targetPod)
+	galeraPVC := g.p.GaleraPVCName(targetPod)
 	storageHelper := fmt.Sprintf("%s-heal-storage-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
 	galeraHelper := fmt.Sprintf("%s-heal-galera-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
 
@@ -404,23 +401,11 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	if deleteTimeout <= 0 {
 		deleteTimeout = common.DefaultDeleteTimeout
 	}
-	podGone := false
-	for i := 0; i < deleteTimeout/5; i++ {
-		_, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				common.InfoLog("Pod %s terminated (NotFound). PVC detach assumed — helper mount will confirm.", targetPod)
-				podGone = true
-				break
-			}
-			common.DebugLog("Waiting for %s: transient error: %v", targetPod, err)
-		}
-		common.Sleep(5 * time.Second)
-	}
-	if !podGone {
+	if err := k8s.WaitForPodGone(ctx, ns, targetPod, deleteTimeout/5, 5); err != nil {
 		rescue()
 		return fmt.Errorf("ABORT: Pod %s did not terminate within %ds. PVC may still be attached — refusing to proceed", targetPod, deleteTimeout)
 	}
+	common.InfoLog("Pod %s terminated. PVC detach assumed — helper mount will confirm.", targetPod)
 
 	// STEP 3: Wipe storage PVC
 	var storageScript string

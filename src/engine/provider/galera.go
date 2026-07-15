@@ -43,6 +43,9 @@ func (p *GaleraProvider) PodSelector() string {
 // DataPVCName returns the datadir PVC name for a pod (Galera: storage-<pod>).
 func (p *GaleraProvider) DataPVCName(pod string) string { return "storage-" + pod }
 
+// GaleraPVCName returns the galera-config PVC name for a pod (galera-<pod>).
+func (p *GaleraProvider) GaleraPVCName(pod string) string { return "galera-" + pod }
+
 // NewGaleraProviderForTest builds a provider with injected state, bypassing
 // Validate (no live cluster/secret needed). TEST-ONLY — never call from
 // production code.

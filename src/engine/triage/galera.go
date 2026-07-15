@@ -184,7 +184,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, t.p.DataPVCName(name), metav1.GetOptions{}); err == nil {
 			data.pvcStates[name]["storage"] = "Bound"
 		}
-		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "galera-"+name, metav1.GetOptions{}); err == nil {
+		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, t.p.GaleraPVCName(name), metav1.GetOptions{}); err == nil {
 			data.pvcStates[name]["galera"] = "Bound"
 		}
 	}
@@ -598,7 +598,7 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	// declare a split-brain; stale hints must never drive the verdict.
 	uuidSet := make(map[string]bool)
 	addUUID := func(u string) {
-		if u != "" && u != "unknown" && u != "00000000-0000-0000-0000-000000000000" {
+		if u != "" && u != "unknown" && u != provider.ZeroUUID {
 			uuidSet[u] = true
 		}
 	}
@@ -1399,7 +1399,7 @@ func recoveryUUIDsOf(m map[string]interface{}) []string {
 			continue
 		}
 		us := strings.TrimSpace(fmt.Sprintf("%v", u))
-		if us != "" && us != "00000000-0000-0000-0000-000000000000" {
+		if us != "" && us != provider.ZeroUUID {
 			out = append(out, us)
 		}
 	}
