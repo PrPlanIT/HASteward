@@ -32,14 +32,23 @@ type GaleraProvider struct {
 	galeraRecovery  map[string]interface{}
 }
 
-func (p *GaleraProvider) Name() string            { return "galera" }
-func (p *GaleraProvider) Config() *common.Config   { return p.cfg }
-func (p *GaleraProvider) MariaDB() *unstructured.Unstructured { return p.mariadb }
-func (p *GaleraProvider) Spec() map[string]interface{}        { return p.mariadbSpec }
-func (p *GaleraProvider) Status() map[string]interface{}      { return p.mariadbStatus }
-func (p *GaleraProvider) Replicas() int64          { return p.replicas }
-func (p *GaleraProvider) IsSuspended() bool        { return p.isSuspended }
-func (p *GaleraProvider) RootPassword() string     { return p.rootPassword }
+func (p *GaleraProvider) Name() string           { return "galera" }
+func (p *GaleraProvider) Config() *common.Config { return p.cfg }
+
+// PodSelector is the label selector matching every pod of this cluster.
+func (p *GaleraProvider) PodSelector() string {
+	return "app.kubernetes.io/instance=" + p.cfg.ClusterName
+}
+
+// DataPVCName returns the datadir PVC name for a pod (Galera: storage-<pod>).
+func (p *GaleraProvider) DataPVCName(pod string) string { return "storage-" + pod }
+
+func (p *GaleraProvider) MariaDB() *unstructured.Unstructured     { return p.mariadb }
+func (p *GaleraProvider) Spec() map[string]interface{}            { return p.mariadbSpec }
+func (p *GaleraProvider) Status() map[string]interface{}          { return p.mariadbStatus }
+func (p *GaleraProvider) Replicas() int64                         { return p.replicas }
+func (p *GaleraProvider) IsSuspended() bool                       { return p.isSuspended }
+func (p *GaleraProvider) RootPassword() string                    { return p.rootPassword }
 func (p *GaleraProvider) ReadyCondition() map[string]interface{}  { return p.readyCondition }
 func (p *GaleraProvider) GaleraCondition() map[string]interface{} { return p.galeraCondition }
 func (p *GaleraProvider) GaleraRecovery() map[string]interface{}  { return p.galeraRecovery }

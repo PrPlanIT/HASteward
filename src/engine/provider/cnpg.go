@@ -28,14 +28,21 @@ type CNPGProvider struct {
 	fencedInstances    []string
 }
 
-func (p *CNPGProvider) Name() string            { return "cnpg" }
-func (p *CNPGProvider) Config() *common.Config   { return p.cfg }
-func (p *CNPGProvider) Cluster() *unstructured.Unstructured    { return p.cluster }
-func (p *CNPGProvider) Spec() map[string]interface{}           { return p.clusterSpec }
-func (p *CNPGProvider) Status() map[string]interface{}         { return p.clusterStatus }
-func (p *CNPGProvider) Annotations() map[string]interface{}    { return p.clusterAnnotations }
-func (p *CNPGProvider) Instances() int64         { return p.instances }
-func (p *CNPGProvider) FencedInstances() []string { return p.fencedInstances }
+func (p *CNPGProvider) Name() string           { return "cnpg" }
+func (p *CNPGProvider) Config() *common.Config { return p.cfg }
+
+// PodSelector is the label selector matching every pod of this cluster.
+func (p *CNPGProvider) PodSelector() string { return "cnpg.io/cluster=" + p.cfg.ClusterName }
+
+// DataPVCName returns the datadir PVC name for a pod (CNPG: the PVC == pod name).
+func (p *CNPGProvider) DataPVCName(pod string) string { return pod }
+
+func (p *CNPGProvider) Cluster() *unstructured.Unstructured { return p.cluster }
+func (p *CNPGProvider) Spec() map[string]interface{}        { return p.clusterSpec }
+func (p *CNPGProvider) Status() map[string]interface{}      { return p.clusterStatus }
+func (p *CNPGProvider) Annotations() map[string]interface{} { return p.clusterAnnotations }
+func (p *CNPGProvider) Instances() int64                    { return p.instances }
+func (p *CNPGProvider) FencedInstances() []string           { return p.fencedInstances }
 
 // SetCluster replaces the cached CR state (used after re-fetch during repair).
 func (p *CNPGProvider) SetCluster(obj *unstructured.Unstructured) {

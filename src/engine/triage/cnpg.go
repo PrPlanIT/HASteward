@@ -133,7 +133,7 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 
 	// Get all cluster pods
 	podList, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("cnpg.io/cluster=%s", t.p.Config().ClusterName),
+		LabelSelector: t.p.PodSelector(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)

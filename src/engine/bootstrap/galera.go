@@ -255,7 +255,7 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	// Capture SA before pods are deleted
 	sa := "default"
 	pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", cfg.ClusterName),
+		LabelSelector: b.p.PodSelector(),
 	})
 	if err == nil {
 		sa = k8s.ServiceAccountFromPods(pods.Items)
@@ -282,7 +282,7 @@ test -f /var/lib/mysql/grastate.dat || exit 0
 sed -i 's/safe_to_bootstrap: 1/safe_to_bootstrap: 0/' /var/lib/mysql/grastate.dat
 echo "reverted safe_to_bootstrap to 0"`
 			helperName := fmt.Sprintf("%s-safeboot-revert-%d", cfg.ClusterName, time.Now().Unix())
-			_ = b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", candidatePod), "/var/lib/mysql", revertScript, sa)
+			_ = b.p.RunHelperPod(ctx, helperName, b.p.DataPVCName(candidatePod), "/var/lib/mysql", revertScript, sa)
 		}
 		// Remove generation lock on failure
 		if genLocked {
@@ -426,7 +426,7 @@ echo "reverted safe_to_bootstrap to 0"`
 			common.WarnLog("Node %s is %d transactions behind — exceeds likely gcache window. Removing galera.cache to force SST.", pod, gap)
 			clearScript := `test -f /var/lib/mysql/galera.cache && rm /var/lib/mysql/galera.cache && echo "galera.cache removed — SST will be forced" || echo "no galera.cache present"`
 			helperName := fmt.Sprintf("%s-gcache-clear-%d", cfg.ClusterName, time.Now().Unix())
-			_ = b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", pod), "/var/lib/mysql", clearScript, sa)
+			_ = b.p.RunHelperPod(ctx, helperName, b.p.DataPVCName(pod), "/var/lib/mysql", clearScript, sa)
 		}
 	}
 
@@ -445,7 +445,7 @@ sed -i 's/safe_to_bootstrap: 1/safe_to_bootstrap: 0/' /var/lib/mysql/grastate.da
 echo "cleared" || echo "already clean"
 `
 			helperName := fmt.Sprintf("%s-safe-clear-%d", cfg.ClusterName, time.Now().Unix())
-			if serr := b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", a.Pod), "/var/lib/mysql", clearScript, sa); serr != nil {
+			if serr := b.p.RunHelperPod(ctx, helperName, b.p.DataPVCName(a.Pod), "/var/lib/mysql", clearScript, sa); serr != nil {
 				common.WarnLog("Failed to clear safe_to_bootstrap on %s: %v", a.Pod, serr)
 			}
 		}
@@ -454,7 +454,7 @@ echo "cleared" || echo "already clean"
 
 	// STEP 6: Set safe_to_bootstrap=1 on candidate PVC + remove galera.cache for fresh peer discovery
 	common.InfoLog("STEP 6: Setting safe_to_bootstrap=1 on %s", candidatePod)
-	storagePVC := fmt.Sprintf("storage-%s", candidatePod)
+	storagePVC := b.p.DataPVCName(candidatePod)
 	helperName := fmt.Sprintf("%s-bootstrap-%d", cfg.ClusterName, time.Now().Unix())
 
 	bootstrapScript := `set -e
@@ -777,7 +777,7 @@ func (b *galeraBootstrap) waitForAllReady(ctx context.Context) {
 	cfg := b.p.Config()
 	expected := int(b.p.Replicas())
 	// 90 iterations × 10s = 15 minutes soft timeout
-	if k8s.WaitAllReady(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, expected, 90, 10, "mariadb") {
+	if k8s.WaitAllReady(ctx, cfg.Namespace, b.p.PodSelector(), expected, 90, 10, "mariadb") {
 		common.InfoLog("All %d pods are Running and Ready", expected)
 		return
 	}

@@ -136,7 +136,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 
 	// Get all MariaDB pods
 	podList, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", t.p.Config().ClusterName),
+		LabelSelector: t.p.PodSelector(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
@@ -181,7 +181,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 	// Check PVCs (storage and galera)
 	for _, name := range data.expectedNodes {
 		data.pvcStates[name] = map[string]string{"storage": "MISSING", "galera": "MISSING"}
-		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "storage-"+name, metav1.GetOptions{}); err == nil {
+		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, t.p.DataPVCName(name), metav1.GetOptions{}); err == nil {
 			data.pvcStates[name]["storage"] = "Bound"
 		}
 		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "galera-"+name, metav1.GetOptions{}); err == nil {
@@ -475,7 +475,7 @@ func (t *galeraTriage) runPVCProbes(ctx context.Context, targets []galeraProbeTa
 					Name: "storage",
 					VolumeSource: corev1.VolumeSource{
 						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "storage-" + tgt.Name,
+							ClaimName: t.p.DataPVCName(tgt.Name),
 						},
 					},
 				}},

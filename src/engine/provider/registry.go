@@ -17,6 +17,10 @@ type EngineProvider interface {
 	Validate(ctx context.Context, cfg *common.Config) error
 	// Config returns the runtime configuration.
 	Config() *common.Config
+	// PodSelector returns the label selector matching all of the cluster's pods.
+	PodSelector() string
+	// DataPVCName returns the datadir PVC name for the given pod.
+	DataPVCName(pod string) string
 }
 
 // registry maps engine names to provider constructors.

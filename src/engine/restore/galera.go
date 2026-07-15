@@ -117,5 +117,5 @@ func (r *galeraRestore) restoreDump(ctx context.Context) (*model.RestoreResult, 
 // findHealthyPod returns the name of a healthy running MariaDB pod.
 func (r *galeraRestore) findHealthyPod(ctx context.Context) (string, error) {
 	cfg := r.p.Config()
-	return k8s.FindReadyPod(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, "mariadb")
+	return k8s.FindReadyPod(ctx, cfg.Namespace, r.p.PodSelector(), "mariadb")
 }

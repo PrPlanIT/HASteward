@@ -464,7 +464,7 @@ func (r *cnpgRepair) displayFinalStatus(ctx context.Context) {
 	output.Field("Ready", fmt.Sprintf("%d/%d", ready, instances))
 
 	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "cnpg.io/cluster=" + cfg.ClusterName,
+		LabelSelector: r.p.PodSelector(),
 	})
 	if err == nil {
 		for _, p := range pods.Items {
@@ -478,7 +478,7 @@ func (r *cnpgRepair) displayFinalStatus(ctx context.Context) {
 func (r *cnpgRepair) waitForAllReady(ctx context.Context) {
 	cfg := r.p.Config()
 	expected := int(r.p.Instances())
-	if k8s.WaitAllReady(ctx, cfg.Namespace, "cnpg.io/cluster="+cfg.ClusterName, expected, 30, 10, "postgres") {
+	if k8s.WaitAllReady(ctx, cfg.Namespace, r.p.PodSelector(), expected, 30, 10, "postgres") {
 		common.InfoLog("All %d pods are Running and Ready", expected)
 		return
 	}

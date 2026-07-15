@@ -225,7 +225,7 @@ func (g *galeraRepair) planTargeted(ctx context.Context, result *model.TriageRes
 
 	// Verify storage PVC exists
 	c := k8s.GetClients()
-	storagePVC := fmt.Sprintf("storage-%s", targetPod)
+	storagePVC := g.p.DataPVCName(targetPod)
 	_, err := c.Clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(ctx, storagePVC, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("storage PVC %s not found: %w", storagePVC, err)
@@ -335,7 +335,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		}
 	}
 
-	storagePVC := fmt.Sprintf("storage-%s", targetPod)
+	storagePVC := g.p.DataPVCName(targetPod)
 	galeraPVC := fmt.Sprintf("galera-%s", targetPod)
 	storageHelper := fmt.Sprintf("%s-heal-storage-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
 	galeraHelper := fmt.Sprintf("%s-heal-galera-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
@@ -755,7 +755,7 @@ func (g *galeraRepair) displayFinalStatus(ctx context.Context) {
 	}
 
 	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName,
+		LabelSelector: g.p.PodSelector(),
 	})
 	if err == nil {
 		for _, p := range pods.Items {
@@ -769,7 +769,7 @@ func (g *galeraRepair) displayFinalStatus(ctx context.Context) {
 func (g *galeraRepair) waitForAllReady(ctx context.Context) {
 	cfg := g.p.Config()
 	expected := int(g.p.Replicas())
-	if k8s.WaitAllReady(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, expected, 30, 10, "mariadb") {
+	if k8s.WaitAllReady(ctx, cfg.Namespace, g.p.PodSelector(), expected, 30, 10, "mariadb") {
 		common.InfoLog("All %d pods are Running and Ready", expected)
 		return
 	}

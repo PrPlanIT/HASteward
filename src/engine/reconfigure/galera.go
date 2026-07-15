@@ -64,7 +64,7 @@ func (g *galeraReconfigure) Validate(ctx context.Context, result *model.TriageRe
 
 	// PVC validation (action-specific, hard fail)
 	if cfg.FixBootstrap {
-		storagePVC := fmt.Sprintf("storage-%s", targetPod)
+		storagePVC := g.p.DataPVCName(targetPod)
 		galeraPVC := fmt.Sprintf("galera-%s", targetPod)
 
 		_, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, storagePVC, metav1.GetOptions{})
@@ -169,7 +169,7 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 		}
 	}
 
-	storagePVC := fmt.Sprintf("storage-%s", targetPod)
+	storagePVC := g.p.DataPVCName(targetPod)
 	galeraPVC := fmt.Sprintf("galera-%s", targetPod)
 	storageHelper := fmt.Sprintf("%s-reconf-storage-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
 	galeraHelper := fmt.Sprintf("%s-reconf-galera-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())

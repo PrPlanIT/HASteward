@@ -96,7 +96,7 @@ func (p *GaleraProvider) WaitPodsTerminated(ctx context.Context, timeoutSec int)
 	if timeoutSec <= 0 {
 		timeoutSec = common.DefaultDeleteTimeout
 	}
-	sel := "app.kubernetes.io/instance=" + cfg.ClusterName
+	sel := p.PodSelector()
 	for i := 0; i < timeoutSec/5; i++ {
 		pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 		if err == nil && len(pods.Items) == 0 {
@@ -115,7 +115,7 @@ func (p *GaleraProvider) DeleteRecoveryPods(ctx context.Context) {
 	c := k8s.GetClients()
 	cfg := p.Config()
 	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName + ",k8s.mariadb.com/recovery=true",
+		LabelSelector: p.PodSelector() + ",k8s.mariadb.com/recovery=true",
 	})
 	if err != nil {
 		return
@@ -140,7 +140,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 		return WsrepRecoverResult{}, fmt.Errorf("cannot determine MariaDB image from CR spec")
 	}
 
-	pvcName := fmt.Sprintf("storage-%s", podName)
+	pvcName := p.DataPVCName(podName)
 	helperName := fmt.Sprintf("%s-wsrep-%s-%d", cfg.ClusterName, podName, time.Now().Unix())
 
 	uid := mariadbDataDirUID
