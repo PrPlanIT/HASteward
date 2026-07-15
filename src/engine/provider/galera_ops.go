@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -289,91 +288,99 @@ func ParseWsrepRecoverOutput(output string) (WsrepRecoverResult, error) {
 // RunHelperPod creates a short-lived busybox pod that mounts a node's PVC and runs
 // a script against it (e.g. reset grastate, clear safe_to_bootstrap), waits for
 // completion, logs its output, and cleans up. Shared by repair and bootstrap.
-func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountPath, script, sa string) error {
-	cfg := p.Config()
-	ns := cfg.Namespace
+// HelperPodSpec configures a short-lived busybox pod that mounts one PVC and runs
+// a command against it. Shared by heal/reconfigure/bootstrap (run a script,
+// read-write) and triage (read-only probe returning the file contents).
+type HelperPodSpec struct {
+	Name      string
+	PVCName   string
+	MountPath string
+	Command   []string // e.g. ["sh","-c",script] or ["cat", path]
+	SA        string
+	ReadOnly  bool              // mount the PVC read-only
+	NodeName  string            // optional: pin to kubernetes.io/hostname=<node>
+	Label     map[string]string // pod labels (defaults to hasteward:heal-helper)
+}
+
+// RunHelperPodSpec creates the helper pod, waits for a terminal phase, returns its
+// logs and whether it Succeeded, and deletes it on every exit path.
+func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpec) (string, bool, error) {
+	ns := p.Config().Namespace
 	c := k8s.GetClients()
 
-	rootUser := int64(0)
+	root := int64(0)
+	labels := spec.Label
+	if labels == nil {
+		labels = map[string]string{"hasteward": "heal-helper"}
+	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    map[string]string{"hasteward": "heal-helper"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: spec.Name, Namespace: ns, Labels: labels},
 		Spec: corev1.PodSpec{
 			RestartPolicy:      corev1.RestartPolicyNever,
-			ServiceAccountName: sa,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser: &rootUser,
-			},
+			ServiceAccountName: spec.SA,
+			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: &root},
 			Containers: []corev1.Container{{
-				Name:    "healer",
-				Image:   "docker.io/library/busybox:latest",
-				Command: []string{"sh", "-c", script},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: mountPath},
-				},
+				Name:         "helper",
+				Image:        "docker.io/library/busybox:latest",
+				Command:      spec.Command,
+				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: spec.MountPath, ReadOnly: spec.ReadOnly}},
 			}},
 			Volumes: []corev1.Volume{{
 				Name: "data",
 				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-					},
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: spec.PVCName},
 				},
 			}},
 		},
 	}
+	if spec.NodeName != "" {
+		pod.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": spec.NodeName}
+	}
 
-	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create helper pod %s: %w", name, err)
+	if _, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		return "", false, fmt.Errorf("failed to create helper pod %s: %w", spec.Name, err)
+	}
+	del := func() {
+		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, spec.Name, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 	}
 
 	for i := 0; i < 30; i++ {
 		common.Sleep(5 * time.Second)
-		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, spec.Name, metav1.GetOptions{})
 		if pErr != nil {
 			continue
 		}
-		phase := string(pd.Status.Phase)
-		if phase == "Succeeded" {
-			p.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: common.Ptr(int64(0)),
-			})
-			common.Sleep(2 * time.Second)
-			return nil
-		}
-		if phase == "Failed" {
-			p.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: common.Ptr(int64(0)),
-			})
-			return fmt.Errorf("helper pod %s failed", name)
+		switch pd.Status.Phase {
+		case corev1.PodSucceeded:
+			logs := k8s.PodLogs(ctx, ns, spec.Name)
+			del()
+			return logs, true, nil
+		case corev1.PodFailed:
+			logs := k8s.PodLogs(ctx, ns, spec.Name)
+			del()
+			return logs, false, nil
 		}
 	}
+	del()
+	return "", false, fmt.Errorf("helper pod %s timed out", spec.Name)
+}
 
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: common.Ptr(int64(0)),
+// RunHelperPod runs a script (sh -c) against a read-write PVC mount, debug-logs
+// its output, and returns an error if the pod failed or timed out. Thin wrapper
+// over RunHelperPodSpec for the heal/bootstrap/reconfigure call sites.
+func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountPath, script, sa string) error {
+	logs, ok, err := p.RunHelperPodSpec(ctx, HelperPodSpec{
+		Name: name, PVCName: pvcName, MountPath: mountPath,
+		Command: []string{"sh", "-c", script}, SA: sa,
 	})
-	return fmt.Errorf("helper pod %s timed out", name)
+	if err != nil {
+		return err
+	}
+	common.DebugLog("helper pod %s output:\n%s", name, logs)
+	if !ok {
+		return fmt.Errorf("helper pod %s failed", name)
+	}
+	return nil
 }
 
-// logHelperPodOutput debug-logs a helper pod's output.
-func (p *GaleraProvider) logHelperPodOutput(ctx context.Context, podName string) {
-	c := k8s.GetClients()
-	cfg := p.Config()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		common.DebugLog("Failed to get helper pod logs: %v", err)
-		return
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	if len(data) > 0 {
-		common.DebugLog("Helper pod output:\n%s", string(data))
-	}
-}
+// (logHelperPodOutput removed — RunHelperPodSpec returns logs directly.)

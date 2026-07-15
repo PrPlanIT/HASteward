@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
@@ -436,70 +435,26 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 }
 
 func (t *galeraTriage) runPVCProbes(ctx context.Context, targets []galeraProbeTarget, ns, sa string) map[string]grastate {
-	c := k8s.GetClients()
 	results := make(map[string]grastate)
-	uid := int64(0)
-
 	for _, tgt := range targets {
-		probeName := tgt.Name + "-triage-probe"
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: probeName, Namespace: ns,
-				Labels: map[string]string{"hasteward-triage": "probe"},
-			},
-			Spec: corev1.PodSpec{
-				RestartPolicy:      corev1.RestartPolicyNever,
-				ServiceAccountName: sa,
-				SecurityContext:    &corev1.PodSecurityContext{RunAsUser: &uid},
-				Containers: []corev1.Container{{
-					Name: "probe", Image: "docker.io/library/busybox:latest",
-					Command: []string{"cat", "/var/lib/mysql/grastate.dat"},
-					VolumeMounts: []corev1.VolumeMount{{
-						Name: "storage", MountPath: "/var/lib/mysql", ReadOnly: true,
-					}},
-				}},
-				Volumes: []corev1.Volume{{
-					Name: "storage",
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: t.p.DataPVCName(tgt.Name),
-						},
-					},
-				}},
-			},
-		}
-		if tgt.Node != "" {
-			pod.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": tgt.Node}
-		}
-
-		if _, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-			common.WarnLog("Failed to create probe pod for %s: %v", tgt.Name, err)
+		// Read-only probe of grastate.dat via the shared helper-pod runner.
+		logs, _, err := t.p.RunHelperPodSpec(ctx, provider.HelperPodSpec{
+			Name:      tgt.Name + "-triage-probe",
+			PVCName:   t.p.DataPVCName(tgt.Name),
+			MountPath: "/var/lib/mysql",
+			Command:   []string{"cat", "/var/lib/mysql/grastate.dat"},
+			SA:        sa,
+			ReadOnly:  true,
+			NodeName:  tgt.Node,
+			Label:     map[string]string{"hasteward-triage": "probe"},
+		})
+		if err != nil {
+			common.WarnLog("PVC probe for %s failed: %v", tgt.Name, err)
 			continue
 		}
-
-		// Wait for completion
-		for attempt := 0; attempt < 30; attempt++ {
-			p, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, probeName, metav1.GetOptions{})
-			if err != nil {
-				break
-			}
-			if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-				break
-			}
-			time.Sleep(5 * time.Second)
+		if len(logs) > 0 {
+			results[tgt.Name] = parseGrastate(tgt.Name, "pvc_probe", logs)
 		}
-
-		// Get logs
-		logReq := c.Clientset.CoreV1().Pods(ns).GetLogs(probeName, &corev1.PodLogOptions{Container: "probe"})
-		logBytes, err := logReq.DoRaw(ctx)
-		if err == nil && len(logBytes) > 0 {
-			results[tgt.Name] = parseGrastate(tgt.Name, "pvc_probe", string(logBytes))
-		}
-
-		// Cleanup
-		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, probeName, metav1.DeleteOptions{
-			GracePeriodSeconds: common.Ptr(int64(0)),
-		})
 	}
 	return results
 }
