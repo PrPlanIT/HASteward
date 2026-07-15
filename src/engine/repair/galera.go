@@ -127,52 +127,11 @@ func (g *galeraRepair) Cleanup(ctx context.Context) {
 
 // Escrow performs the pre-repair escrow backup and diverged per-instance backups.
 func (g *galeraRepair) Escrow(ctx context.Context, result *model.TriageResult) error {
-	cfg := g.p.Config()
-	start := time.Now()
-
-	if !cfg.NoEscrow {
-		if cfg.BackupsPath == "" || cfg.ResticPassword == "" {
-			return fmt.Errorf("repair requires --backups-path and RESTIC_PASSWORD for escrow (or --no-escrow to skip)")
-		}
-
-		if g.donorSelection != nil {
-			donor := g.donorSelection.Pod
-			ns := cfg.Namespace
-			stdinFilename := fmt.Sprintf("%s/%s/%s", ns, cfg.ClusterName, galeraDumpFilename)
-			escrowResult, err := g.backuper.BackupDump(ctx, "backup", donor, stdinFilename, start, nil)
-			if err != nil {
-				return fmt.Errorf("pre-repair backup failed: %w", err)
-			}
-			common.InfoLog("Pre-repair backup from %s: %s", donor, escrowResult.SnapshotID)
-		} else {
-			common.WarnLog("No donor resolved for pre-repair backup. Skipping.")
-		}
-	} else {
-		common.WarnLog("no_escrow=true — proceeding without pre-repair backup")
+	donor := ""
+	if g.donorSelection != nil {
+		donor = g.donorSelection.Pod
 	}
-
-	// Diverged per-instance backups (when split-brain detected)
-	if !result.DataComparison.SafeToHeal && !cfg.NoEscrow {
-		jobID := start.UTC().Format("20060102T150405Z")
-		common.WarnLog("Split-brain detected — capturing per-instance diverged backups (job=%s)", jobID)
-		ns := cfg.Namespace
-		for _, a := range result.Assessments {
-			if !a.IsRunning || !a.IsReady {
-				common.WarnLog("Skipping diverged backup for %s (not running/ready)", a.Pod)
-				continue
-			}
-			stdinFilename := fmt.Sprintf("%s/%s/%d-%s", ns, cfg.ClusterName, a.Instance, galeraDumpFilename)
-			extraTags := map[string]string{"job": jobID}
-			divResult, err := g.backuper.BackupDump(ctx, "diverged", a.Pod, stdinFilename, start, extraTags)
-			if err != nil {
-				common.WarnLog("Failed diverged backup for %s: %v", a.Pod, err)
-				continue
-			}
-			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
-		}
-	}
-
-	return nil
+	return runEscrow(ctx, g.p.Config(), g.backuper, result, donor, galeraDumpFilename)
 }
 
 // PlanTargets determines which instances need healing.

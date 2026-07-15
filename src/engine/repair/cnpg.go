@@ -129,48 +129,8 @@ func (r *cnpgRepair) Cleanup(ctx context.Context) {}
 
 // Escrow performs the pre-repair escrow backup and diverged per-instance backups.
 func (r *cnpgRepair) Escrow(ctx context.Context, result *model.TriageResult) error {
-	cfg := r.p.Config()
-	start := time.Now()
-
-	if !cfg.NoEscrow {
-		if cfg.BackupsPath == "" || cfg.ResticPassword == "" {
-			return fmt.Errorf("repair requires --backups-path and RESTIC_PASSWORD for escrow (or --no-escrow to skip)")
-		}
-
-		primary := k8s.GetNestedString(r.p.Cluster(), "status", "currentPrimary")
-		ns := cfg.Namespace
-		stdinFilename := fmt.Sprintf("%s/%s/%s", ns, cfg.ClusterName, cnpgDumpFilename)
-		escrowResult, err := r.backuper.BackupDump(ctx, "backup", primary, stdinFilename, start, nil)
-		if err != nil {
-			return fmt.Errorf("pre-repair backup failed: %w", err)
-		}
-		common.InfoLog("Pre-repair backup: %s", escrowResult.SnapshotID)
-	} else {
-		common.WarnLog("no_escrow=true — proceeding without pre-repair backup")
-	}
-
-	// Diverged per-instance backups (when split-brain detected)
-	if !result.DataComparison.SafeToHeal && !cfg.NoEscrow {
-		jobID := start.UTC().Format("20060102T150405Z")
-		common.WarnLog("Split-brain detected — capturing per-instance diverged backups (job=%s)", jobID)
-		ns := cfg.Namespace
-		for _, a := range result.Assessments {
-			if !a.IsRunning || !a.IsReady {
-				common.WarnLog("Skipping diverged backup for %s (not running/ready)", a.Pod)
-				continue
-			}
-			stdinFilename := fmt.Sprintf("%s/%s/%d-%s", ns, cfg.ClusterName, a.Instance, cnpgDumpFilename)
-			extraTags := map[string]string{"job": jobID}
-			divResult, err := r.backuper.BackupDump(ctx, "diverged", a.Pod, stdinFilename, start, extraTags)
-			if err != nil {
-				common.WarnLog("Failed diverged backup for %s: %v", a.Pod, err)
-				continue
-			}
-			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
-		}
-	}
-
-	return nil
+	primary := k8s.GetNestedString(r.p.Cluster(), "status", "currentPrimary")
+	return runEscrow(ctx, r.p.Config(), r.backuper, result, primary, cnpgDumpFilename)
 }
 
 // PlanTargets determines which instances need healing.
