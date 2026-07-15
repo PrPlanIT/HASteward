@@ -202,39 +202,7 @@ func (g *galeraRepair) planTargeted(ctx context.Context, result *model.TriageRes
 }
 
 func (g *galeraRepair) planUntargeted(ctx context.Context, result *model.TriageResult) ([]HealTarget, error) {
-	// Safety gate: split-brain -> HARD STOP (no override for untargeted)
-	if !result.DataComparison.SafeToHeal {
-		return nil, fmt.Errorf("HARD STOP: Split-brain detected. Cannot auto-heal all nodes. " +
-			"Admin must review triage output, then use targeted repair: --instance <N>")
-	}
-
-	var targets []HealTarget
-	for _, a := range result.Assessments {
-		if a.NeedsHeal {
-			reason := "needs heal"
-			if len(a.Notes) > 0 {
-				reason = strings.Join(a.Notes, ", ")
-			}
-			targets = append(targets, HealTarget{
-				Pod:         a.Pod,
-				InstanceNum: a.Instance,
-				Reason:      reason,
-			})
-		}
-	}
-
-	if len(targets) == 0 {
-		output.Info("All nodes are healthy. Nothing to heal.")
-		return nil, nil
-	}
-
-	// Display plan
-	output.Section("Repair Plan")
-	for _, t := range targets {
-		output.Bullet(0, "%s (%s)", t.Pod, t.Reason)
-	}
-
-	return targets, nil
+	return buildUntargetedPlan(result, "nodes")
 }
 
 // Heal heals a single Galera node via suspend/pod-delete/wipe/resume.
