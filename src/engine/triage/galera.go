@@ -80,9 +80,9 @@ type galeraTriageData struct {
 	crashloopPods   []corev1.Pod
 	grastateData    []grastate
 	wsrepMap        map[string]*wsrepStatus
-	logRecovered    map[string]int64  // pod -> seqno scraped from mariadbd log (GCache estimate — HINT only)
-	logRecUUID      map[string]string // pod -> cluster UUID scraped from mariadbd log
-	wsrepRecovered  map[string]int64  // pod -> EXACT seqno from a fresh fenced --wsrep-recover (AUTHORITATIVE)
+	logRecovered    map[string]int64                       // pod -> seqno scraped from mariadbd log (GCache estimate — HINT only)
+	logRecUUID      map[string]string                      // pod -> cluster UUID scraped from mariadbd log
+	wsrepRecovered  map[string]provider.WsrepRecoverResult // pod -> authoritative uuid:seqno from a fresh fenced --wsrep-recover
 	effectiveSeqnos map[string]*effectiveSeqno
 	diskUsage       map[string]int
 	pvcStates       map[string]map[string]string // node -> {"storage": "Bound", "galera": "Bound"}
@@ -121,7 +121,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		wsrepMap:        make(map[string]*wsrepStatus),
 		logRecovered:    make(map[string]int64),
 		logRecUUID:      make(map[string]string),
-		wsrepRecovered:  make(map[string]int64),
+		wsrepRecovered:  make(map[string]provider.WsrepRecoverResult),
 		effectiveSeqnos: make(map[string]*effectiveSeqno),
 		diskUsage:       make(map[string]int),
 		pvcStates:       make(map[string]map[string]string),
@@ -360,6 +360,14 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		}
 	}
 
+	// --- Belly-up escalation (Heimlich): evaluate authoritatively before deriving ---
+	// If nothing is serving, read each node's TRUE position via a fenced
+	// wsrep_recover now, so the derivation below and the split-brain check use
+	// Known truth instead of hints. Non-destructive: it fences, reads, restores —
+	// it never declares authority or touches safe_to_bootstrap, so it cannot
+	// hinder recovery. Doing this is triage's job; leaving repair to guess is not.
+	t.maybeDeepRecover(ctx, data)
+
 	// --- Effective seqno ---
 	output.Section("Effective Seqno (data freshness)")
 	crRecovered := getRecoveryMap(t.p.GaleraRecovery(), "recovered")
@@ -382,8 +390,8 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 			logSeqno = v
 		}
 		recSeqno := int64(-1)
-		if v, ok := data.wsrepRecovered[gs.Pod]; ok {
-			recSeqno = v
+		if v, ok := data.wsrepRecovered[gs.Pod]; ok && v.Valid {
+			recSeqno = v.Seqno
 		}
 
 		es := deriveEffectiveSeqno(wsCommitted, crRecSeqno, crStateSeqno, grastateSeqno, logSeqno, recSeqno)
@@ -1049,6 +1057,111 @@ func deriveEffectiveSeqno(wsCommitted, crRec, crState, grastate, logSeqno, recSe
 // Only when this is false — provably nothing live — may triage escalate to the
 // fenced --wsrep-recover. Unsure ⇒ treat as alive (fail-safe): the function
 // returns false only on positive evidence that no member is participating.
+// maybeDeepRecover is triage's on-the-spot, non-destructive escalation for a
+// PROVABLY belly-up cluster. When nothing is serving it fences the cluster,
+// reads each node's authoritative uuid:seqno with wsrep_recover, then restores.
+// It never declares authority, sets safe_to_bootstrap, or SSTs a node — so it
+// cannot leave the datadir in a state that hinders recovery; those mutations stay
+// reserved for repair/bootstrap. Gathering this truth is triage's job: it turns
+// hint-only guesses into Known positions so repair acts informed.
+//
+// The gate is paranoid and fail-closed: escalate ONLY when isAnythingAlive is
+// false AND a fresh authenticated SELECT 1 finds nothing serving on any pod. If
+// anything answers — or we cannot authenticate to prove it dead — we stay
+// hands-off.
+func (t *galeraTriage) maybeDeepRecover(ctx context.Context, data *galeraTriageData) {
+	if isAnythingAlive(data) {
+		return // a Primary/Ready/participating node exists — never fence a live cluster
+	}
+	if len(data.grastateData) == 0 {
+		return // no on-disk state to recover from
+	}
+	if t.anyServing(ctx, data) {
+		output.Printf("Belly-up escalation SKIPPED: a fresh probe found a live server (or the root password is unavailable to prove otherwise) — staying hands-off.\n")
+		return
+	}
+	t.deepRecover(ctx, data)
+}
+
+// anyServing freshly probes every running pod with an authenticated SELECT 1.
+// It returns true if ANY mysqld answers — belt-and-suspenders over the collect-
+// time snapshot so a transiently-missed live node is never fenced. If the root
+// password is unavailable we cannot prove a node is dead, so we fail closed and
+// report the cluster as serving (no fence).
+func (t *galeraTriage) anyServing(ctx context.Context, data *galeraTriageData) bool {
+	pw := t.p.RootPassword()
+	if pw == "" {
+		return true // cannot authenticate to disprove life → assume serving
+	}
+	ns := t.p.Config().Namespace
+	for _, pod := range data.runningPods {
+		res, err := k8s.ExecCommandWithEnv(ctx, pod.Name, ns, "mariadb",
+			map[string]string{"MYSQL_PWD": pw},
+			[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e", "SELECT 1"})
+		if err == nil && strings.TrimSpace(res.Stdout) == "1" {
+			return true
+		}
+	}
+	return false
+}
+
+// deepRecover fences the belly-up cluster, runs wsrep_recover on every node to
+// read its authoritative position, then restores. Restoration (scale back up +
+// resume the operator) is deferred so it runs on EVERY exit path. If pods refuse
+// to terminate we abort before any recover — we must never wsrep_recover a
+// datadir a live mysqld may still hold open (concurrent-open corruption).
+func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) {
+	cfg := t.p.Config()
+	sa := k8s.ServiceAccountFromPods(data.runningPods)
+	origReplicas := int32(t.p.Replicas())
+
+	common.WarnLog("Belly-up cluster, nothing serving — escalating to a fenced wsrep_recover to read authoritative positions (triage evaluation only; the cluster is restored and no authority is declared).")
+	output.Section("Belly-up Escalation (fenced wsrep_recover)")
+
+	common.InfoLog("Suspending MariaDB CR")
+	if err := t.p.SuspendCR(ctx); err != nil {
+		common.WarnLog("deep-recover: suspend CR failed: %v — skipping escalation", err)
+		return
+	}
+	defer func() {
+		if err := t.p.ResumeCR(ctx); err != nil {
+			common.WarnLog("deep-recover: resume CR failed: %v — operator may need a manual resume", err)
+		}
+	}()
+
+	t.p.DeleteRecoveryPods(ctx)
+
+	common.InfoLog("Scaling StatefulSet to 0")
+	if err := t.p.ScaleStatefulSet(ctx, 0); err != nil {
+		common.WarnLog("deep-recover: scale to 0 failed: %v — restoring", err)
+		return
+	}
+	defer func() {
+		common.InfoLog("Restoring StatefulSet to %d replicas", origReplicas)
+		if err := t.p.ScaleStatefulSet(ctx, origReplicas); err != nil {
+			common.WarnLog("deep-recover: restore scale failed: %v — SCALE MANUALLY", err)
+		}
+	}()
+
+	if err := t.p.WaitPodsTerminated(ctx, cfg.DeleteTimeout); err != nil {
+		common.WarnLog("deep-recover: %v — aborting recover (a live mysqld may still hold the datadir; refusing to wsrep_recover)", err)
+		return
+	}
+
+	common.InfoLog("Running wsrep_recover on all nodes")
+	for _, gs := range data.grastateData {
+		rr, err := t.p.RunWsrepRecover(ctx, gs.Pod, sa)
+		if err != nil {
+			common.WarnLog("deep-recover: wsrep_recover %s failed: %v", gs.Pod, err)
+			continue
+		}
+		data.wsrepRecovered[gs.Pod] = rr
+		common.InfoLog("wsrep_recover %s: uuid=%s seqno=%d lastCommitted=%d", gs.Pod, rr.UUID, rr.Seqno, rr.LastCommitted)
+		output.Printf("  %s: uuid=%s seqno=%d (authoritative)\n", gs.Pod, rr.UUID, rr.Seqno)
+	}
+	t.p.DeleteRecoveryPods(ctx)
+}
+
 func isAnythingAlive(data *galeraTriageData) bool {
 	if len(data.primaryMembers) > 0 {
 		return true // a Primary component exists — cluster is (at least partly) serving
