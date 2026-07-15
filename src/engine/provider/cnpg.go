@@ -37,6 +37,16 @@ func (p *CNPGProvider) PodSelector() string { return "cnpg.io/cluster=" + p.cfg.
 // DataPVCName returns the datadir PVC name for a pod (CNPG: the PVC == pod name).
 func (p *CNPGProvider) DataPVCName(pod string) string { return pod }
 
+// NewCNPGProviderForTest builds a provider with injected state, bypassing Validate
+// (no live cluster needed). TEST-ONLY — never call from production code.
+func NewCNPGProviderForTest(cfg *common.Config, instances int64, cluster *unstructured.Unstructured) *CNPGProvider {
+	p := &CNPGProvider{cfg: cfg, instances: instances}
+	if cluster != nil {
+		p.SetCluster(cluster)
+	}
+	return p
+}
+
 func (p *CNPGProvider) Cluster() *unstructured.Unstructured { return p.cluster }
 func (p *CNPGProvider) Spec() map[string]interface{}        { return p.clusterSpec }
 func (p *CNPGProvider) Status() map[string]interface{}      { return p.clusterStatus }

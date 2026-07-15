@@ -214,7 +214,7 @@ func (r *cnpgRepair) Heal(ctx context.Context, target HealTarget) error {
 func (r *cnpgRepair) Stabilize(ctx context.Context) error {
 	output.Section("Post-Repair Stabilization")
 	common.InfoLog("Waiting 30s for CNPG operator to reconcile...")
-	time.Sleep(30 * time.Second)
+	common.Sleep(30 * time.Second)
 	r.waitForAllReady(ctx)
 	return nil
 }
@@ -361,7 +361,7 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 	// Wait for the operator to recreate + start the healed replica on its PVC.
 	common.InfoLog("Waiting for %s to come back online", targetPod)
 	for i := 0; i < 30; i++ {
-		time.Sleep(10 * time.Second)
+		common.Sleep(10 * time.Second)
 		pod, podErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
 		if podErr == nil && k8s.PodReady(*pod, "postgres") {
 			output.Success("Replica %s has been healed!", targetPod)
@@ -369,8 +369,11 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 		}
 	}
 
-	common.WarnLog("%s did not become ready within timeout. CNPG may still be reconciling.", targetPod)
-	return nil
+	// The replica never came back Ready — it has NOT rejoined. Returning nil here
+	// would let the orchestrator record it as healed; report the failure instead so
+	// the result is honest (mirrors the galera #7 fix).
+	return fmt.Errorf("%s did not become Ready after heal — it has not rejoined the cluster; "+
+		"check the pod's logs (a large pg_basebackup may still be running) and re-triage", targetPod)
 }
 
 // displayFinalStatus shows the current cluster state after healing.
