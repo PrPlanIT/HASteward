@@ -249,6 +249,18 @@ build_cache:
       max_age: "7d"
       max_size: "8GB"
 
+# Test suite: `go test ./...` with statement coverage. Declaring a suite replaces
+# the auto-synthesized one (adding -cover) and gates regressions — the whole-module
+# statement total (currently ~17%) must stay >= coverage_min or the suite fails (gate:
+# perform, the default). Floor set below current with headroom; raise as coverage grows.
+test:
+  enabled: true
+  suites:
+    - id: unit
+      tool: go
+      coverage: true
+      coverage_min: 15
+
 commit:
   default_type: docs
   conventional: true
