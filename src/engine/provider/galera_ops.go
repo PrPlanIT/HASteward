@@ -12,6 +12,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/k8s"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -75,30 +76,47 @@ func (p *GaleraProvider) ResumeCR(ctx context.Context) error {
 // on the same cluster. Value format: "<holder>@<RFC3339 timestamp>".
 const FenceLockAnnotation = "hasteward.prplanit.com/bootstrap-lock"
 
-// IsCRSuspended re-fetches the CR and reports its current spec.suspend. Unlike
-// IsSuspended() (cached at Validate time), this is LIVE — used to detect that
-// another HASteward operation is already fencing this cluster.
-func (p *GaleraProvider) IsCRSuspended(ctx context.Context) (bool, error) {
+// AcquireFenceLock atomically takes the cluster fence lock for holder, using
+// optimistic concurrency (the CR's resourceVersion) so two near-simultaneous
+// acquirers cannot both win. Returns (false, nil) — not acquired — if the CR is
+// already suspended (another HASteward op is fencing; they all suspend first), the
+// lock is held fresh (<1h), or another writer won the compare-and-swap; (true,
+// nil) if acquired (the caller MUST release via ClearFenceLock). This is the
+// atomic version of the suspend-check + lock-set, closing the Get->write race.
+// Setting the same annotation bootstrap's stale-lock check reads gives mutual
+// exclusion across both fence operations.
+func (p *GaleraProvider) AcquireFenceLock(ctx context.Context, holder string) (bool, error) {
 	c := k8s.GetClients()
 	cfg := p.Config()
 	obj, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
-	return k8s.GetNestedBool(obj, "spec", "suspend"), nil
-}
-
-// SetFenceLock stamps the fence-lock annotation with holder@now; ClearFenceLock
-// removes it. A bootstrap starting while the lock is held aborts via its existing
-// stale-lock check, giving mutual exclusion across the two fence operations.
-func (p *GaleraProvider) SetFenceLock(ctx context.Context, holder string) error {
-	c := k8s.GetClients()
-	cfg := p.Config()
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s@%s"}}}`,
-		FenceLockAnnotation, holder, time.Now().UTC().Format(time.RFC3339))
-	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
+	if k8s.GetNestedBool(obj, "spec", "suspend") {
+		return false, nil // another HASteward op is already fencing
+	}
+	if lock := obj.GetAnnotations()[FenceLockAnnotation]; lock != "" {
+		if parts := strings.SplitN(lock, "@", 2); len(parts) == 2 {
+			if ts, terr := time.Parse(time.RFC3339, parts[1]); terr == nil && time.Since(ts) < time.Hour {
+				return false, nil // held by a fresh lock
+			}
+		}
+	}
+	// Compare-and-swap: Update carries the Get's resourceVersion, so a concurrent
+	// writer (another acquirer, or the operator) yields a 409 Conflict => we lost.
+	anns := obj.GetAnnotations()
+	if anns == nil {
+		anns = map[string]string{}
+	}
+	anns[FenceLockAnnotation] = holder + "@" + time.Now().UTC().Format(time.RFC3339)
+	obj.SetAnnotations(anns)
+	if _, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // ClearFenceLock removes the fence-lock annotation.

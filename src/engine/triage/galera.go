@@ -1087,21 +1087,20 @@ func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) 
 	sa := k8s.ServiceAccountFromPods(data.runningPods)
 	origReplicas := int32(t.p.Replicas())
 
-	// Serialize against other fence operations. Every HASteward op that fences
-	// (bootstrap, repair, triage) suspends the CR first, so a live suspend means
-	// someone else already holds this cluster — skip rather than fence on top of
-	// them (which would race on suspend/scale/resume and could undo an in-flight
-	// bootstrap). Then take the shared fence lock so a bootstrap starting
-	// mid-recover aborts via its own stale-lock check.
-	if suspended, err := t.p.IsCRSuspended(ctx); err != nil {
-		common.WarnLog("deep-recover: cannot verify CR suspend state (%v) — skipping the fenced recover to be safe", err)
-		return
-	} else if suspended {
-		common.WarnLog("deep-recover: MariaDB CR is already suspended — another HASteward operation is fencing this cluster; skipping the fenced recover")
+	// Serialize against other fence operations. AcquireFenceLock atomically checks
+	// that no other HASteward op is fencing (they all suspend the CR first) and
+	// that the shared fence lock is free, then takes it via a resourceVersion CAS
+	// so two near-simultaneous acquirers can't both win. Not acquired => skip
+	// rather than fence on top of another op (which would race on suspend/scale/
+	// resume and could undo an in-flight bootstrap). A bootstrap starting
+	// mid-recover aborts via its own stale-lock check on the same annotation.
+	acquired, err := t.p.AcquireFenceLock(ctx, "triage-recover")
+	if err != nil {
+		common.WarnLog("deep-recover: could not check/acquire the fence lock (%v) — skipping the fenced recover to be safe", err)
 		return
 	}
-	if err := t.p.SetFenceLock(ctx, "triage-recover"); err != nil {
-		common.WarnLog("deep-recover: could not acquire the fence lock: %v — skipping", err)
+	if !acquired {
+		common.WarnLog("deep-recover: cluster is already suspended or fenced by another HASteward operation — skipping the fenced recover")
 		return
 	}
 	defer func() { _ = t.p.ClearFenceLock(ctx) }()
