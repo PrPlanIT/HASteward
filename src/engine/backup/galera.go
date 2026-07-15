@@ -155,7 +155,7 @@ func (b *galeraBackup) findHealthyPod(ctx context.Context) (string, error) {
 	}
 
 	for _, pod := range pods.Items {
-		if pod.Status.Phase == "Running" && len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
+		if k8s.PodReady(pod, "mariadb") {
 			return pod.Name, nil
 		}
 	}

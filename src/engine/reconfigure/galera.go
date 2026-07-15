@@ -369,8 +369,7 @@ echo "=== Done ==="
 		for j := 0; j < int(originalReplicas); j++ {
 			podName := fmt.Sprintf("%s-%d", cfg.ClusterName, j)
 			pod, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
-			if err == nil && pod.Status.Phase == corev1.PodRunning &&
-				len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
+			if err == nil && k8s.PodReady(*pod, "mariadb") {
 				ready++
 			}
 		}

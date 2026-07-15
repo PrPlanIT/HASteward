@@ -159,9 +159,11 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		}
 	}
 
-	// Identify crashloop pods
+	// Identify crashloop pods — by the mariadb container, NOT container index 0
+	// (which is the alphabetically-first `agent` sidecar; a crashlooping mariadb
+	// behind a Ready agent would otherwise go unflagged).
 	for _, pod := range data.runningPods {
-		if len(pod.Status.ContainerStatuses) > 0 && !pod.Status.ContainerStatuses[0].Ready {
+		if !k8s.ContainerReadyByName(pod, "mariadb") {
 			data.crashloopPods = append(data.crashloopPods, pod)
 		}
 	}
@@ -921,8 +923,7 @@ func displayNonRunning(data *galeraTriageData) {
 	for _, pod := range data.nonRunningPods {
 		reason := "N/A"
 		restarts := int32(0)
-		if len(pod.Status.ContainerStatuses) > 0 {
-			cs := pod.Status.ContainerStatuses[0]
+		if cs, ok := k8s.ContainerStatusByName(pod, "mariadb"); ok {
 			restarts = cs.RestartCount
 			if cs.State.Waiting != nil {
 				reason = cs.State.Waiting.Reason

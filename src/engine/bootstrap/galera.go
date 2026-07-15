@@ -760,7 +760,7 @@ func (b *galeraBootstrap) waitForAllReady(ctx context.Context) {
 		if err == nil {
 			ready := 0
 			for _, p := range pods.Items {
-				if p.Status.Phase == "Running" && len(p.Status.ContainerStatuses) > 0 && p.Status.ContainerStatuses[0].Ready {
+				if k8s.PodReady(p, "mariadb") {
 					ready++
 				}
 			}

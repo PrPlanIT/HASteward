@@ -629,8 +629,7 @@ echo "=== Done! ==="
 	for i := 0; i < healTimeout/10; i++ {
 		time.Sleep(10 * time.Second)
 		pod, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
-		if err == nil && pod.Status.Phase == "Running" &&
-			len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
+		if err == nil && k8s.PodReady(*pod, "mariadb") {
 			ready = true
 			break
 		}
@@ -755,10 +754,7 @@ func (g *galeraRepair) displayFinalStatus(ctx context.Context) {
 	})
 	if err == nil {
 		for _, p := range pods.Items {
-			podReady := false
-			if len(p.Status.ContainerStatuses) > 0 {
-				podReady = p.Status.ContainerStatuses[0].Ready
-			}
+			podReady := k8s.ContainerReadyByName(p, "mariadb")
 			output.Bullet(0, "%s: %s ready=%v", p.Name, p.Status.Phase, podReady)
 		}
 	}
@@ -777,7 +773,7 @@ func (g *galeraRepair) waitForAllReady(ctx context.Context) {
 		if err == nil {
 			ready := 0
 			for _, p := range pods.Items {
-				if p.Status.Phase == "Running" && len(p.Status.ContainerStatuses) > 0 && p.Status.ContainerStatuses[0].Ready {
+				if k8s.PodReady(p, "mariadb") {
 					ready++
 				}
 			}
