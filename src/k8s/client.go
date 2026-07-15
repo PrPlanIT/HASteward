@@ -127,6 +127,29 @@ func SetClientsForTest(c *Clients) (restore func()) {
 	return func() { clients = prev }
 }
 
+// FindCondition returns the status.conditions[] entry of the given type, or nil.
+// Engine-agnostic: works on any CR's status map (MariaDB, CNPG, …).
+func FindCondition(status map[string]interface{}, condType string) map[string]interface{} {
+	conditions, ok := status["conditions"]
+	if !ok {
+		return nil
+	}
+	condSlice, ok := conditions.([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, c := range condSlice {
+		cond, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := cond["type"].(string); t == condType {
+			return cond
+		}
+	}
+	return nil
+}
+
 // ServiceAccountFromPods returns the ServiceAccountName from the first pod
 // with one set, falling back to "default". This lets spawned probe/heal pods
 // inherit the workload's own SA rather than assuming a specific name exists

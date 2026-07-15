@@ -6,8 +6,26 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// WaitForPodGone polls until the named pod returns NotFound (truly deleted), or
+// returns an error if it survives all attempts. Transient (non-NotFound) API
+// errors are retried. A gone pod on the first check returns immediately.
+func WaitForPodGone(ctx context.Context, namespace, pod string, attempts, intervalSec int) error {
+	for i := 0; i < attempts; i++ {
+		_, err := GetClients().Clientset.CoreV1().Pods(namespace).Get(ctx, pod, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			common.DebugLog("WaitForPodGone(%s): transient error: %v", pod, err)
+		}
+		common.Sleep(time.Duration(intervalSec) * time.Second)
+	}
+	return fmt.Errorf("pod %s did not terminate within %ds", pod, attempts*intervalSec)
+}
 
 // FindReadyPod returns the name of the first pod matching selector whose named
 // container is Running+Ready, or an error if none qualifies. Readiness is judged

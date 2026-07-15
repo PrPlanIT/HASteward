@@ -561,18 +561,7 @@ func (g *galeraReconfigure) scaleStatefulSet(ctx context.Context, replicas int32
 
 // waitForPodGone blocks until pod returns NotFound. Strict — only NotFound counts.
 func waitForPodGone(ctx context.Context, ns, podName string) error {
-	c := k8s.GetClients()
-	for i := 0; i < 60; i++ {
-		_, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			common.DebugLog("waitForPodGone(%s): transient error: %v", podName, err)
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return fmt.Errorf("pod %s did not terminate within 300s", podName)
+	return k8s.WaitForPodGone(ctx, ns, podName, 60, 5)
 }
 
 // runHelperWithRetry runs a helper pod with mount retry for CSI detach lag.

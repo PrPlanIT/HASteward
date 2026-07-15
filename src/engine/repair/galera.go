@@ -606,20 +606,7 @@ echo "=== Done! ==="
 // Returns error if the pod does not disappear within timeout.
 // Transient API errors are retried — only NotFound counts as success.
 func (g *galeraRepair) waitForPodGone(ctx context.Context, podName string) error {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	for i := 0; i < 30; i++ {
-		_, err := c.Clientset.CoreV1().Pods(cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil // pod is truly gone
-			}
-			// Transient API error — keep retrying
-			common.DebugLog("waitForPodGone(%s): transient error: %v", podName, err)
-		}
-		common.Sleep(2 * time.Second)
-	}
-	return fmt.Errorf("pod %s did not terminate within 60s — PVC may still be attached", podName)
+	return k8s.WaitForPodGone(ctx, g.p.Config().Namespace, podName, 30, 2)
 }
 
 // runHelperWithRetry wraps runHelperPod with bounded retry for PVC detach lag.
@@ -670,8 +657,8 @@ func (g *galeraRepair) displayFinalStatus(ctx context.Context) {
 	}
 
 	status := k8s.GetNestedMap(obj, "status")
-	readyCond := provider.FindCondition(status, "Ready")
-	galeraCond := provider.FindCondition(status, "GaleraReady")
+	readyCond := k8s.FindCondition(status, "Ready")
+	galeraCond := k8s.FindCondition(status, "GaleraReady")
 
 	output.Section("Final Status")
 	if readyCond != nil {

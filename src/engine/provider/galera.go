@@ -70,8 +70,8 @@ func (p *GaleraProvider) SetMariaDB(obj *unstructured.Unstructured) {
 	p.mariadb = obj
 	p.mariadbSpec = k8s.GetNestedMap(obj, "spec")
 	p.mariadbStatus = k8s.GetNestedMap(obj, "status")
-	p.readyCondition = FindCondition(p.mariadbStatus, "Ready")
-	p.galeraCondition = FindCondition(p.mariadbStatus, "GaleraReady")
+	p.readyCondition = k8s.FindCondition(p.mariadbStatus, "Ready")
+	p.galeraCondition = k8s.FindCondition(p.mariadbStatus, "GaleraReady")
 	p.galeraRecovery = k8s.GetNestedMap(obj, "status", "galeraRecovery")
 	p.isSuspended = k8s.GetNestedBool(obj, "spec", "suspend")
 }
@@ -129,27 +129,5 @@ func (p *GaleraProvider) fetchRootPassword(ctx context.Context) error {
 	// Also register the base64-encoded version in case it leaks
 	common.RegisterSecret(base64.StdEncoding.EncodeToString(data))
 
-	return nil
-}
-
-// FindCondition extracts a condition by type from the status.conditions array.
-func FindCondition(status map[string]interface{}, condType string) map[string]interface{} {
-	conditions, ok := status["conditions"]
-	if !ok {
-		return nil
-	}
-	condSlice, ok := conditions.([]interface{})
-	if !ok {
-		return nil
-	}
-	for _, c := range condSlice {
-		cond, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if t, _ := cond["type"].(string); t == condType {
-			return cond
-		}
-	}
 	return nil
 }
