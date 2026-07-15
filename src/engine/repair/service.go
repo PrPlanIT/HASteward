@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 )
 
@@ -55,6 +56,16 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	}
 	result.Cluster = triage.Cluster
 	sink.Step("assess", "done")
+
+	// Dry-run stops HERE. Assess (triage) is the only read-only phase; every phase below
+	// mutates the cluster — SafetyGate suspends the operator CR, Escrow writes backups,
+	// Heal clears datadirs. A --dry-run must preview, never mutate. (The --unwedge
+	// deadlock breaker previews and stops even earlier, in PreAssess.)
+	if r.DryRun() {
+		output.Info("DRY RUN: triage complete — stopping before any mutation (no CR suspend, escrow, or heal)")
+		result.Duration = time.Since(start)
+		return result, nil
+	}
 
 	// Phase 2: Safety gate
 	sink.Step("safety-gate", "running")

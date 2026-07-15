@@ -9,6 +9,10 @@ import (
 // Repairer is the engine-specific hook contract for repair operations.
 type Repairer interface {
 	Name() string
+	// DryRun reports whether this is a preview run. The service stops a dry-run after
+	// Assess (the only read-only phase) — before SafetyGate, escrow, or heal touch the
+	// cluster. A --dry-run must never mutate.
+	DryRun() bool
 	// OperationLock acquires an exclusive, cluster-scoped lock for the whole repair
 	// operation, serializing it against other HASteward mutations on the same cluster
 	// (which share the cnpg.io/reconciliationLoop switch and fencedInstances annotation).

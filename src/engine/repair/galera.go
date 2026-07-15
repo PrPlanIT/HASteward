@@ -50,6 +50,9 @@ type galeraRepair struct {
 
 func (g *galeraRepair) Name() string { return "galera" }
 
+// DryRun reports whether this is a preview run (--dry-run).
+func (g *galeraRepair) DryRun() bool { return g.p.Config().DryRun }
+
 // OperationLock is a no-op for Galera — it does not share the CNPG cluster-scoped
 // reconciliation switch / fencedInstances annotation that the lease guards.
 func (g *galeraRepair) OperationLock(ctx context.Context) (func(), error) {
@@ -117,7 +120,12 @@ func (g *galeraRepair) Cleanup(ctx context.Context) {
 		return
 	}
 	common.InfoLog("Cleanup: resuming MariaDB CR (suspended by SafetyGate, run exited before heal)")
-	if err := g.p.ResumeCR(ctx); err != nil {
+	// Use a fresh, bounded context: the run's ctx may already be cancelled (e.g. the
+	// operation was interrupted by a signal), and the resume MUST still reach the API —
+	// leaving the operator suspended is the worst outcome (#29).
+	resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := g.p.ResumeCR(resumeCtx); err != nil {
 		common.WarnLog("Cleanup: failed to resume CR: %v — operator may need a manual resume", err)
 		return
 	}

@@ -62,6 +62,9 @@ type cnpgRepair struct {
 
 func (r *cnpgRepair) Name() string { return "cnpg" }
 
+// DryRun reports whether this is a preview run (--dry-run).
+func (r *cnpgRepair) DryRun() bool { return r.p.Config().DryRun }
+
 // OperationLock takes the exclusive cluster lease for the duration of the repair.
 func (r *cnpgRepair) OperationLock(ctx context.Context) (func(), error) {
 	cfg := r.p.Config()
