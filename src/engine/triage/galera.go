@@ -532,9 +532,12 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 	if !comparison.SafeToHeal {
 		output.Println()
 		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		output.Println("  CRITICAL: POTENTIAL SPLIT-BRAIN DETECTED")
-		output.Println("  A non-primary node has MORE RECENT data than the primary component!")
-		output.Printf("  Most advanced node: %s (seqno: %d)\n", comparison.MostAdvanced, comparison.MostAdvancedValue)
+		output.Println("  CRITICAL: NOT SAFE TO HEAL — authority is undeterminable")
+		output.Println("  Triage could not prove a single, consistent most-advanced history.")
+		output.Println("  Reason(s):")
+		for _, sb := range comparison.SplitBrainDetails {
+			output.Printf("    - %s\n", sb)
+		}
 		output.Println("  DO NOT blindly heal - review the data above and decide manually.")
 		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 		output.Println()
@@ -589,28 +592,54 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.DataComparison {
 	var warnings, splitBrain []string
 
-	// UUID divergence check
+	// UUID divergence check. Only AUTHORITATIVE cluster-identity evidence may
+	// declare a split-brain; stale hints must never drive the verdict.
 	uuidSet := make(map[string]bool)
-	for _, gs := range data.grastateData {
-		if gs.UUID != "unknown" && gs.UUID != "00000000-0000-0000-0000-000000000000" {
-			uuidSet[gs.UUID] = true
-		}
-	}
-	for _, ws := range data.wsrepMap {
-		if ws.ClusterStateUUID != "" {
-			uuidSet[ws.ClusterStateUUID] = true
-		}
-	}
-	// Include UUIDs scraped from belly-up nodes' logs — a wedged node on a
-	// divergent history is invisible to grastate/wsrep and would otherwise
-	// hide the split.
-	for _, u := range data.logRecUUID {
-		if u != "" && u != "00000000-0000-0000-0000-000000000000" {
+	addUUID := func(u string) {
+		if u != "" && u != "unknown" && u != "00000000-0000-0000-0000-000000000000" {
 			uuidSet[u] = true
 		}
 	}
-	for _, u := range data.recoveryUUIDs {
-		uuidSet[u] = true
+	// Per node, take the SINGLE most-authoritative UUID and compare across nodes:
+	//   fenced wsrep_recover  >  live wsrep_cluster_state_uuid  >  grastate.dat
+	// A lower source is consulted only when the higher one is absent, so a stale
+	// on-disk grastate can never contradict a fresh recover for the same node.
+	nodes := make(map[string]bool)
+	for _, gs := range data.grastateData {
+		nodes[gs.Pod] = true
+	}
+	for pod := range data.wsrepMap {
+		nodes[pod] = true
+	}
+	for pod := range data.wsrepRecovered {
+		nodes[pod] = true
+	}
+	for pod := range nodes {
+		if rr, ok := data.wsrepRecovered[pod]; ok && rr.Valid {
+			addUUID(rr.UUID)
+		} else if ws := data.wsrepMap[pod]; ws != nil && ws.ClusterStateUUID != "" {
+			addUUID(ws.ClusterStateUUID)
+		} else {
+			addUUID(grastateUUIDFor(data.grastateData, pod))
+		}
+	}
+	// HINT-only UUID sources — the operator's galeraRecovery snapshot and mariadbd-
+	// log scrapes — go STALE. Observed on osticket while perfectly healthy: the
+	// operator snapshot still carried the pre-bootstrap incarnation 57a2c75c… long
+	// after the cluster reformed as b86ff01c…, and folding the stale hint in
+	// manufactured a phantom split-brain. So a hint may never contradict an
+	// authoritative reading; we consult hints ONLY when NO node yielded an
+	// authoritative UUID at all (a fully belly-up cluster not yet fenced), where a
+	// log scrape is the sole remaining way to see a wedged node on a divergent
+	// history. (When blind, the UNREAD fail-closed check below already blocks any
+	// heal — the hint only sharpens the reported reason.)
+	if len(uuidSet) == 0 {
+		for _, u := range data.logRecUUID {
+			addUUID(u)
+		}
+		for _, u := range data.recoveryUUIDs {
+			addUUID(u)
+		}
 	}
 	if len(uuidSet) > 1 {
 		uuids := make([]string, 0, len(uuidSet))
@@ -1235,6 +1264,15 @@ func grastateSeqnoFor(all []grastate, pod string) int64 {
 		}
 	}
 	return -1
+}
+
+func grastateUUIDFor(all []grastate, pod string) string {
+	for _, gs := range all {
+		if gs.Pod == pod {
+			return gs.UUID
+		}
+	}
+	return ""
 }
 
 func parseGrastate(podName, source, raw string) grastate {

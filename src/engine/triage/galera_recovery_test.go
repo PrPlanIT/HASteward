@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -138,6 +139,94 @@ func TestCrossInstanceComparison_FailClosed(t *testing.T) {
 		cmp := tr.crossInstanceComparison(data)
 		if cmp.SafeToHeal {
 			t.Fatalf("SafeToHeal=true with divergent UUIDs; want false")
+		}
+	})
+}
+
+// TestCrossInstanceComparison_HintsNeverDriveUUIDVerdict pins the rule that only
+// AUTHORITATIVE cluster-identity evidence (fenced wsrep_recover > live wsrep >
+// grastate.dat) may declare a UUID split-brain. The operator's galeraRecovery
+// snapshot and mariadbd-log scrapes are HINTS: they go stale and must never
+// manufacture a split-brain that authoritative evidence contradicts. They are
+// consulted only when NO node yields any authoritative UUID.
+func TestCrossInstanceComparison_HintsNeverDriveUUIDVerdict(t *testing.T) {
+	tr := &galeraTriage{}
+	const liveUUID = "b86ff01c-7f4c-11f1-886f-97420130fdb6"  // current incarnation
+	const staleUUID = "57a2c75c-6dea-11f1-b59b-266ed2cb955a" // pre-bootstrap incarnation
+	const zeroUUID = "00000000-0000-0000-0000-000000000000"
+
+	t.Run("healthy cluster + stale operator-snapshot UUID -> NOT flagged (osticket normal-day repro)", func(t *testing.T) {
+		// Verified live: osticket runs as b86ff01c… while the operator's
+		// galeraRecovery still carries the pre-bootstrap 57a2c75c…. The stale hint
+		// must not turn a healthy cluster into a phantom split-brain.
+		ws := func() *wsrepStatus {
+			return &wsrepStatus{ClusterStateUUID: liveUUID, ClusterStatus: "Primary", LocalState: 4, LastCommitted: 100}
+		}
+		data := &galeraTriageData{
+			grastateData: []grastate{
+				{Pod: "n-0", UUID: zeroUUID}, // bootstrap node, grastate zeroed
+				{Pod: "n-1", UUID: liveUUID},
+				{Pod: "n-2", UUID: liveUUID},
+			},
+			wsrepMap:       map[string]*wsrepStatus{"n-0": ws(), "n-1": ws(), "n-2": ws()},
+			primaryMembers: []string{"n-0", "n-1", "n-2"},
+			effectiveSeqnos: map[string]*effectiveSeqno{
+				"n-0": {Value: 100, Source: "wsrep_last_committed", Known: true},
+				"n-1": {Value: 100, Source: "wsrep_last_committed", Known: true},
+				"n-2": {Value: 100, Source: "wsrep_last_committed", Known: true},
+			},
+			recoveryUUIDs: []string{staleUUID}, // the stale operator snapshot
+		}
+		cmp := tr.crossInstanceComparison(data)
+		if !cmp.SafeToHeal {
+			t.Fatalf("SafeToHeal=false on a healthy cluster; the stale operator-snapshot UUID manufactured a phantom split-brain. details=%v", cmp.SplitBrainDetails)
+		}
+		if containsSub(cmp.SplitBrainDetails, staleUUID) {
+			t.Fatalf("stale operator-snapshot UUID leaked into the verdict: %v", cmp.SplitBrainDetails)
+		}
+	})
+
+	t.Run("authoritative fenced recover identical + phantom log hint -> safe", func(t *testing.T) {
+		data := &galeraTriageData{
+			grastateData: []grastate{{Pod: "n-0", UUID: "unknown"}, {Pod: "n-1", UUID: "unknown"}, {Pod: "n-2", UUID: "unknown"}},
+			wsrepMap:     map[string]*wsrepStatus{},
+			effectiveSeqnos: map[string]*effectiveSeqno{
+				"n-0": {Value: 552481, Source: "wsrep_recover", Known: true},
+				"n-1": {Value: 552481, Source: "wsrep_recover", Known: true},
+				"n-2": {Value: 552481, Source: "wsrep_recover", Known: true},
+			},
+			wsrepRecovered: map[string]provider.WsrepRecoverResult{
+				"n-0": {UUID: staleUUID, Seqno: 552481, Valid: true},
+				"n-1": {UUID: staleUUID, Seqno: 552481, Valid: true},
+				"n-2": {UUID: staleUUID, Seqno: 552481, Valid: true},
+			},
+			logRecUUID: map[string]string{"n-1": "620dcb6c-6dea-11f1-b59b-000000000000"}, // phantom
+		}
+		cmp := tr.crossInstanceComparison(data)
+		if !cmp.SafeToHeal {
+			t.Fatalf("SafeToHeal=false; a proven-identical lineage was flagged by a phantom log hint. details=%v", cmp.SplitBrainDetails)
+		}
+	})
+
+	t.Run("fully blind (no authoritative UUID) + divergent hints -> surfaces as split-brain", func(t *testing.T) {
+		// Nothing serving, grastate unclean, no recover yet: a log scrape is the
+		// ONLY visibility into a wedged node's history, so divergent hints must
+		// still surface (fail-closed already blocks the heal; this sharpens why).
+		data := &galeraTriageData{
+			grastateData: []grastate{{Pod: "n-0", UUID: "unknown"}, {Pod: "n-1", UUID: "unknown"}},
+			wsrepMap:     map[string]*wsrepStatus{},
+			effectiveSeqnos: map[string]*effectiveSeqno{
+				"n-0": {Value: -1, Source: "none", Known: false},
+				"n-1": {Value: -1, Source: "none", Known: false},
+			},
+			logRecUUID: map[string]string{"n-0": staleUUID, "n-1": liveUUID}, // two histories
+		}
+		cmp := tr.crossInstanceComparison(data)
+		if cmp.SafeToHeal {
+			t.Fatalf("SafeToHeal=true with divergent hint UUIDs and no authoritative reading; want false")
+		}
+		if !containsSub(cmp.SplitBrainDetails, "Multiple cluster UUIDs") {
+			t.Fatalf("expected the hint UUID divergence to surface when blind; got %v", cmp.SplitBrainDetails)
 		}
 	})
 }
