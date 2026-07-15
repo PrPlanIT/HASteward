@@ -250,8 +250,20 @@ func (r *cnpgRepair) healInstance(ctx context.Context, targetPod, targetPVC stri
 	if err != nil {
 		return fmt.Errorf("refusing to heal %s: cannot verify the current primary before a destructive rebuild: %w", targetPod, err)
 	}
-	if primary := k8s.GetNestedString(guardObj, "status", "currentPrimary"); targetPod == primary {
+	primary := k8s.GetNestedString(guardObj, "status", "currentPrimary")
+	if targetPod == primary {
 		return fmt.Errorf("REFUSING to heal %s: it is the current primary — fencing and rebuilding the primary's datadir would cause an outage and data loss; fail over (switchover) to a replica first, then re-triage", targetPod)
+	}
+
+	// #24 — re-resolve the basebackup source live. hcfg.primaryIP was captured during
+	// Assess; if CNPG failed the primary over since, basebackup would clone from a stale
+	// node. Prefer the CURRENT primary's live PodIP (from the same fresh fetch that guards
+	// above); fall back to the captured value if the live lookup hiccups (no regression).
+	primaryIP := hcfg.primaryIP
+	if primary != "" {
+		if pp, perr := c.Clientset.CoreV1().Pods(ns).Get(ctx, primary, metav1.GetOptions{}); perr == nil && pp.Status.PodIP != "" {
+			primaryIP = pp.Status.PodIP
+		}
 	}
 
 	// Derive names
@@ -265,7 +277,7 @@ func (r *cnpgRepair) healInstance(ctx context.Context, targetPod, targetPVC stri
 	output.Bullet(0, "1. Fence instance (CNPG stops managing it)")
 	output.Bullet(0, "2. Disable reconcile loop so the operator yields the PVC")
 	output.Bullet(0, "3. Clear pgdata on PVC %s (PVC preserved)", targetPVC)
-	output.Bullet(0, "4. Run pg_basebackup from primary (%s)", hcfg.primaryIP)
+	output.Bullet(0, "4. Run pg_basebackup from primary (%s)", primaryIP)
 	output.Bullet(0, "5. Remove fence + re-enable reconcile (CNPG takes over the replica)")
 
 	uid, _ := strconv.ParseInt(hcfg.postgresUID, 10, 64)
@@ -296,7 +308,7 @@ pg_basebackup -h %s -p 5432 -U streaming_replica \
   --checkpoint=fast \
   -d "sslmode=verify-ca sslcert=/tmp/certs/tls.crt sslkey=/tmp/certs/tls.key sslrootcert=/tmp/certs/ca.crt"
 
-echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
+echo "=== pg_basebackup complete! ==="`, primaryIP)
 
 	healPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
