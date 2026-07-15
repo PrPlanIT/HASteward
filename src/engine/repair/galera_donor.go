@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -173,66 +172,49 @@ func (g *galeraRepair) probeWsrep(ctx context.Context, podName string) DonorProb
 		return result
 	}
 
-	// Execute wsrep query. Retry only on transport failures (exec error or
-	// empty stdout). Parsing failures are deterministic — do not retry.
-	var execOut *k8s.ExecResult
-	var execErr error
+	// Query wsrep status with retry on transport failures (error or no data).
+	// Parsing failures are deterministic — do not retry.
+	var m map[string]string
+	var qErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		execOut, execErr = k8s.ExecCommandWithEnv(ctx, podName, cfg.Namespace, "mariadb",
-			map[string]string{"MYSQL_PWD": g.p.RootPassword()},
-			[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
-				"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
-					"WHERE VARIABLE_NAME IN (" +
-					"'wsrep_local_state_comment', " +
-					"'wsrep_connected', 'wsrep_ready', " +
-					"'wsrep_cluster_size'" +
-					") ORDER BY VARIABLE_NAME"})
-		if execErr == nil && strings.TrimSpace(execOut.Stdout) != "" {
+		m, qErr = g.p.QueryWsrep(ctx, podName)
+		if qErr == nil && len(m) > 0 {
 			break
 		}
 		if attempt < 3 {
-			if execErr != nil {
-				common.WarnLog("wsrep probe exec on %s failed (attempt %d/3): %v", podName, attempt, execErr)
+			if qErr != nil {
+				common.WarnLog("wsrep probe exec on %s failed (attempt %d/3): %v", podName, attempt, qErr)
 			} else {
-				common.WarnLog("wsrep probe on %s returned empty stdout (attempt %d/3)", podName, attempt)
+				common.WarnLog("wsrep probe on %s returned no data (attempt %d/3)", podName, attempt)
 			}
-			time.Sleep(time.Duration(attempt*5) * time.Second)
+			common.Sleep(time.Duration(attempt*5) * time.Second)
 		}
 	}
-	if execErr != nil {
+	if qErr != nil {
 		result.ExecOK = false
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("wsrep exec failed on %s after retries: %v", podName, execErr))
+			fmt.Sprintf("wsrep exec failed on %s after retries: %v", podName, qErr))
 		return result
 	}
-	if strings.TrimSpace(execOut.Stdout) == "" {
+	if len(m) == 0 {
 		result.ExecOK = false
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("wsrep query on %s returned empty output after retries", podName))
+			fmt.Sprintf("wsrep query on %s returned no data after retries", podName))
 		return result
 	}
 	result.ExecOK = true
 
-	// Parse — lowercase keys (MariaDB returns UPPERCASE from information_schema)
-	for _, line := range strings.Split(execOut.Stdout, "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-		switch key {
-		case "wsrep_ready":
-			b := val == "ON"
-			result.WsrepReady = &b
-		case "wsrep_connected":
-			b := val == "ON"
-			result.WsrepConnected = &b
-		case "wsrep_local_state_comment":
-			result.StateComment = val
-		case "wsrep_cluster_size":
-			result.ClusterSize, _ = strconv.Atoi(val)
-		}
+	if v, ok := m["wsrep_ready"]; ok {
+		b := v == "ON"
+		result.WsrepReady = &b
+	}
+	if v, ok := m["wsrep_connected"]; ok {
+		b := v == "ON"
+		result.WsrepConnected = &b
+	}
+	result.StateComment = m["wsrep_local_state_comment"]
+	if v, ok := m["wsrep_cluster_size"]; ok {
+		result.ClusterSize, _ = strconv.Atoi(v)
 	}
 
 	// Hard validation: if exec succeeded with data but no state was parsed,

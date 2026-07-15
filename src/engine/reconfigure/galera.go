@@ -477,39 +477,22 @@ func (g *galeraReconfigure) probeWsrep(ctx context.Context, podName, ns string) 
 	}
 	result := probeResult{}
 
-	execResult, err := k8s.ExecCommandWithEnv(ctx, podName, ns, "mariadb",
-		map[string]string{"MYSQL_PWD": g.p.RootPassword()},
-		[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
-			"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
-				"WHERE VARIABLE_NAME IN (" +
-				"'wsrep_local_state_comment', " +
-				"'wsrep_connected', 'wsrep_ready', " +
-				"'wsrep_cluster_size'" +
-				") ORDER BY VARIABLE_NAME"})
+	m, err := g.p.QueryWsrep(ctx, podName)
 	if err != nil {
 		return result
 	}
 	result.ExecOK = true
-
-	for _, line := range strings.Split(execResult.Stdout, "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(parts[0]))
-		val := strings.TrimSpace(parts[1])
-		switch key {
-		case "wsrep_ready":
-			b := val == "ON"
-			result.WsrepReady = &b
-		case "wsrep_connected":
-			b := val == "ON"
-			result.WsrepConnected = &b
-		case "wsrep_local_state_comment":
-			result.StateComment = val
-		case "wsrep_cluster_size":
-			fmt.Sscanf(val, "%d", &result.ClusterSize)
-		}
+	if v, ok := m["wsrep_ready"]; ok {
+		b := v == "ON"
+		result.WsrepReady = &b
+	}
+	if v, ok := m["wsrep_connected"]; ok {
+		b := v == "ON"
+		result.WsrepConnected = &b
+	}
+	result.StateComment = m["wsrep_local_state_comment"]
+	if v, ok := m["wsrep_cluster_size"]; ok {
+		fmt.Sscanf(v, "%d", &result.ClusterSize)
 	}
 	return result
 }

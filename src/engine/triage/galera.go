@@ -287,27 +287,14 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		if crashloopNames[pod.Name] {
 			continue
 		}
-		// Use MYSQL_PWD env var to avoid password in process args
-		result, err := k8s.ExecCommandWithEnv(ctx, pod.Name, ns, "mariadb",
-			map[string]string{"MYSQL_PWD": t.p.RootPassword()},
-			[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
-				"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
-					"WHERE VARIABLE_NAME IN (" +
-					"'wsrep_local_state', 'wsrep_local_state_comment', " +
-					"'wsrep_cluster_status', 'wsrep_cluster_size', " +
-					"'wsrep_connected', 'wsrep_ready', " +
-					"'wsrep_local_recv_queue', 'wsrep_local_send_queue', " +
-					"'wsrep_cluster_state_uuid', " +
-					"'wsrep_last_committed', " +
-					"'wsrep_flow_control_paused'" +
-					") ORDER BY VARIABLE_NAME"})
+		m, err := t.p.QueryWsrep(ctx, pod.Name)
 		if err != nil {
 			common.WarnLog("wsrep query failed on %s: %v — wsrep data for this node will be incomplete", pod.Name, err)
 			// LastCommitted -1 = unknown. NEVER let a failed query masquerade as seqno 0.
 			data.wsrepMap[pod.Name] = &wsrepStatus{LastCommitted: -1}
 			continue
 		}
-		ws := parseWsrepStatus(result.Stdout)
+		ws := parseWsrepStatus(m)
 		data.wsrepMap[pod.Name] = ws
 		displayWsrep(pod.Name, ws)
 	}
@@ -1294,36 +1281,23 @@ func parseGrastate(podName, source, raw string) grastate {
 	return gs
 }
 
-func parseWsrepStatus(raw string) *wsrepStatus {
+// parseWsrepStatus maps a wsrep_* name->value map (from provider.QueryWsrep) into
+// a wsrepStatus. LastCommitted defaults to -1 (unknown) when absent.
+func parseWsrepStatus(m map[string]string) *wsrepStatus {
 	ws := &wsrepStatus{LastCommitted: -1}
-	for _, line := range strings.Split(raw, "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		key := strings.ToLower(parts[0])
-		val := parts[1]
-		switch key {
-		case "wsrep_local_state":
-			ws.LocalState, _ = strconv.Atoi(val)
-		case "wsrep_local_state_comment":
-			ws.LocalStateComment = val
-		case "wsrep_cluster_status":
-			ws.ClusterStatus = val
-		case "wsrep_cluster_size":
-			ws.ClusterSize = val
-		case "wsrep_connected":
-			ws.Connected = val
-		case "wsrep_ready":
-			ws.Ready = val
-		case "wsrep_cluster_state_uuid":
-			ws.ClusterStateUUID = val
-		case "wsrep_last_committed":
-			ws.LastCommitted, _ = strconv.ParseInt(val, 10, 64)
-		case "wsrep_flow_control_paused":
-			ws.FlowControlPaused = val
-		}
+	if v, ok := m["wsrep_local_state"]; ok {
+		ws.LocalState, _ = strconv.Atoi(v)
 	}
+	ws.LocalStateComment = m["wsrep_local_state_comment"]
+	ws.ClusterStatus = m["wsrep_cluster_status"]
+	ws.ClusterSize = m["wsrep_cluster_size"]
+	ws.Connected = m["wsrep_connected"]
+	ws.Ready = m["wsrep_ready"]
+	ws.ClusterStateUUID = m["wsrep_cluster_state_uuid"]
+	if v, ok := m["wsrep_last_committed"]; ok {
+		ws.LastCommitted, _ = strconv.ParseInt(v, 10, 64)
+	}
+	ws.FlowControlPaused = m["wsrep_flow_control_paused"]
 	return ws
 }
 

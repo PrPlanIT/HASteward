@@ -6,6 +6,7 @@ import (
 	"io"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -125,6 +126,30 @@ func (p *GaleraProvider) DeleteRecoveryPods(ctx context.Context) {
 			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 	}
+}
+
+// QueryWsrep runs the wsrep GLOBAL_STATUS query on a serving node and returns
+// every wsrep_* status variable as a lowercased name->value map. Shared by triage
+// (collect), repair (donor probe), and reconfigure so the exec + query + tab-parse
+// lives in one place; each caller reads the fields it needs.
+func (p *GaleraProvider) QueryWsrep(ctx context.Context, pod string) (map[string]string, error) {
+	res, err := k8s.ExecCommandWithEnv(ctx, pod, p.Config().Namespace, "mariadb",
+		map[string]string{"MYSQL_PWD": p.RootPassword()},
+		[]string{"mariadb", "-u", "root", "--batch", "--skip-column-names", "-e",
+			"SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS " +
+				"WHERE VARIABLE_NAME LIKE 'wsrep_%' ORDER BY VARIABLE_NAME"})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string)
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(parts[0]))] = strings.TrimSpace(parts[1])
+	}
+	return out, nil
 }
 
 // RunWsrepRecover runs `mariadbd --wsrep-recover` against a node's PVC via a
