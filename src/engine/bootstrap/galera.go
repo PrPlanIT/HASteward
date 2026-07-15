@@ -364,13 +364,11 @@ echo "reverted safe_to_bootstrap to 0"`
 	for _, a := range assessments {
 		rr, rerr := b.p.RunWsrepRecover(ctx, a.Pod, sa)
 		if rerr != nil {
-			common.WarnLog("wsrep_recover failed for %s: %v — falling back to grastate seqno %d", a.Pod, rerr, a.EffectiveSeqno)
-			recoveredResults[a.Pod] = wsrepRecoverResult{
-				UUID:          a.UUID,
-				Seqno:         a.EffectiveSeqno,
-				LastCommitted: a.EffectiveSeqno,
-				Valid:         false,
-			}
+			// Skip a failed recover — never fabricate a hint-backed fallback. An
+			// invalid entry can't nominate authority (isAuthoritativeRecover), but a
+			// fabricated seqno still skewed the gcache IST-gap below; excluding the
+			// node entirely is correct and mirrors triage's deepRecover.
+			common.WarnLog("wsrep_recover failed for %s: %v — excluding this node from candidate/lineage selection", a.Pod, rerr)
 			continue
 		}
 		common.InfoLog("wsrep_recover %s: uuid=%s seqno=%d lastCommitted=%d", a.Pod, rr.UUID, rr.Seqno, rr.LastCommitted)
