@@ -122,7 +122,7 @@ func (e *resticPVCEscrow) captureOne(ctx context.Context, rc *restic.Client, pvc
 	}
 	defer func() {
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 	}()
 
@@ -297,4 +297,3 @@ func escrowTarPath(ns, cluster, pvc string) string {
 }
 
 // ptr returns a pointer to v.
-func ptr[T any](v T) *T { return &v }

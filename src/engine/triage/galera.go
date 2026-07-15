@@ -511,7 +511,7 @@ func (t *galeraTriage) runPVCProbes(ctx context.Context, targets []galeraProbeTa
 
 		// Cleanup
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, probeName, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 	}
 	return results
@@ -1466,4 +1466,3 @@ func joinGaleraProbeNames(targets []galeraProbeTarget) string {
 }
 
 // ptr returns a pointer to the given value.
-func ptr[T any](v T) *T { return &v }

@@ -182,13 +182,13 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 		output.Section("Rescue")
 
 		// 1. Delete helpers
-		delErr1 := c.Clientset.CoreV1().Pods(ns).Delete(ctx, storageHelper, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+		delErr1 := c.Clientset.CoreV1().Pods(ns).Delete(ctx, storageHelper, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 		if delErr1 != nil && !apierrors.IsNotFound(delErr1) {
 			common.WarnLog("Rescue: failed to delete storage helper: %v", delErr1)
 		} else {
 			common.InfoLog("Rescue: storage helper deleted or absent")
 		}
-		delErr2 := c.Clientset.CoreV1().Pods(ns).Delete(ctx, galeraHelper, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+		delErr2 := c.Clientset.CoreV1().Pods(ns).Delete(ctx, galeraHelper, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 		if delErr2 != nil && !apierrors.IsNotFound(delErr2) {
 			common.WarnLog("Rescue: failed to delete galera helper: %v", delErr2)
 		} else {
@@ -360,7 +360,7 @@ echo "=== Done ==="
 	common.InfoLog("STEP 8: Waiting for pods to come back online")
 	healTimeout := cfg.HealTimeout
 	if healTimeout <= 0 {
-		healTimeout = 600
+		healTimeout = common.DefaultHealTimeout
 	}
 	allReady := false
 	for i := 0; i < healTimeout/10; i++ {
@@ -648,17 +648,17 @@ func (g *galeraReconfigure) runHelperPod(ctx context.Context, name, ns, pvc, mou
 		}
 		if p.Status.Phase == corev1.PodSucceeded {
 			g.logHelperOutput(ctx, ns, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 			time.Sleep(2 * time.Second)
 			return nil
 		}
 		if p.Status.Phase == corev1.PodFailed {
 			g.logHelperOutput(ctx, ns, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 			return fmt.Errorf("helper pod %s failed", name)
 		}
 	}
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 	return fmt.Errorf("helper pod %s timed out", name)
 }
 
@@ -676,5 +676,3 @@ func (g *galeraReconfigure) logHelperOutput(ctx context.Context, ns, podName str
 		common.DebugLog("Helper pod output:\n%s", buf.String())
 	}
 }
-
-func ptr[T any](v T) *T { return &v }

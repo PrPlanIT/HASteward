@@ -427,11 +427,11 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	// Rescue cleanup function — restores scale + resumes CR.
 	rescue := func() {
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, storageHelper, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 		if hasGaleraPVC {
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, galeraHelper, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 		}
 		if scaledDown {
@@ -475,7 +475,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	// Wait for target pod to be truly gone (404)
 	deleteTimeout := cfg.DeleteTimeout
 	if deleteTimeout <= 0 {
-		deleteTimeout = 300
+		deleteTimeout = common.DefaultDeleteTimeout
 	}
 	podGone := false
 	for i := 0; i < deleteTimeout/5; i++ {
@@ -622,7 +622,7 @@ echo "=== Done! ==="
 	common.InfoLog("Waiting for %s to come back online", targetPod)
 	healTimeout := cfg.HealTimeout
 	if healTimeout <= 0 {
-		healTimeout = 600
+		healTimeout = common.DefaultHealTimeout
 	}
 
 	ready := false
@@ -775,5 +775,3 @@ func (g *galeraRepair) waitForAllReady(ctx context.Context) {
 	}
 	common.WarnLog("Not all pods became ready within timeout")
 }
-
-func ptr[T any](v T) *T { return &v }

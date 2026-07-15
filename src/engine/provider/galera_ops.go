@@ -49,8 +49,6 @@ type WsrepRecoverResult struct {
 	Valid         bool
 }
 
-func ptr[T any](v T) *T { return &v }
-
 // SuspendCR patches the MariaDB CR to spec.suspend=true, stopping operator
 // reconciliation so it cannot recreate pods during a fenced operation.
 func (p *GaleraProvider) SuspendCR(ctx context.Context) error {
@@ -96,7 +94,7 @@ func (p *GaleraProvider) WaitPodsTerminated(ctx context.Context, timeoutSec int)
 	c := k8s.GetClients()
 	cfg := p.Config()
 	if timeoutSec <= 0 {
-		timeoutSec = 300
+		timeoutSec = common.DefaultDeleteTimeout
 	}
 	sel := "app.kubernetes.io/instance=" + cfg.ClusterName
 	for i := 0; i < timeoutSec/5; i++ {
@@ -124,7 +122,7 @@ func (p *GaleraProvider) DeleteRecoveryPods(ctx context.Context) {
 	}
 	for _, pd := range pods.Items {
 		_ = c.Clientset.CoreV1().Pods(cfg.Namespace).Delete(ctx, pd.Name, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 	}
 }
@@ -200,7 +198,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 		if phase == "Succeeded" || phase == "Failed" {
 			podOutput = p.helperPodOutput(ctx, helperName)
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 			time.Sleep(2 * time.Second)
 			break
@@ -209,7 +207,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 
 	if podOutput == "" {
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 		return WsrepRecoverResult{}, fmt.Errorf("wsrep_recover pod %s produced no output or timed out", helperName)
 	}
@@ -327,7 +325,7 @@ func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountP
 		if phase == "Succeeded" {
 			p.logHelperPodOutput(ctx, name)
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 			time.Sleep(2 * time.Second)
 			return nil
@@ -335,14 +333,14 @@ func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountP
 		if phase == "Failed" {
 			p.logHelperPodOutput(ctx, name)
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 			return fmt.Errorf("helper pod %s failed", name)
 		}
 	}
 
 	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
+		GracePeriodSeconds: common.Ptr(int64(0)),
 	})
 	return fmt.Errorf("helper pod %s timed out", name)
 }

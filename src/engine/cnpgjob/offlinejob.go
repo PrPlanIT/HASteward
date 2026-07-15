@@ -69,7 +69,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	cleanup := func() {
 		if helperCreated {
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.HelperPodName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 			common.InfoLog("%s pod %s deleted", job.Label, job.HelperPodName)
 		}
@@ -118,7 +118,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		job.TargetPod, job.Label)
 	deleteTimeout := job.DeleteTimeoutSec
 	if deleteTimeout <= 0 {
-		deleteTimeout = 300
+		deleteTimeout = common.DefaultDeleteTimeout
 	}
 	acquired := false
 	for elapsed := 0; elapsed < deleteTimeout; elapsed++ {
@@ -138,7 +138,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 			return fmt.Errorf("%s pod failed before acquiring PVC", job.Label)
 		}
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.TargetPod, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 		time.Sleep(1 * time.Second)
 	}
@@ -183,7 +183,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 
 	// Drop the helper pod, releasing the PVC.
 	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.HelperPodName, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
+		GracePeriodSeconds: common.Ptr(int64(0)),
 	})
 	helperCreated = false
 	time.Sleep(3 * time.Second)
@@ -318,5 +318,3 @@ func logHelperOutput(ctx context.Context, ns, podName string) {
 		common.InfoLog("Helper pod output:\n%s", string(data))
 	}
 }
-
-func ptr[T any](v T) *T { return &v }

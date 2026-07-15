@@ -520,7 +520,7 @@ func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget
 
 		// Cleanup
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, probeName, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
+			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
 	}
 

@@ -147,7 +147,7 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 		// Delete replica pods to force clean re-sync
 		for _, replica := range replicas {
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, replica, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
+				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
 		}
 		common.InfoLog("Replicas unfenced and deleted — they will re-sync from primary via streaming replication")
@@ -174,4 +174,3 @@ func (r *cnpgRestore) unfenceAll(ctx context.Context, ns string) {
 }
 
 // ptr returns a pointer to the given value.
-func ptr[T any](v T) *T { return &v }
