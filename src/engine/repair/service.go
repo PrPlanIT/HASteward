@@ -25,6 +25,12 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	}
 	defer release()
 
+	// Guarantee any state the engine suspended for the run's duration (e.g. the
+	// operator CR) is restored on EVERY exit path — including an escrow failure or
+	// a run that plans no targets. Runs before release() (defers are LIFO), so the
+	// CR is resumed before the operation lock is dropped.
+	defer r.Cleanup(ctx)
+
 	// Phase 0: Deadlock breaker. Inert unless --unwedge and a breakable deadlock is
 	// detected; when it fires it clears disposable datadirs offline (escrow-gated)
 	// so the subsequent Assess finds a healthy primary instead of aborting.

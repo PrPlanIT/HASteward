@@ -52,8 +52,8 @@ type healConfig struct {
 
 // cnpgRepair implements Repairer for CloudNativePG PostgreSQL clusters.
 type cnpgRepair struct {
-	p       *provider.CNPGProvider
-	triager triage.Triager
+	p        *provider.CNPGProvider
+	triager  triage.Triager
 	backuper backup.Backer
 
 	// Populated during Assess, used by later phases.
@@ -121,6 +121,11 @@ func (r *cnpgRepair) SafetyGate(ctx context.Context, result *model.TriageResult)
 	// Primary validation already performed in Assess. Nothing additional needed.
 	return nil
 }
+
+// Cleanup is a no-op for CNPG: it never suspends the operator CR for the run's
+// duration, and the cluster-scoped reconciliation switch is released by
+// OperationLock's returned func. Present to satisfy the Repairer contract.
+func (r *cnpgRepair) Cleanup(ctx context.Context) {}
 
 // Escrow performs the pre-repair escrow backup and diverged per-instance backups.
 func (r *cnpgRepair) Escrow(ctx context.Context, result *model.TriageResult) error {

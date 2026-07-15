@@ -25,6 +25,10 @@ type Repairer interface {
 	Heal(ctx context.Context, target HealTarget) error
 	Stabilize(ctx context.Context) error
 	Reassess(ctx context.Context) (*model.TriageResult, error)
+	// Cleanup restores any cluster state the run mutated for its own duration
+	// (e.g. a suspended operator CR) and MUST be safe to call on every exit path,
+	// including partial failures and no-op runs. Invoked via defer by the service.
+	Cleanup(ctx context.Context)
 }
 
 // HealTarget identifies a single instance to heal.

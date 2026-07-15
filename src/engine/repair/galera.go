@@ -108,6 +108,23 @@ func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResul
 	return nil
 }
 
+// Cleanup resumes the MariaDB CR if the run still holds it suspended. SafetyGate
+// suspends it up front (before the donor probe); healNode resumes it after a heal.
+// A run that exits before healing — escrow failure, a healthy target, nothing to
+// heal — would otherwise leave the operator suspended, so the service defers this
+// as the always-restore backstop. Idempotent: a no-op once the CR is resumed.
+func (g *galeraRepair) Cleanup(ctx context.Context) {
+	if !g.crSuspended {
+		return
+	}
+	common.InfoLog("Cleanup: resuming MariaDB CR (suspended by SafetyGate, run exited before heal)")
+	if err := g.p.ResumeCR(ctx); err != nil {
+		common.WarnLog("Cleanup: failed to resume CR: %v — operator may need a manual resume", err)
+		return
+	}
+	g.crSuspended = false
+}
+
 // Escrow performs the pre-repair escrow backup and diverged per-instance backups.
 func (g *galeraRepair) Escrow(ctx context.Context, result *model.TriageResult) error {
 	cfg := g.p.Config()
@@ -422,6 +439,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		}
 		if suspended {
 			g.p.ResumeCR(ctx)
+			g.crSuspended = false
 		}
 		if suspended || scaledDown {
 			common.WarnLog("HEAL FAILED for %s. Scale restored, CR resumed.", targetPod)
@@ -438,6 +456,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 			return fmt.Errorf("failed to suspend CR: %w", err)
 		}
 		suspended = true
+		g.crSuspended = true // keep the struct flag truthful so Cleanup/rescue know
 		time.Sleep(3 * time.Second)
 	}
 
@@ -597,6 +616,7 @@ echo "=== Done! ==="
 		return fmt.Errorf("failed to resume CR: %w", err)
 	}
 	suspended = false
+	g.crSuspended = false
 
 	// Wait for pod to come back online
 	common.InfoLog("Waiting for %s to come back online", targetPod)
