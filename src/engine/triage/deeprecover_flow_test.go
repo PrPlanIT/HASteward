@@ -132,3 +132,47 @@ func TestDeepRecover_FenceRecoverRestore(t *testing.T) {
 		t.Fatal("deepRecover must NOT set forceClusterBootstrapInPod — evaluation only")
 	}
 }
+
+// TestDeepRecover_SkipsWhenAlreadySuspended guards #16: if the CR is already
+// suspended (another HASteward op is fencing), deepRecover must NOT fence on top
+// of it — no recover, no scaling.
+func TestDeepRecover_SkipsWhenAlreadySuspended(t *testing.T) {
+	ctx := context.Background()
+	cr := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "k8s.mariadb.com/v1alpha1",
+		"kind":       "MariaDB",
+		"metadata":   map[string]interface{}{"name": "c", "namespace": "ns"},
+		"spec":       map[string]interface{}{"suspend": true, "replicas": int64(3), "image": "mariadb:11"}, // ALREADY suspended
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{k8s.MariaDBGVR: "MariaDBList"},
+		cr,
+	)
+	replicas := int32(3)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}, Spec: appsv1.StatefulSetSpec{Replicas: &replicas}}
+	cs := fake.NewSimpleClientset(sts)
+	var scaled bool
+	cs.PrependReactor("update", "statefulsets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if ua, ok := a.(clienttesting.UpdateAction); ok && ua.GetSubresource() == "scale" {
+			scaled = true
+		}
+		return false, nil, nil
+	})
+
+	defer common.DisableSleepForTest()()
+	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs, Dynamic: dyn})()
+
+	p := provider.NewGaleraProviderForTest(&common.Config{ClusterName: "c", Namespace: "ns", DeleteTimeout: 5}, 3, cr)
+	tr := &galeraTriage{p: p}
+	data := &galeraTriageData{grastateData: []grastate{{Pod: "c-0"}}, wsrepRecovered: make(map[string]provider.WsrepRecoverResult)}
+
+	tr.deepRecover(ctx, data)
+
+	if len(data.wsrepRecovered) != 0 {
+		t.Fatalf("deepRecover must not recover while another op holds the fence; got %v", data.wsrepRecovered)
+	}
+	if scaled {
+		t.Fatal("deepRecover must not scale the StatefulSet when the CR is already suspended")
+	}
+}

@@ -22,7 +22,7 @@ import (
 
 const (
 	gcacheThreshold = int64(10000)
-	bootstrapLockAn = "hasteward.prplanit.com/bootstrap-lock"
+	bootstrapLockAn = provider.FenceLockAnnotation // shared fence lock (triage deep-recover sets it too)
 	// zeroUUID / maxPhantomSeqno are shared with triage via the provider — aliased
 	// here so the lineage-analysis code below reads naturally.
 	zeroUUID        = provider.ZeroUUID

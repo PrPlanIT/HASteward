@@ -1087,6 +1087,25 @@ func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) 
 	sa := k8s.ServiceAccountFromPods(data.runningPods)
 	origReplicas := int32(t.p.Replicas())
 
+	// Serialize against other fence operations. Every HASteward op that fences
+	// (bootstrap, repair, triage) suspends the CR first, so a live suspend means
+	// someone else already holds this cluster — skip rather than fence on top of
+	// them (which would race on suspend/scale/resume and could undo an in-flight
+	// bootstrap). Then take the shared fence lock so a bootstrap starting
+	// mid-recover aborts via its own stale-lock check.
+	if suspended, err := t.p.IsCRSuspended(ctx); err != nil {
+		common.WarnLog("deep-recover: cannot verify CR suspend state (%v) — skipping the fenced recover to be safe", err)
+		return
+	} else if suspended {
+		common.WarnLog("deep-recover: MariaDB CR is already suspended — another HASteward operation is fencing this cluster; skipping the fenced recover")
+		return
+	}
+	if err := t.p.SetFenceLock(ctx, "triage-recover"); err != nil {
+		common.WarnLog("deep-recover: could not acquire the fence lock: %v — skipping", err)
+		return
+	}
+	defer func() { _ = t.p.ClearFenceLock(ctx) }()
+
 	common.WarnLog("Belly-up cluster, nothing serving — escalating to a fenced wsrep_recover to read authoritative positions (triage evaluation only; the cluster is restored and no authority is declared).")
 	output.Section("Belly-up Escalation (fenced wsrep_recover)")
 

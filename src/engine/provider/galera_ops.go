@@ -70,6 +70,47 @@ func (p *GaleraProvider) ResumeCR(ctx context.Context) error {
 	return err
 }
 
+// FenceLockAnnotation serializes the disruptive fence->recover operations
+// (bootstrap, triage deep-recover) so two cannot fight over suspend/scale/recover
+// on the same cluster. Value format: "<holder>@<RFC3339 timestamp>".
+const FenceLockAnnotation = "hasteward.prplanit.com/bootstrap-lock"
+
+// IsCRSuspended re-fetches the CR and reports its current spec.suspend. Unlike
+// IsSuspended() (cached at Validate time), this is LIVE — used to detect that
+// another HASteward operation is already fencing this cluster.
+func (p *GaleraProvider) IsCRSuspended(ctx context.Context) (bool, error) {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	obj, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	return k8s.GetNestedBool(obj, "spec", "suspend"), nil
+}
+
+// SetFenceLock stamps the fence-lock annotation with holder@now; ClearFenceLock
+// removes it. A bootstrap starting while the lock is held aborts via its existing
+// stale-lock check, giving mutual exclusion across the two fence operations.
+func (p *GaleraProvider) SetFenceLock(ctx context.Context, holder string) error {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s@%s"}}}`,
+		FenceLockAnnotation, holder, time.Now().UTC().Format(time.RFC3339))
+	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
+		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	return err
+}
+
+// ClearFenceLock removes the fence-lock annotation.
+func (p *GaleraProvider) ClearFenceLock(ctx context.Context) error {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, FenceLockAnnotation)
+	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
+		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	return err
+}
+
 // ScaleStatefulSet scales the cluster StatefulSet to the desired replica count.
 func (p *GaleraProvider) ScaleStatefulSet(ctx context.Context, replicas int32) error {
 	c := k8s.GetClients()
