@@ -1,0 +1,73 @@
+package cnpgjob
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/k8s"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+)
+
+// TestRun_RestoresReconciliationOnAmbiguousDisableError guards #20: if the
+// disable-reconciliation PATCH returns an error (which may still have committed
+// server-side), Run must ALWAYS re-enable reconciliation on the way out — never
+// leave the whole cluster permanently unreconciled.
+func TestRun_RestoresReconciliationOnAmbiguousDisableError(t *testing.T) {
+	defer common.DisableSleepForTest()()
+
+	cluster := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata":   map[string]interface{}{"name": "pg", "namespace": "ns"},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{k8s.CNPGClusterGVR: "ClusterList"},
+		cluster,
+	)
+
+	// Fail the "disable" patch (simulating a commit-but-client-errors outcome) and
+	// record whether the "re-enable" patch (reconciliationLoop: null) is issued.
+	var restoreIssued bool
+	dyn.PrependReactor("patch", "clusters", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		body := string(a.(clienttesting.PatchAction).GetPatch())
+		switch {
+		case strings.Contains(body, `"disabled"`):
+			return true, nil, fmt.Errorf("injected disable failure (may have committed server-side)")
+		case strings.Contains(body, "reconciliationLoop") && strings.Contains(body, "null"):
+			restoreIssued = true
+		}
+		return false, nil, nil
+	})
+
+	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: fake.NewSimpleClientset(), Dynamic: dyn})()
+
+	job := OfflinePVCJob{
+		Namespace:     "ns",
+		ClusterName:   "pg",
+		TargetPod:     "pg-2",
+		TargetPVC:     "pg-2",
+		HelperPodName: "pg-2-clear",
+		Label:         "clear",
+		HelperPod:     &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pg-2-clear", Namespace: "ns"}},
+	}
+	err := Run(context.Background(), job)
+
+	if err == nil {
+		t.Fatal("expected Run to fail on the injected disable error")
+	}
+	if !restoreIssued {
+		t.Fatal("reconciliation was NOT re-enabled after an ambiguous disable failure — cluster left unreconciled (#20)")
+	}
+}

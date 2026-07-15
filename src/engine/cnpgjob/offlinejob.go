@@ -87,19 +87,25 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		return fmt.Errorf("failed to fence %s: %w", job.TargetPod, err)
 	}
 	fenceApplied = true
-	time.Sleep(3 * time.Second)
+	common.Sleep(3 * time.Second)
 
 	// STEP 2: Disable the reconciliation loop so the operator stops recreating the
 	// instance pod (the unwinnable PVC race). The deferred restore is the GUARANTEED
 	// safety net: it runs on every exit path — including panic and, crucially, context
 	// cancellation (via a DETACHED context) — and retries, because a cluster left with
 	// reconciliation disabled is the worst outcome this primitive can produce.
+	//
+	// Arm the restore BEFORE issuing the disable: a PATCH can commit server-side while
+	// the client still sees an error (apiserver rollout, timeout mid-response), so an
+	// ambiguous disable must still be undone. restoreReconciliation no-ops while
+	// reconcileDisabled is false, so arming it early is safe.
+	defer restoreReconciliation(job.ClusterName, ns, &reconcileDisabled)
 	if err := SetReconciliationLoop(ctx, ns, job.ClusterName, true /* disabled */); err != nil {
+		reconcileDisabled = true // ambiguous — the PATCH may have committed; force the restore
 		cleanup()
 		return fmt.Errorf("failed to disable reconciliation loop: %w", err)
 	}
 	reconcileDisabled = true
-	defer restoreReconciliation(job.ClusterName, ns, &reconcileDisabled)
 
 	// STEP 3: Create the helper pod. It stays Pending until the PVC is free.
 	common.InfoLog("STEP 2: Creating %s pod %s", job.Label, job.HelperPodName)
@@ -108,7 +114,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		return fmt.Errorf("failed to create %s pod: %w", job.Label, err)
 	}
 	helperCreated = true
-	time.Sleep(2 * time.Second)
+	common.Sleep(2 * time.Second)
 
 	// STEP 4: Free the PVC. With reconciliation disabled, one delete is enough — the
 	// operator will not recreate the instance pod — but the RWO volume detach/attach
@@ -140,7 +146,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.TargetPod, metav1.DeleteOptions{
 			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
-		time.Sleep(1 * time.Second)
+		common.Sleep(1 * time.Second)
 	}
 	if !acquired {
 		logHelperOutput(ctx, ns, job.HelperPodName)
@@ -156,7 +162,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	}
 	succeeded := false
 	for i := 0; i < completeTimeout/5; i++ {
-		time.Sleep(5 * time.Second)
+		common.Sleep(5 * time.Second)
 		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, job.HelperPodName, metav1.GetOptions{})
 		if hpErr != nil {
 			continue
@@ -186,7 +192,7 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		GracePeriodSeconds: common.Ptr(int64(0)),
 	})
 	helperCreated = false
-	time.Sleep(3 * time.Second)
+	common.Sleep(3 * time.Second)
 
 	// STEP 6: Restore the operator BEFORE handing the instance back. Re-enabling
 	// reconciliation first exits the hazardous "reconcile disabled" state as early as
@@ -230,7 +236,7 @@ func restoreReconciliation(cluster, ns string, stillDisabled *bool) {
 			return
 		}
 		common.WarnLog("attempt %d/5: failed to re-enable reconciliation on %s: %v", attempt, cluster, err)
-		time.Sleep(3 * time.Second)
+		common.Sleep(3 * time.Second)
 	}
 	common.WarnLog("CRITICAL: could not re-enable reconciliation on cluster %s after 5 attempts.", cluster)
 	common.WarnLog("Re-enable manually: kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop-", cluster, ns)
