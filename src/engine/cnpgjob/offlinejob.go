@@ -38,6 +38,12 @@ type OfflinePVCJob struct {
 	// (default 300). CompleteTimeoutSec bounds the helper's own work (default 600).
 	DeleteTimeoutSec   int
 	CompleteTimeoutSec int
+	// OnPVCAcquired, when non-nil, runs WHILE the helper pod holds the PVC — replacing
+	// the wait-for-Succeeded step. It lets the caller keep all decision logic in Go and
+	// drive the helper as a dumb exec target (typically a `sleep infinity` pod). When
+	// nil, Run keeps the historical behavior: the HelperPod runs its own command to
+	// completion and Run waits for it to Succeed.
+	OnPVCAcquired func(ctx context.Context) error
 }
 
 // Run runs a helper pod that must take over a fenced instance's RWO PVC.
@@ -154,38 +160,51 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		return fmt.Errorf("timeout: %s pod never acquired PVC after %ds", job.Label, deleteTimeout)
 	}
 
-	// STEP 5: Wait for the helper to finish its work.
-	common.InfoLog("STEP 4: Waiting for the %s pod to complete", job.Label)
-	completeTimeout := job.CompleteTimeoutSec
-	if completeTimeout <= 0 {
-		completeTimeout = 600
-	}
-	succeeded := false
-	for i := 0; i < completeTimeout/5; i++ {
-		common.Sleep(5 * time.Second)
-		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, job.HelperPodName, metav1.GetOptions{})
-		if hpErr != nil {
-			continue
-		}
-		switch hp.Status.Phase {
-		case corev1.PodSucceeded:
-			succeeded = true
-		case corev1.PodFailed:
+	// STEP 5: Do the work while the helper holds the PVC.
+	if job.OnPVCAcquired != nil {
+		// Go-driven mode: the helper is a dumb exec target (e.g. `sleep infinity`); all
+		// decision logic runs here, in Go, exec'd into the helper. On failure the fence
+		// is left in place (cleanup warns) — never falsely reported as done.
+		common.InfoLog("STEP 4: Running Go-driven work on %s", job.HelperPodName)
+		if err := job.OnPVCAcquired(ctx); err != nil {
 			logHelperOutput(ctx, ns, job.HelperPodName)
 			cleanup()
-			return fmt.Errorf("%s pod FAILED for %s", job.Label, job.TargetPod)
+			return fmt.Errorf("%s work failed for %s: %w", job.Label, job.TargetPod, err)
 		}
-		if succeeded {
-			break
+	} else {
+		// Run-once mode: the helper runs its own command to completion.
+		common.InfoLog("STEP 4: Waiting for the %s pod to complete", job.Label)
+		completeTimeout := job.CompleteTimeoutSec
+		if completeTimeout <= 0 {
+			completeTimeout = 600
 		}
-	}
-	if !succeeded {
-		logHelperOutput(ctx, ns, job.HelperPodName)
-		cleanup()
-		return fmt.Errorf("%s pod timed out after %ds for %s", job.Label, completeTimeout, job.TargetPod)
-	}
+		succeeded := false
+		for i := 0; i < completeTimeout/5; i++ {
+			common.Sleep(5 * time.Second)
+			hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, job.HelperPodName, metav1.GetOptions{})
+			if hpErr != nil {
+				continue
+			}
+			switch hp.Status.Phase {
+			case corev1.PodSucceeded:
+				succeeded = true
+			case corev1.PodFailed:
+				logHelperOutput(ctx, ns, job.HelperPodName)
+				cleanup()
+				return fmt.Errorf("%s pod FAILED for %s", job.Label, job.TargetPod)
+			}
+			if succeeded {
+				break
+			}
+		}
+		if !succeeded {
+			logHelperOutput(ctx, ns, job.HelperPodName)
+			cleanup()
+			return fmt.Errorf("%s pod timed out after %ds for %s", job.Label, completeTimeout, job.TargetPod)
+		}
 
-	logHelperOutput(ctx, ns, job.HelperPodName)
+		logHelperOutput(ctx, ns, job.HelperPodName)
+	}
 
 	// Drop the helper pod, releasing the PVC.
 	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.HelperPodName, metav1.DeleteOptions{

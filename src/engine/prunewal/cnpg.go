@@ -3,6 +3,7 @@ package prunewal
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,12 +44,14 @@ func (w *cnpgPruner) Name() string { return "cnpg" }
 
 // PruneWAL clears accumulated WAL from a disk-full CNPG instance.
 //
-// This is a destructive operation. It is only safe when:
-//   - The target instance's replicas are at the same LSN as the primary
-//   - The WAL is deadweight held by replication slots that can't advance
-//     (typically because replicas were disconnected and are now caught up)
+// This is a destructive operation. It is only safe when the WAL being removed is
+// deadweight — no live consumer still needs it. That precondition is ENFORCED (not just
+// asserted in prose): every ready replica's replay LSN is checked against the checkpoint
+// REDO LSN before any segment is deleted, and the prune aborts if any replica lags behind
+// (see assertReplicasCaughtUp). --force overrides the gate.
 //
-// Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
+// Flow: triage -> safety check -> fence -> mount PVC -> (Go-driven) verify LSN + clear
+// pg_wal -> unfence. All prune logic runs in Go, exec'd into a dumb helper pod.
 func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error) {
 	cfg := w.p.Config()
 	ns := cfg.Namespace
@@ -138,59 +141,18 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	output.Section("Phase 3: Fence and Clear WAL")
 	walPodName := fmt.Sprintf("%s-prune-wal-%d-%d", cfg.ClusterName, instanceNum, time.Now().Unix())
 
-	walScript := `set -e
-PGDATA="/var/lib/postgresql/data/pgdata"
-WAL_DIR="$PGDATA/pg_wal"
-
-if [ ! -d "$WAL_DIR" ]; then
-  echo "ERROR: pg_wal directory not found"
-  exit 1
-fi
-
-echo "=== Checking pg_wal size ==="
-WAL_SIZE=$(du -sh "$WAL_DIR" 2>/dev/null | cut -f1)
-WAL_COUNT=$(find "$WAL_DIR" -maxdepth 1 -type f -name '0*' | wc -l)
-echo "pg_wal size: $WAL_SIZE ($WAL_COUNT WAL segments)"
-TOTAL_SIZE=$(du -sh "$PGDATA" 2>/dev/null | cut -f1)
-echo "Total pgdata size: $TOTAL_SIZE"
-
-echo "=== Identifying checkpoint WAL segment ==="
-REDO_WAL=$(pg_controldata "$PGDATA" 2>/dev/null | grep "REDO WAL file" | awk '{print $NF}')
-if [ -z "$REDO_WAL" ]; then
-  echo "ERROR: could not determine checkpoint REDO WAL file from pg_controldata"
-  exit 1
-fi
-echo "Checkpoint REDO WAL file: $REDO_WAL"
-
-echo "=== Clearing WAL segments older than $REDO_WAL ==="
-DELETED=0
-KEPT=0
-# Match only 24-hex-char WAL segment filenames (e.g. 000000030000000A00000036)
-# Excludes .history files (e.g. 00000003.history) which pg_rewind needs for timeline tracking
-for f in $(find "$WAL_DIR" -maxdepth 1 -type f -regex '.*/[0-9A-F]\{24\}$' | sort); do
-  BASENAME=$(basename "$f")
-  if [ "$BASENAME" \< "$REDO_WAL" ]; then
-    rm -f "$f"
-    DELETED=$((DELETED + 1))
-  else
-    KEPT=$((KEPT + 1))
-  fi
-done
-
-HISTORY_COUNT=$(find "$WAL_DIR" -maxdepth 1 -type f -name '*.history' | wc -l)
-echo "Preserved $HISTORY_COUNT .history file(s) (required for pg_rewind timeline tracking)"
-
-# Remove stale .partial and .backup files (safe — these are bookkeeping, not data)
-find "$WAL_DIR" -maxdepth 1 -type f -name '*.partial' -delete
-find "$WAL_DIR" -maxdepth 1 -type f -name '*.backup' -delete
-
-echo "Deleted $DELETED WAL segments, kept $KEPT (>= $REDO_WAL)"
-WAL_REMAINING=$(du -sh "$WAL_DIR" 2>/dev/null | cut -f1)
-TOTAL_REMAINING=$(du -sh "$PGDATA" 2>/dev/null | cut -f1)
-echo "pg_wal after prune: $WAL_REMAINING"
-echo "Total pgdata after prune: $TOTAL_REMAINING"
-echo "=== WAL prune complete ==="
-`
+	// The prune runs as Go-driven exec into a dumb helper pod that just holds the PVC
+	// (see OnPVCAcquired below): all decisions — the checkpoint boundary and the LSN
+	// safety gate — are made in Go, exec'd into the helper, and unit-testable.
+	//
+	// Ready replicas are the peers we verify WAL safety against (must not lag behind the
+	// checkpoint). The primary is the target and is not ready, so it never appears here.
+	var readyReplicas []string
+	for _, a := range triageResult.Assessments {
+		if a.Pod != targetPod && a.IsReady {
+			readyReplicas = append(readyReplicas, a.Pod)
+		}
+	}
 
 	uid, gid := parseInt64(postgresUID), parseInt64(postgresGID)
 
@@ -207,9 +169,11 @@ echo "=== WAL prune complete ==="
 				FSGroup:    &gid,
 			},
 			Containers: []corev1.Container{{
-				Name:    "wal-prune",
-				Image:   imageName,
-				Command: []string{"sh", "-c", walScript},
+				Name:  "wal-prune",
+				Image: imageName,
+				// Dumb exec target: just mount the PVC and stay alive. All prune logic
+				// runs from Go via OnPVCAcquired, exec'd into this container.
+				Command: []string{"sh", "-c", "sleep infinity"},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "pgdata", MountPath: "/var/lib/postgresql/data"},
 				},
@@ -232,15 +196,18 @@ echo "=== WAL prune complete ==="
 	// PVC handoff reliable on a responsive cluster (no unwinnable delete race).
 	output.Bullet(0, "Fence, acquire the PVC, prune pg_wal, and restore")
 	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
-		Namespace:          ns,
-		ClusterName:        cfg.ClusterName,
-		TargetPod:          targetPod,
-		TargetPVC:          targetPVC,
-		HelperPod:          walPod,
-		HelperPodName:      walPodName,
-		Label:              "wal-prune",
-		DeleteTimeoutSec:   cfg.DeleteTimeout,
-		CompleteTimeoutSec: 150,
+		Namespace:        ns,
+		ClusterName:      cfg.ClusterName,
+		TargetPod:        targetPod,
+		TargetPVC:        targetPVC,
+		HelperPod:        walPod,
+		HelperPodName:    walPodName,
+		Label:            "wal-prune",
+		DeleteTimeoutSec: cfg.DeleteTimeout,
+		// Go-driven: prune runs here while the helper holds the PVC.
+		OnPVCAcquired: func(ctx context.Context) error {
+			return w.pruneWALOnPVC(ctx, walPodName, ns, readyReplicas)
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -326,6 +293,172 @@ func (w *cnpgPruner) discoverPostgresInfo(ctx context.Context, triageResult *mod
 		return "", "", "", fmt.Errorf("could not determine postgres image from cluster")
 	}
 	return image, "26", "26", nil // default postgres UID/GID
+}
+
+const (
+	pgDataDir = "/var/lib/postgresql/data/pgdata"
+	pgWALDir  = pgDataDir + "/pg_wal"
+)
+
+// pruneWALOnPVC performs the WAL prune as Go-driven exec into the helper pod that holds
+// the target's PVC. Every decision — the checkpoint boundary and the replica-LSN safety
+// gate (#23) — is made here in Go and is unit-testable via the exec hook; the helper pod
+// is a dumb `sleep infinity` exec target.
+func (w *cnpgPruner) pruneWALOnPVC(ctx context.Context, helperPod, ns string, readyReplicas []string) error {
+	// 1. Read the checkpoint REDO boundary from pg_controldata on the mounted PVC.
+	redoWAL, redoLSN, err := w.readCheckpointBoundary(ctx, helperPod, ns)
+	if err != nil {
+		return err
+	}
+	output.Success("Checkpoint REDO WAL file: %s (LSN %s)", redoWAL, redoLSN)
+
+	// 2. Safety gate (#23): no ready replica may lag behind the checkpoint. A replica
+	//    that still needs pre-checkpoint WAL would break if we delete those segments.
+	if err := w.assertReplicasCaughtUp(ctx, ns, readyReplicas, redoLSN); err != nil {
+		return err
+	}
+
+	// 3. Delete WAL segments older than the checkpoint.
+	return w.deleteWALOlderThan(ctx, helperPod, ns, redoWAL)
+}
+
+// readCheckpointBoundary execs pg_controldata and parses the checkpoint REDO WAL file
+// and its LSN — the boundary before which WAL is deletable.
+func (w *cnpgPruner) readCheckpointBoundary(ctx context.Context, helperPod, ns string) (redoWAL, redoLSN string, err error) {
+	res, err := k8s.ExecCommand(ctx, helperPod, ns, "wal-prune", []string{"pg_controldata", pgDataDir})
+	if err != nil {
+		return "", "", fmt.Errorf("pg_controldata failed: %w", err)
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		switch {
+		case strings.Contains(line, "REDO WAL file"):
+			redoWAL = lastField(line)
+		case strings.Contains(line, "REDO location"):
+			redoLSN = lastField(line)
+		}
+	}
+	if redoWAL == "" {
+		return "", "", fmt.Errorf("could not determine checkpoint REDO WAL file from pg_controldata")
+	}
+	if redoLSN == "" {
+		return "", "", fmt.Errorf("could not determine checkpoint REDO location (LSN) from pg_controldata")
+	}
+	return redoWAL, redoLSN, nil
+}
+
+// assertReplicasCaughtUp enforces the prune precondition: every ready replica must have
+// replayed to at least the checkpoint LSN. Aborts otherwise (unless --force), naming the
+// laggards. With no replica to verify against, it also refuses unless --force.
+func (w *cnpgPruner) assertReplicasCaughtUp(ctx context.Context, ns string, replicas []string, redoLSN string) error {
+	force := w.p.Config().Force
+	if len(replicas) == 0 {
+		if !force {
+			return fmt.Errorf("ABORT: no ready replicas to verify WAL safety against — cannot confirm the WAL is deadweight. Re-run with --force to override")
+		}
+		common.WarnLog("force=true — pruning with NO replica to verify against; data safety cannot be confirmed")
+		return nil
+	}
+	redo, err := parseLSN(redoLSN)
+	if err != nil {
+		return fmt.Errorf("cannot parse checkpoint REDO LSN: %w", err)
+	}
+	var lagging []string
+	for _, r := range replicas {
+		res, err := k8s.ExecCommand(ctx, r, ns, "postgres",
+			[]string{"psql", "-U", "postgres", "-d", "postgres", "-tAc", "SELECT pg_last_wal_replay_lsn()"})
+		if err != nil {
+			return fmt.Errorf("could not query replay LSN on replica %s: %w", r, err)
+		}
+		replayStr := strings.TrimSpace(res.Stdout)
+		if replayStr == "" {
+			return fmt.Errorf("replica %s returned an empty replay LSN — cannot verify it is caught up", r)
+		}
+		replay, err := parseLSN(replayStr)
+		if err != nil {
+			return fmt.Errorf("replica %s replay LSN: %w", r, err)
+		}
+		if replay < redo {
+			lagging = append(lagging, fmt.Sprintf("%s (replay %s < checkpoint %s)", r, replayStr, redoLSN))
+		}
+	}
+	if len(lagging) > 0 {
+		if !force {
+			return fmt.Errorf("ABORT: %d replica(s) lag behind the checkpoint and still need pre-checkpoint WAL — pruning would break their replication: %s. Re-run with --force to override",
+				len(lagging), strings.Join(lagging, "; "))
+		}
+		common.WarnLog("force=true — pruning despite lagging replica(s): %s", strings.Join(lagging, "; "))
+		return nil
+	}
+	output.Success("All %d ready replica(s) are at or past the checkpoint — safe to prune", len(replicas))
+	return nil
+}
+
+// deleteWALOlderThan lists the 24-hex-char WAL segments and deletes exactly those older
+// than the checkpoint REDO segment (the delete decision is made in Go), preserving
+// .history files (pg_rewind needs them) and clearing stale .partial/.backup bookkeeping.
+func (w *cnpgPruner) deleteWALOlderThan(ctx context.Context, helperPod, ns, redoWAL string) error {
+	res, err := k8s.ExecCommand(ctx, helperPod, ns, "wal-prune",
+		[]string{"sh", "-c", fmt.Sprintf("find %s -maxdepth 1 -type f -regex '.*/[0-9A-F]\\{24\\}$'", pgWALDir)})
+	if err != nil {
+		return fmt.Errorf("listing WAL segments failed: %w", err)
+	}
+	var toDelete []string
+	kept := 0
+	for _, path := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		base := path[strings.LastIndex(path, "/")+1:]
+		// WAL segment filenames are fixed-width hex, so a lexical compare matches
+		// PostgreSQL's numeric ordering. Delete strictly older than the REDO segment;
+		// keep the REDO segment and everything newer.
+		if base < redoWAL {
+			toDelete = append(toDelete, path)
+		} else {
+			kept++
+		}
+	}
+	if len(toDelete) == 0 {
+		output.Success("No WAL segments older than %s — nothing to prune (kept %d)", redoWAL, kept)
+	} else {
+		if _, err := k8s.ExecCommand(ctx, helperPod, ns, "wal-prune", append([]string{"rm", "-f"}, toDelete...)); err != nil {
+			return fmt.Errorf("deleting %d WAL segment(s) failed: %w", len(toDelete), err)
+		}
+		output.Success("Deleted %d WAL segment(s) older than %s, kept %d", len(toDelete), redoWAL, kept)
+	}
+	// Stale bookkeeping files are safe to drop; .history is preserved for pg_rewind.
+	_, _ = k8s.ExecCommand(ctx, helperPod, ns, "wal-prune",
+		[]string{"sh", "-c", fmt.Sprintf(`find %s -maxdepth 1 -type f \( -name '*.partial' -o -name '*.backup' \) -delete`, pgWALDir)})
+	return nil
+}
+
+// lastField returns the last whitespace-separated token of a line (the value column of
+// pg_controldata's "key:   value" rows).
+func lastField(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
+}
+
+// parseLSN parses a PostgreSQL LSN ("XXX/YYY" hex) into a comparable uint64.
+func parseLSN(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("malformed LSN %q", s)
+	}
+	hi, err := strconv.ParseUint(parts[0], 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("malformed LSN %q: %w", s, err)
+	}
+	lo, err := strconv.ParseUint(parts[1], 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("malformed LSN %q: %w", s, err)
+	}
+	return hi<<32 | lo, nil
 }
 
 // parseInt64 parses a string to int64, returning 0 on failure.
