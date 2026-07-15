@@ -636,8 +636,13 @@ echo "=== Done! ==="
 	}
 
 	if !ready {
-		common.WarnLog("%s did not become ready within timeout. SST may still be in progress.", targetPod)
-		return nil
+		// The node never came back Ready — it has NOT rejoined. Returning nil here
+		// would let the orchestrator record it as healed; report the failure instead
+		// so the result is honest. (A Ready-but-not-yet-"Synced" node below is a
+		// legitimate transient in-cluster state — Donor/Joined catching up — which
+		// the post-repair reassess confirms, so that one is not treated as failure.)
+		return fmt.Errorf("%s did not become Ready within %ds after heal — it has not rejoined the cluster; "+
+			"check the pod's logs (a large SST may still be running) and re-triage", targetPod, healTimeout)
 	}
 
 	// Verify Galera join — K8s Ready alone does not prove cluster membership.
