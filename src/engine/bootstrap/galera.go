@@ -266,8 +266,14 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	genLocked := false
 	safeBootMarked := false // safe_to_bootstrap=1 written on the candidate PVC (STEP 6)
 	forcePatched := false   // forceClusterBootstrapInPod set on the CR (STEP 7)
+	committed := false      // true once the bootstrap is applied (past scale-up) — no rollback after
+	rescued := false        // rescue() runs at most once
 
 	rescue := func() {
+		if rescued {
+			return
+		}
+		rescued = true
 		// Undo the AUTHORITY mutations first, while the pods are still scaled to 0,
 		// so a failed run never resumes the operator with a live directive to
 		// bootstrap from a candidate we just abandoned. Symmetric with STEP 6/7.
@@ -300,6 +306,15 @@ echo "reverted safe_to_bootstrap to 0"`
 			common.WarnLog("BOOTSTRAP FAILED — rolled back (any authority markers cleared, scale restored, CR resumed).")
 		}
 	}
+
+	// Backstop rollback: any exit before the bootstrap commits (past scale-up) —
+	// including a future error path that forgets to call rescue() — rolls back.
+	// Idempotent with the explicit rescue() calls the steps already make.
+	defer func() {
+		if !committed {
+			rescue()
+		}
+	}()
 
 	markAction := func(phase string) {
 		for i := range result.ActionsTaken {
@@ -499,6 +514,7 @@ echo "=== Done ==="
 	}
 	scaledDown = false
 	markAction(model.PhaseScaleUp)
+	committed = true // point of no return — the operator will now bootstrap the candidate
 
 	// STEP 9: Wait for all pods ready (soft timeout: 15 minutes)
 	common.InfoLog("STEP 9: Waiting for all pods to become ready")
