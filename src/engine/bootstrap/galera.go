@@ -3,10 +3,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
-	"io"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,38 +15,24 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
-	zeroUUID        = "00000000-0000-0000-0000-000000000000"
 	gcacheThreshold = int64(10000)
-	maxPhantomSeqno = int64(1e12)
 	bootstrapLockAn = "hasteward.prplanit.com/bootstrap-lock"
-	// mariadbDataDirUID owns /var/lib/mysql in the mariadb image. The wsrep-recover
-	// helper MUST run as this uid — mariadbd aborts if started as root.
-	mariadbDataDirUID = int64(999)
-	// galeraProviderSO is the Galera wsrep provider in the mariadb image. Without it
-	// (and wsrep_on=ON) mariadbd logs "WSREP: disabled, skipping position recovery"
-	// and returns no seqno.
-	galeraProviderSO = "/usr/lib/galera/libgalera_smm.so"
+	// zeroUUID / maxPhantomSeqno are shared with triage via the provider — aliased
+	// here so the lineage-analysis code below reads naturally.
+	zeroUUID        = provider.ZeroUUID
+	maxPhantomSeqno = provider.MaxPhantomSeqno
 )
 
-var (
-	reRecoveredPos = regexp.MustCompile(`Recovered position:\s*([0-9a-fA-F-]+):([0-9-]+)`)
-	reLastCommit   = regexp.MustCompile(`Last committed:\s*([0-9]+)`)
-)
-
-// wsrepRecoverResult holds the parsed output from mariadbd --wsrep-recover.
-type wsrepRecoverResult struct {
-	UUID          string
-	Seqno         int64
-	LastCommitted int64
-	Valid         bool
-}
+// wsrepRecoverResult is the provider's fenced-recover result — the fence + recover
+// primitives now live on *provider.GaleraProvider (shared with triage). Aliased for
+// local brevity.
+type wsrepRecoverResult = provider.WsrepRecoverResult
 
 func init() {
 	Register("galera", func(ep provider.EngineProvider) (Bootstrapper, error) {
@@ -290,10 +273,10 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 				ctx, cfg.ClusterName, types.MergePatchType, []byte(lockClearPatch), metav1.PatchOptions{})
 		}
 		if scaledDown {
-			_ = b.scaleStatefulSet(ctx, originalReplicas)
+			_ = b.p.ScaleStatefulSet(ctx, originalReplicas)
 		}
 		if suspended {
-			_ = b.resumeCR(ctx)
+			_ = b.p.ResumeCR(ctx)
 		}
 		if suspended || scaledDown || genLocked {
 			common.WarnLog("BOOTSTRAP FAILED. CR resumed, scale restored, lock cleared.")
@@ -315,7 +298,7 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 
 	// STEP 1: Suspend CR
 	common.InfoLog("STEP 1: Suspending MariaDB CR")
-	if err := b.suspendCR(ctx); err != nil {
+	if err := b.p.SuspendCR(ctx); err != nil {
 		return fmt.Errorf("failed to suspend CR: %w", err)
 	}
 	suspended = true
@@ -337,34 +320,25 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 
 	// STEP 3: Scale to 0
 	common.InfoLog("STEP 3: Scaling StatefulSet to 0")
-	if err := b.scaleStatefulSet(ctx, 0); err != nil {
+	if err := b.p.ScaleStatefulSet(ctx, 0); err != nil {
 		rescue()
 		return fmt.Errorf("failed to scale StatefulSet to 0: %w", err)
 	}
 	scaledDown = true
 	markAction(model.PhaseScaleDown)
 
-	// Wait for all pods to terminate
-	deleteTimeout := cfg.DeleteTimeout
-	if deleteTimeout <= 0 {
-		deleteTimeout = 300
-	}
-	for i := 0; i < deleteTimeout/5; i++ {
-		pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("app.kubernetes.io/instance=%s", cfg.ClusterName),
-		})
-		if err != nil || len(pods.Items) == 0 {
-			common.InfoLog("All pods terminated")
-			break
-		}
-		time.Sleep(5 * time.Second)
+	// Fence must be CONFIRMED complete before recover — a helper mariadbd must never
+	// open a datadir a real mysqld still holds. Abort (and rescue) if pods survive.
+	if err := b.p.WaitPodsTerminated(ctx, cfg.DeleteTimeout); err != nil {
+		rescue()
+		return err
 	}
 
 	// STEP 4: Run wsrep_recover on all PVCs
 	common.InfoLog("STEP 4: Running wsrep_recover on all PVCs")
 	recoveredResults := make(map[string]wsrepRecoverResult)
 	for _, a := range assessments {
-		rr, rerr := b.runWsrepRecover(ctx, a.Pod, sa)
+		rr, rerr := b.p.RunWsrepRecover(ctx, a.Pod, sa)
 		if rerr != nil {
 			common.WarnLog("wsrep_recover failed for %s: %v — falling back to grastate seqno %d", a.Pod, rerr, a.EffectiveSeqno)
 			recoveredResults[a.Pod] = wsrepRecoverResult{
@@ -428,7 +402,7 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 			common.WarnLog("Node %s is %d transactions behind — exceeds likely gcache window. Removing galera.cache to force SST.", pod, gap)
 			clearScript := `test -f /var/lib/mysql/galera.cache && rm /var/lib/mysql/galera.cache && echo "galera.cache removed — SST will be forced" || echo "no galera.cache present"`
 			helperName := fmt.Sprintf("%s-gcache-clear-%d", cfg.ClusterName, time.Now().Unix())
-			_ = b.runHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", pod), "/var/lib/mysql", clearScript, sa)
+			_ = b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", pod), "/var/lib/mysql", clearScript, sa)
 		}
 	}
 
@@ -447,7 +421,7 @@ sed -i 's/safe_to_bootstrap: 1/safe_to_bootstrap: 0/' /var/lib/mysql/grastate.da
 echo "cleared" || echo "already clean"
 `
 			helperName := fmt.Sprintf("%s-safe-clear-%d", cfg.ClusterName, time.Now().Unix())
-			if serr := b.runHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", a.Pod), "/var/lib/mysql", clearScript, sa); serr != nil {
+			if serr := b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", a.Pod), "/var/lib/mysql", clearScript, sa); serr != nil {
 				common.WarnLog("Failed to clear safe_to_bootstrap on %s: %v", a.Pod, serr)
 			}
 		}
@@ -473,7 +447,7 @@ echo "=== Removing galera.cache for fresh peer discovery ==="
 test -f /var/lib/mysql/galera.cache && rm /var/lib/mysql/galera.cache && echo "removed" || echo "not present"
 echo "=== Done ==="
 `
-	if err := b.runHelperPod(ctx, helperName, storagePVC, "/var/lib/mysql", bootstrapScript, sa); err != nil {
+	if err := b.p.RunHelperPod(ctx, helperName, storagePVC, "/var/lib/mysql", bootstrapScript, sa); err != nil {
 		rescue()
 		return fmt.Errorf("failed to set safe_to_bootstrap: %w", err)
 	}
@@ -492,10 +466,10 @@ echo "=== Done ==="
 
 	// STEP 8: Scale back up
 	common.InfoLog("STEP 8: Scaling StatefulSet to %d", originalReplicas)
-	b.deleteRecoveryPods(ctx)
+	b.p.DeleteRecoveryPods(ctx)
 	time.Sleep(2 * time.Second)
 
-	if err := b.scaleStatefulSet(ctx, originalReplicas); err != nil {
+	if err := b.p.ScaleStatefulSet(ctx, originalReplicas); err != nil {
 		rescue()
 		return fmt.Errorf("failed to scale StatefulSet back up: %w", err)
 	}
@@ -566,7 +540,7 @@ echo "=== Done ==="
 
 	// STEP 11: Resume CR
 	common.InfoLog("STEP 11: Resuming MariaDB CR")
-	if err := b.resumeCR(ctx); err != nil {
+	if err := b.p.ResumeCR(ctx); err != nil {
 		common.WarnLog("Failed to resume CR: %v — manual resume may be required", err)
 	}
 	suspended = false
@@ -751,308 +725,6 @@ func buildLineageGroups(recovered map[string]wsrepRecoverResult) []model.Lineage
 	return groups
 }
 
-// runWsrepRecover runs mariadbd --wsrep-recover on a PVC via a helper pod
-// and parses the recovered position.
-func (b *galeraBootstrap) runWsrepRecover(ctx context.Context, podName, sa string) (wsrepRecoverResult, error) {
-	cfg := b.p.Config()
-	ns := cfg.Namespace
-	c := k8s.GetClients()
-
-	image := b.p.Image()
-	if image == "" {
-		return wsrepRecoverResult{}, fmt.Errorf("cannot determine MariaDB image from CR spec")
-	}
-
-	pvcName := fmt.Sprintf("storage-%s", podName)
-	helperName := fmt.Sprintf("%s-wsrep-%s-%d", cfg.ClusterName, podName, time.Now().Unix())
-
-	uid := mariadbDataDirUID
-	deadline := int64(150)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      helperName,
-			Namespace: ns,
-			Labels:    map[string]string{"hasteward": "heal-helper"},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy:         corev1.RestartPolicyNever,
-			ServiceAccountName:    sa,
-			ActiveDeadlineSeconds: &deadline,
-			// Run as the datadir owner (999), NOT root — mariadbd's run-as-root guard
-			// aborts recovery and returns no position otherwise.
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:  &uid,
-				RunAsGroup: &uid,
-				FSGroup:    &uid,
-			},
-			Containers: []corev1.Container{{
-				Name:  "wsrep-recover",
-				Image: image,
-				// wsrep_on defaults OFF and the provider isn't auto-loaded in a bare
-				// mariadbd, so both are set explicitly — otherwise mariadbd logs
-				// "WSREP: disabled, skipping position recovery" and yields no seqno.
-				Command: []string{"sh", "-c", fmt.Sprintf(
-					"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
-						"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
-						"--log-error-verbosity=3 2>&1; exit 0", galeraProviderSO)},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: "/var/lib/mysql"},
-				},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-					},
-				},
-			}},
-		},
-	}
-
-	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return wsrepRecoverResult{}, fmt.Errorf("failed to create wsrep_recover pod %s: %w", helperName, err)
-	}
-
-	// Wait for completion
-	var podOutput string
-	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
-		p, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, helperName, metav1.GetOptions{})
-		if pErr != nil {
-			continue
-		}
-		phase := string(p.Status.Phase)
-		if phase == "Succeeded" || phase == "Failed" {
-			podOutput = b.getHelperPodOutput(ctx, helperName)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			time.Sleep(2 * time.Second)
-			break
-		}
-	}
-
-	if podOutput == "" {
-		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
-		})
-		return wsrepRecoverResult{}, fmt.Errorf("wsrep_recover pod %s produced no output or timed out", helperName)
-	}
-
-	common.DebugLog("wsrep_recover output for %s:\n%s", podName, podOutput)
-
-	return parseWsrepRecoverOutput(podOutput)
-}
-
-// parseWsrepRecoverOutput extracts UUID, seqno, and lastCommitted from
-// mariadbd --wsrep-recover output.
-func parseWsrepRecoverOutput(output string) (wsrepRecoverResult, error) {
-	result := wsrepRecoverResult{}
-
-	posMatch := reRecoveredPos.FindStringSubmatch(output)
-	if posMatch == nil {
-		return result, fmt.Errorf("could not parse recovered position from wsrep_recover output")
-	}
-
-	result.UUID = posMatch[1]
-	seqno, err := strconv.ParseInt(posMatch[2], 10, 64)
-	if err != nil {
-		return result, fmt.Errorf("could not parse seqno %q: %w", posMatch[2], err)
-	}
-	result.Seqno = seqno
-
-	// Parse LastCommitted — default to Seqno if not found (means fully applied)
-	commitMatch := reLastCommit.FindStringSubmatch(output)
-	if commitMatch != nil {
-		lc, err := strconv.ParseInt(commitMatch[1], 10, 64)
-		if err == nil {
-			result.LastCommitted = lc
-		} else {
-			result.LastCommitted = seqno
-		}
-	} else {
-		result.LastCommitted = seqno
-	}
-
-	// Validate UUID
-	if result.UUID == zeroUUID {
-		return result, fmt.Errorf("recovered zero UUID — node never joined cluster")
-	}
-
-	// Validate seqno range
-	if result.Seqno < 0 || result.Seqno > maxPhantomSeqno {
-		return result, fmt.Errorf("recovered phantom seqno %d — corrupt gcache metadata", result.Seqno)
-	}
-
-	result.Valid = true
-	return result, nil
-}
-
-// getHelperPodOutput fetches logs from a helper pod and returns them as a string.
-func (b *galeraBootstrap) getHelperPodOutput(ctx context.Context, podName string) string {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return ""
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	return string(data)
-}
-
-// ---------------------------------------------------------------------------
-// K8s helper methods (duplicated from galera engine — bootstrap is independent
-// of repair and needs its own copy of these operations)
-// ---------------------------------------------------------------------------
-
-// suspendCR patches the MariaDB CR to set spec.suspend=true.
-func (b *galeraBootstrap) suspendCR(ctx context.Context) error {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	patch := `{"spec":{"suspend":true}}`
-	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// resumeCR patches the MariaDB CR to set spec.suspend=false.
-func (b *galeraBootstrap) resumeCR(ctx context.Context) error {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	patch := `{"spec":{"suspend":false}}`
-	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// scaleStatefulSet scales the StatefulSet to the desired replica count.
-func (b *galeraBootstrap) scaleStatefulSet(ctx context.Context, replicas int32) error {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	scale, err := c.Clientset.AppsV1().StatefulSets(cfg.Namespace).GetScale(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	scale.Spec.Replicas = replicas
-	_, err = c.Clientset.AppsV1().StatefulSets(cfg.Namespace).UpdateScale(
-		ctx, cfg.ClusterName, scale, metav1.UpdateOptions{})
-	return err
-}
-
-// runHelperPod creates a busybox pod that mounts a PVC and runs a script,
-// waits for completion, fetches logs, and cleans up.
-func (b *galeraBootstrap) runHelperPod(ctx context.Context, name, pvcName, mountPath, script, sa string) error {
-	cfg := b.p.Config()
-	ns := cfg.Namespace
-	c := k8s.GetClients()
-
-	rootUser := int64(0)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    map[string]string{"hasteward": "heal-helper"},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy:      corev1.RestartPolicyNever,
-			ServiceAccountName: sa,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser: &rootUser,
-			},
-			Containers: []corev1.Container{{
-				Name:    "healer",
-				Image:   "docker.io/library/busybox:latest",
-				Command: []string{"sh", "-c", script},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: mountPath},
-				},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-					},
-				},
-			}},
-		},
-	}
-
-	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create helper pod %s: %w", name, err)
-	}
-
-	// Wait for completion
-	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
-		p, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-		if pErr != nil {
-			continue
-		}
-		phase := string(p.Status.Phase)
-		if phase == "Succeeded" {
-			b.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			time.Sleep(2 * time.Second)
-			return nil
-		}
-		if phase == "Failed" {
-			b.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			return fmt.Errorf("helper pod %s failed", name)
-		}
-	}
-
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	return fmt.Errorf("helper pod %s timed out", name)
-}
-
-// logHelperPodOutput fetches and displays logs from a helper pod.
-func (b *galeraBootstrap) logHelperPodOutput(ctx context.Context, podName string) {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		common.DebugLog("Failed to get helper pod logs: %v", err)
-		return
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	if len(data) > 0 {
-		common.DebugLog("Helper pod output:\n%s", string(data))
-	}
-}
-
-// deleteRecoveryPods removes stale mariadb-operator recovery pods.
-func (b *galeraBootstrap) deleteRecoveryPods(ctx context.Context) {
-	c := k8s.GetClients()
-	cfg := b.p.Config()
-	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName + ",k8s.mariadb.com/recovery=true",
-	})
-	if err != nil {
-		return
-	}
-	for _, p := range pods.Items {
-		_ = c.Clientset.CoreV1().Pods(cfg.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
-		})
-	}
-}
-
 // waitForAllReady waits for all StatefulSet pods to become Running and Ready.
 // Soft timeout of 15 minutes — continues to verify step if not all ready.
 func (b *galeraBootstrap) waitForAllReady(ctx context.Context) {
@@ -1085,4 +757,3 @@ func (b *galeraBootstrap) waitForAllReady(ctx context.Context) {
 
 // ptr returns a pointer to the given value.
 func ptr[T any](v T) *T { return &v }
-

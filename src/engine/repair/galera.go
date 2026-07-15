@@ -3,7 +3,6 @@ package repair
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const galeraDumpFilename = "mysqldump.sql"
@@ -87,21 +85,21 @@ func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResul
 	// Suspend CR before donor probe — operator recovery pods can interfere
 	// with wsrep queries on the donor. Suspend stops operator reconciliation.
 	common.InfoLog("Suspending CR before donor probe (prevents operator interference)")
-	if err := g.suspendCR(ctx); err != nil {
+	if err := g.p.SuspendCR(ctx); err != nil {
 		return fmt.Errorf("failed to suspend CR for donor probe: %w", err)
 	}
 	g.crSuspended = true
 	time.Sleep(3 * time.Second)
 
 	// Delete any active recovery pods that may be competing with mariadb containers
-	g.deleteRecoveryPods(ctx)
+	g.p.DeleteRecoveryPods(ctx)
 	time.Sleep(2 * time.Second)
 
 	output.Section("Phase 2: Donor Resolution")
 	ds, err := g.resolveRepairDonor(ctx, result)
 	if err != nil {
 		// Resume CR on failure so cluster isn't left suspended
-		g.resumeCR(ctx)
+		g.p.ResumeCR(ctx)
 		g.crSuspended = false
 		return err
 	}
@@ -420,10 +418,10 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 			})
 		}
 		if scaledDown {
-			g.scaleStatefulSet(ctx, originalReplicas)
+			g.p.ScaleStatefulSet(ctx, originalReplicas)
 		}
 		if suspended {
-			g.resumeCR(ctx)
+			g.p.ResumeCR(ctx)
 		}
 		if suspended || scaledDown {
 			common.WarnLog("HEAL FAILED for %s. Scale restored, CR resumed.", targetPod)
@@ -436,7 +434,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		suspended = true
 	} else {
 		common.InfoLog("STEP 1: Suspending MariaDB CR")
-		if err := g.suspendCR(ctx); err != nil {
+		if err := g.p.SuspendCR(ctx); err != nil {
 			return fmt.Errorf("failed to suspend CR: %w", err)
 		}
 		suspended = true
@@ -449,7 +447,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 	// CR is suspended so operator won't interfere. Other nodes' data is untouched.
 	scaleTarget := int32(instanceNum)
 	common.InfoLog("STEP 2: Scaling StatefulSet to %d (releases pod %s)", scaleTarget, targetPod)
-	if err := g.scaleStatefulSet(ctx, scaleTarget); err != nil {
+	if err := g.p.ScaleStatefulSet(ctx, scaleTarget); err != nil {
 		rescue()
 		return fmt.Errorf("failed to scale StatefulSet: %w", err)
 	}
@@ -583,18 +581,18 @@ echo "=== Done! ==="
 	common.InfoLog("STEP 5: Scaling back up and resuming CR")
 
 	// Clear stale recovery pods
-	g.deleteRecoveryPods(ctx)
+	g.p.DeleteRecoveryPods(ctx)
 	time.Sleep(2 * time.Second)
 
 	// Scale back up — pods come back in order, find existing cluster, join via SST/IST
-	if err := g.scaleStatefulSet(ctx, originalReplicas); err != nil {
+	if err := g.p.ScaleStatefulSet(ctx, originalReplicas); err != nil {
 		rescue()
 		return fmt.Errorf("failed to scale StatefulSet back up: %w", err)
 	}
 	scaledDown = false
 
 	// Resume CR
-	if err := g.resumeCR(ctx); err != nil {
+	if err := g.p.ResumeCR(ctx); err != nil {
 		rescue()
 		return fmt.Errorf("failed to resume CR: %w", err)
 	}
@@ -653,43 +651,6 @@ echo "=== Done! ==="
 	return nil
 }
 
-// suspendCR patches the MariaDB CR to set spec.suspend=true.
-func (g *galeraRepair) suspendCR(ctx context.Context) error {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	patch := `{"spec":{"suspend":true}}`
-	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// resumeCR patches the MariaDB CR to set spec.suspend=false.
-func (g *galeraRepair) resumeCR(ctx context.Context) error {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	patch := `{"spec":{"suspend":false}}`
-	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
-		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-	return err
-}
-
-// scaleStatefulSet scales the StatefulSet to the desired replica count.
-// Used during repair to temporarily reduce replicas to release target pod's PVC.
-// StatefulSets are ordered — scaling to N removes pods with ordinal >= N.
-func (g *galeraRepair) scaleStatefulSet(ctx context.Context, replicas int32) error {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	scale, err := c.Clientset.AppsV1().StatefulSets(cfg.Namespace).GetScale(
-		ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	scale.Spec.Replicas = replicas
-	_, err = c.Clientset.AppsV1().StatefulSets(cfg.Namespace).UpdateScale(
-		ctx, cfg.ClusterName, scale, metav1.UpdateOptions{})
-	return err
-}
-
 // waitForPodGone blocks until the named pod returns NotFound (truly deleted).
 // Returns error if the pod does not disappear within timeout.
 // Transient API errors are retried — only NotFound counts as success.
@@ -717,7 +678,7 @@ func (g *galeraRepair) waitForPodGone(ctx context.Context, podName string) error
 func (g *galeraRepair) runHelperWithRetry(ctx context.Context, name, pvc, mountPath, script, sa string) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		err := g.runHelperPod(ctx, name, pvc, mountPath, script, sa)
+		err := g.p.RunHelperPod(ctx, name, pvc, mountPath, script, sa)
 		if err == nil {
 			return nil
 		}
@@ -740,120 +701,11 @@ func (g *galeraRepair) runHelperWithRetry(ctx context.Context, name, pvc, mountP
 		if attempt < 3 {
 			common.WarnLog("Helper pod %s mount failed (attempt %d/3): %v", name, attempt, err)
 			common.WarnLog("Retrying (PVC detach lag)...")
-			time.Sleep(time.Duration(attempt * 10) * time.Second)
+			time.Sleep(time.Duration(attempt*10) * time.Second)
 			continue
 		}
 	}
 	return fmt.Errorf("helper pod %s failed after 3 mount retries: %w", name, lastErr)
-}
-
-// runHelperPod creates a busybox pod that mounts a PVC and runs a script,
-// waits for completion, fetches logs, and cleans up.
-func (g *galeraRepair) runHelperPod(ctx context.Context, name, pvcName, mountPath, script, sa string) error {
-	cfg := g.p.Config()
-	ns := cfg.Namespace
-	c := k8s.GetClients()
-
-	rootUser := int64(0)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    map[string]string{"hasteward": "heal-helper"},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy:      corev1.RestartPolicyNever,
-			ServiceAccountName: sa,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser: &rootUser,
-			},
-			Containers: []corev1.Container{{
-				Name:    "healer",
-				Image:   "docker.io/library/busybox:latest",
-				Command: []string{"sh", "-c", script},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: mountPath},
-				},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-					},
-				},
-			}},
-		},
-	}
-
-	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create helper pod %s: %w", name, err)
-	}
-
-	// Wait for completion
-	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
-		p, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-		if pErr != nil {
-			continue
-		}
-		phase := string(p.Status.Phase)
-		if phase == "Succeeded" {
-			g.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			time.Sleep(2 * time.Second)
-			return nil
-		}
-		if phase == "Failed" {
-			g.logHelperPodOutput(ctx, name)
-			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr(int64(0)),
-			})
-			return fmt.Errorf("helper pod %s failed", name)
-		}
-	}
-
-	_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr(int64(0)),
-	})
-	return fmt.Errorf("helper pod %s timed out", name)
-}
-
-// logHelperPodOutput fetches and displays logs from a helper pod.
-func (g *galeraRepair) logHelperPodOutput(ctx context.Context, podName string) {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		common.DebugLog("Failed to get helper pod logs: %v", err)
-		return
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	if len(data) > 0 {
-		common.DebugLog("Helper pod output:\n%s", string(data))
-	}
-}
-
-// deleteRecoveryPods removes stale mariadb-operator recovery pods.
-func (g *galeraRepair) deleteRecoveryPods(ctx context.Context) {
-	cfg := g.p.Config()
-	c := k8s.GetClients()
-	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName + ",k8s.mariadb.com/recovery=true",
-	})
-	if err != nil {
-		return
-	}
-	for _, p := range pods.Items {
-		_ = c.Clientset.CoreV1().Pods(cfg.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
-			GracePeriodSeconds: ptr(int64(0)),
-		})
-	}
 }
 
 // displayFinalStatus shows the current cluster state after healing.
