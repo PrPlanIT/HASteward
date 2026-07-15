@@ -85,6 +85,7 @@ func TestExecuteBootstrap_RescueRevertsAuthorityMarkers(t *testing.T) {
 		return true, sc, nil
 	})
 
+	defer common.DisableSleepForTest()() // run the helper-pod poll loops instantly
 	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs, Dynamic: dyn})()
 	defer k8s.SetPodLogsHookForTest(func(ctx context.Context, ns, pod string) string {
 		return "WSREP: Recovered position: " + uuid + ":552481\nWSREP: Last committed: 552481\n"

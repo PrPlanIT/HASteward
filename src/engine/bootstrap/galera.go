@@ -321,7 +321,7 @@ echo "reverted safe_to_bootstrap to 0"`
 	}
 	suspended = true
 	markAction(model.PhaseSuspend)
-	time.Sleep(3 * time.Second)
+	common.Sleep(3 * time.Second)
 
 	// STEP 2: Set generation lock annotation
 	common.InfoLog("STEP 2: Setting generation lock annotation")
@@ -493,7 +493,7 @@ echo "=== Done ==="
 	// STEP 8: Scale back up
 	common.InfoLog("STEP 8: Scaling StatefulSet to %d", originalReplicas)
 	b.p.DeleteRecoveryPods(ctx)
-	time.Sleep(2 * time.Second)
+	common.Sleep(2 * time.Second)
 
 	if err := b.p.ScaleStatefulSet(ctx, originalReplicas); err != nil {
 		rescue()
@@ -520,7 +520,7 @@ echo "=== Done ==="
 				break
 			}
 			common.WarnLog("Cleanup patch attempt %d failed: %v", attempt, err)
-			time.Sleep(2 * time.Second)
+			common.Sleep(2 * time.Second)
 			continue
 		}
 		// Verify the field is actually gone
@@ -531,7 +531,7 @@ echo "=== Done ==="
 		if verr == nil {
 			common.WarnLog("Cleanup attempt %d: field still present, retrying", attempt)
 		}
-		time.Sleep(2 * time.Second)
+		common.Sleep(2 * time.Second)
 	}
 	if err != nil {
 		common.WarnLog("Failed to clear forceClusterBootstrapInPod after retries: %v\nManual cleanup may be required.", err)
@@ -549,7 +549,7 @@ echo "=== Done ==="
 			break
 		}
 		common.WarnLog("status.galeraRecovery clear attempt %d failed: %v", attempt, serr)
-		time.Sleep(2 * time.Second)
+		common.Sleep(2 * time.Second)
 	}
 	// Verify the field is actually gone
 	statusObj, verr := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})

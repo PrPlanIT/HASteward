@@ -103,7 +103,7 @@ func (p *GaleraProvider) WaitPodsTerminated(ctx context.Context, timeoutSec int)
 			common.InfoLog("All %s pods terminated — datadir is unowned", cfg.ClusterName)
 			return nil
 		}
-		time.Sleep(5 * time.Second)
+		common.Sleep(5 * time.Second)
 	}
 	pods, _ := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	return fmt.Errorf("pods did not terminate within %ds (%d remain) — refusing wsrep_recover to avoid a concurrent-open corruption", timeoutSec, len(pods.Items))
@@ -189,7 +189,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 
 	var podOutput string
 	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
+		common.Sleep(5 * time.Second)
 		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, helperName, metav1.GetOptions{})
 		if pErr != nil {
 			continue
@@ -200,7 +200,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
 				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
-			time.Sleep(2 * time.Second)
+			common.Sleep(2 * time.Second)
 			break
 		}
 	}
@@ -307,7 +307,7 @@ func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountP
 	}
 
 	for i := 0; i < 30; i++ {
-		time.Sleep(5 * time.Second)
+		common.Sleep(5 * time.Second)
 		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if pErr != nil {
 			continue
@@ -318,7 +318,7 @@ func (p *GaleraProvider) RunHelperPod(ctx context.Context, name, pvcName, mountP
 			_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{
 				GracePeriodSeconds: common.Ptr(int64(0)),
 			})
-			time.Sleep(2 * time.Second)
+			common.Sleep(2 * time.Second)
 			return nil
 		}
 		if phase == "Failed" {

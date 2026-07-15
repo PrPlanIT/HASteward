@@ -89,11 +89,11 @@ func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResul
 		return fmt.Errorf("failed to suspend CR for donor probe: %w", err)
 	}
 	g.crSuspended = true
-	time.Sleep(3 * time.Second)
+	common.Sleep(3 * time.Second)
 
 	// Delete any active recovery pods that may be competing with mariadb containers
 	g.p.DeleteRecoveryPods(ctx)
-	time.Sleep(2 * time.Second)
+	common.Sleep(2 * time.Second)
 
 	output.Section("Phase 2: Donor Resolution")
 	ds, err := g.resolveRepairDonor(ctx, result)
@@ -287,7 +287,7 @@ func (g *galeraRepair) Heal(ctx context.Context, target HealTarget) error {
 func (g *galeraRepair) Stabilize(ctx context.Context) error {
 	output.Section("Post-Repair Stabilization")
 	common.InfoLog("Waiting 30s for MariaDB operator to reconcile...")
-	time.Sleep(30 * time.Second)
+	common.Sleep(30 * time.Second)
 	g.waitForAllReady(ctx)
 	return nil
 }
@@ -457,7 +457,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		}
 		suspended = true
 		g.crSuspended = true // keep the struct flag truthful so Cleanup/rescue know
-		time.Sleep(3 * time.Second)
+		common.Sleep(3 * time.Second)
 	}
 
 	// STEP 2: Release target pod's PVC by scaling down the StatefulSet.
@@ -488,7 +488,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 			}
 			common.DebugLog("Waiting for %s: transient error: %v", targetPod, err)
 		}
-		time.Sleep(5 * time.Second)
+		common.Sleep(5 * time.Second)
 	}
 	if !podGone {
 		rescue()
@@ -601,7 +601,7 @@ echo "=== Done! ==="
 
 	// Clear stale recovery pods
 	g.p.DeleteRecoveryPods(ctx)
-	time.Sleep(2 * time.Second)
+	common.Sleep(2 * time.Second)
 
 	// Scale back up — pods come back in order, find existing cluster, join via SST/IST
 	if err := g.p.ScaleStatefulSet(ctx, originalReplicas); err != nil {
@@ -627,7 +627,7 @@ echo "=== Done! ==="
 
 	ready := false
 	for i := 0; i < healTimeout/10; i++ {
-		time.Sleep(10 * time.Second)
+		common.Sleep(10 * time.Second)
 		pod, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
 		if err == nil && k8s.PodReady(*pod, "mariadb") {
 			ready = true
@@ -659,7 +659,7 @@ echo "=== Done! ==="
 			break
 		}
 		if i < 11 {
-			time.Sleep(5 * time.Second)
+			common.Sleep(5 * time.Second)
 		}
 	}
 	if !galeraJoined {
@@ -690,7 +690,7 @@ func (g *galeraRepair) waitForPodGone(ctx context.Context, podName string) error
 			// Transient API error — keep retrying
 			common.DebugLog("waitForPodGone(%s): transient error: %v", podName, err)
 		}
-		time.Sleep(2 * time.Second)
+		common.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("pod %s did not terminate within 60s — PVC may still be attached", podName)
 }
@@ -725,7 +725,7 @@ func (g *galeraRepair) runHelperWithRetry(ctx context.Context, name, pvc, mountP
 		if attempt < 3 {
 			common.WarnLog("Helper pod %s mount failed (attempt %d/3): %v", name, attempt, err)
 			common.WarnLog("Retrying (PVC detach lag)...")
-			time.Sleep(time.Duration(attempt*10) * time.Second)
+			common.Sleep(time.Duration(attempt*10) * time.Second)
 			continue
 		}
 	}

@@ -48,7 +48,7 @@ func WaitAllReady(ctx context.Context, namespace, selector string, expected, att
 			}
 			common.DebugLog("Ready: %d/%d", ready, expected)
 		}
-		time.Sleep(time.Duration(intervalSec) * time.Second)
+		common.Sleep(time.Duration(intervalSec) * time.Second)
 	}
 	return false
 }

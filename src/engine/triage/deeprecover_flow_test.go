@@ -88,6 +88,7 @@ func TestDeepRecover_FenceRecoverRestore(t *testing.T) {
 		return true, sc, nil
 	})
 
+	defer common.DisableSleepForTest()() // run RunWsrepRecover's poll loop instantly
 	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs, Dynamic: dyn})()
 	// Canned wsrep_recover output so ParseWsrepRecoverOutput yields a real position.
 	defer k8s.SetPodLogsHookForTest(func(ctx context.Context, ns, pod string) string {
