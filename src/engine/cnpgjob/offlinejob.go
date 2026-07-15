@@ -212,7 +212,12 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	// reconciliation was off during the handoff, so none was ever made.
 	common.InfoLog("STEP 6: Removing fence for %s", job.TargetPod)
 	if err := Unfence(ctx, ns, job.ClusterName, job.TargetPod); err != nil {
-		common.WarnLog("Failed to unfence %s: %v", job.TargetPod, err)
+		// The instance is still fenced — CNPG will NOT manage it, so it has NOT
+		// rejoined. Swallowing this and returning nil would let the orchestrator record
+		// a dead, unmanaged instance as healed. Fail loudly; leave the fence in place
+		// (cleanup warns how to clear it) rather than falsely mark it removed.
+		cleanup()
+		return fmt.Errorf("prepared %s but failed to remove its fence — the instance is still fenced and unmanaged by CNPG; clear the fence manually then re-triage: %w", job.TargetPod, err)
 	}
 	fenceApplied = false
 

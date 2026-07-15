@@ -71,3 +71,57 @@ func TestRun_RestoresReconciliationOnAmbiguousDisableError(t *testing.T) {
 		t.Fatal("reconciliation was NOT re-enabled after an ambiguous disable failure — cluster left unreconciled (#20)")
 	}
 }
+
+// TestRun_ReturnsErrorWhenUnfenceFails guards #21: if the final unfence fails, the
+// instance is STILL FENCED — CNPG will not manage it, so it has NOT rejoined. Run
+// must return an error, not swallow it and report success (which would let the
+// orchestrator record a dead, unmanaged instance as healed).
+func TestRun_ReturnsErrorWhenUnfenceFails(t *testing.T) {
+	defer common.DisableSleepForTest()()
+
+	cluster := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata":   map[string]interface{}{"name": "pg", "namespace": "ns"},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{k8s.CNPGClusterGVR: "ClusterList"},
+		cluster,
+	)
+	// Let the fence and both reconcile toggles through; fail ONLY the unfence. The
+	// unfence patch clears fencedInstances to null — no other patch matches that.
+	dyn.PrependReactor("patch", "clusters", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		body := string(a.(clienttesting.PatchAction).GetPatch())
+		if strings.Contains(body, "fencedInstances") && strings.Contains(body, "null") {
+			return true, nil, fmt.Errorf("injected unfence failure")
+		}
+		return false, nil, nil
+	})
+
+	// Auto-succeed the helper pod so Run reaches STEP 6 (the unfence).
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "pods", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if pod, ok := a.(clienttesting.CreateAction).GetObject().(*corev1.Pod); ok {
+			pod.Status.Phase = corev1.PodSucceeded
+		}
+		return false, nil, nil
+	})
+
+	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs, Dynamic: dyn})()
+
+	job := OfflinePVCJob{
+		Namespace:     "ns",
+		ClusterName:   "pg",
+		TargetPod:     "pg-2",
+		TargetPVC:     "pg-2",
+		HelperPodName: "pg-2-clear",
+		Label:         "clear",
+		HelperPod:     &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pg-2-clear", Namespace: "ns"}},
+	}
+	err := Run(context.Background(), job)
+
+	if err == nil || !strings.Contains(err.Error(), "still fenced") {
+		t.Fatalf("Run must fail when the unfence fails — a still-fenced instance is unmanaged, not healed (#21); got: %v", err)
+	}
+}
