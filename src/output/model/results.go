@@ -117,6 +117,26 @@ type TriageResult struct {
 	BestSeqnoNode    *InstanceAssessment `json:"bestSeqnoNode,omitempty"`
 	AuthorityStatus  string              `json:"authorityStatus,omitempty"`  // "unambiguous" or "ambiguous"
 	RecommendedDonor string              `json:"recommendedDonor,omitempty"` // ordinal or "none"
+
+	// Control-plane wedge: data healthy but the operator is stuck in recovery. nil when absent.
+	OperatorWedge *OperatorWedge `json:"operatorWedge,omitempty"`
+}
+
+// OperatorWedge flags a control-plane wedge on a Galera cluster: the data plane is
+// healthy (a Primary is formed and nothing needs healing) but the mariadb-operator
+// reports GaleraReady:False while holding a stuck recovery snapshot — a
+// status.galeraRecovery where NO node resolved a valid seqno (every position < 0), so
+// the operator can neither finish nor abandon recovery and re-loops it. That snapshot
+// persists across reboots, which is why the cluster flaps even though the data is fine.
+// The data-plane assessments alone never surface this; triage populates it (nil when
+// absent) so operators — and a future remediation — can act on the contradiction.
+type OperatorWedge struct {
+	GaleraReady   string   `json:"galeraReady"`             // GaleraReady condition status (expected "False")
+	Reason        string   `json:"reason,omitempty"`        // condition reason
+	Message       string   `json:"message,omitempty"`       // condition message
+	Suspended     bool     `json:"suspended"`               // spec.suspend: true ⇒ wedge is LATENT (resumes on unsuspend)
+	RecoveryNodes []string `json:"recoveryNodes,omitempty"` // nodes in the stuck snapshot (all seqno < 0)
+	BestCandidate string   `json:"bestCandidate,omitempty"` // best-known node — the unstick / force-bootstrap target
 }
 
 // BackupResult holds the outcome of a backup operation.

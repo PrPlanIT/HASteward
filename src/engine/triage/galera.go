@@ -3,6 +3,7 @@ package triage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -528,6 +529,8 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		RecommendedDonor: recommendedDonor,
 	}
 
+	result.OperatorWedge = t.detectOperatorWedge(data, comparison, assessments)
+
 	t.triageDisplay(data, result)
 
 	return result, nil
@@ -967,6 +970,25 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 		output.SuggestedCommands("galera", t.p.Config().ClusterName, t.p.Config().Namespace)
 	}
 
+	if w := result.OperatorWedge; w != nil {
+		output.Println()
+		output.Section("OPERATOR WEDGE — data healthy, operator stuck in recovery")
+		output.Println("The data plane is HEALTHY (a Primary is formed and no node needs healing),")
+		output.Printf("but the mariadb-operator reports GaleraReady:False (%s: %s) and holds a stuck\n",
+			w.Reason, w.Message)
+		output.Printf("recovery snapshot for %s where no node resolved a valid seqno — so it can\n",
+			strings.Join(w.RecoveryNodes, ", "))
+		output.Println("neither finish nor abandon recovery, and re-loops it. This persists across")
+		output.Println("reboots (status.galeraRecovery), which is why the cluster flaps.")
+		if w.Suspended {
+			output.Println("The cluster is SUSPENDED — the wedge is LATENT: unsuspending resumes the loop")
+			output.Println("until the persisted snapshot is cleared.")
+		}
+		output.Printf("Best-known node (unstick target): %s\n", w.BestCandidate)
+		output.Println("Remediation: force-bootstrap that node and clear status.galeraRecovery")
+		output.Println("(the operator's forceClusterBootstrapInPod escape hatch).")
+	}
+
 	if data.allNodesDown {
 		output.Println()
 		output.Section("Full Cluster Down")
@@ -1318,6 +1340,84 @@ func getMapString(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return "Unknown"
+}
+
+// detectOperatorWedge flags a control-plane wedge: the data plane is healthy but the
+// mariadb-operator is stuck in recovery. It fires only on the precise contradiction —
+// a formed Primary with nothing to heal, GaleraReady:False, and a status.galeraRecovery
+// snapshot where NO node resolved a valid seqno (every position < 0), so the operator can
+// neither finish nor abandon recovery and re-loops it (persisting across reboots). Returns
+// nil when any leg is absent — the normal data-plane assessments already cover those.
+func (t *galeraTriage) detectOperatorWedge(data *galeraTriageData, comparison model.DataComparison, assessments []model.InstanceAssessment) *model.OperatorWedge {
+	// The data plane must see nothing wrong: not all-down, unambiguous authority, no heal.
+	if data.allNodesDown || !comparison.SafeToHeal {
+		return nil
+	}
+	for _, a := range assessments {
+		if a.NeedsHeal {
+			return nil
+		}
+	}
+	// The operator disagrees: GaleraReady is False.
+	cond := t.p.GaleraCondition()
+	if getConditionStatus(cond) != "False" {
+		return nil
+	}
+	// ...and it is stuck: a galeraRecovery snapshot where NO node resolved a valid seqno.
+	// If any node shows seqno >= 0 the operator can still bootstrap from it — not wedged.
+	state := getRecoveryMap(t.p.GaleraRecovery(), "state")
+	if len(state) == 0 {
+		return nil
+	}
+	var nodes []string
+	for node, v := range state {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if seqno, ok := nestedInt64(m, "seqno"); ok && seqno >= 0 {
+			return nil
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	sort.Strings(nodes)
+	return &model.OperatorWedge{
+		GaleraReady:   "False",
+		Reason:        condField(cond, "reason"),
+		Message:       condField(cond, "message"),
+		Suspended:     t.p.IsSuspended(),
+		RecoveryNodes: nodes,
+		BestCandidate: data.bestSeqnoNode,
+	}
+}
+
+// condField reads a string field from a k8s condition map ("" when absent).
+func condField(cond map[string]interface{}, key string) string {
+	if cond == nil {
+		return ""
+	}
+	if v, ok := cond[key]; ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return ""
+}
+
+// nestedInt64 coerces a numeric map value to int64. Unstructured stores JSON integers
+// as int64, but tolerate int/float64 forms too. false when absent or non-numeric.
+func nestedInt64(m map[string]interface{}, key string) (int64, bool) {
+	switch v := m[key].(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	default:
+		return 0, false
+	}
 }
 
 func getRecoveryMap(recovery map[string]interface{}, key string) map[string]interface{} {
