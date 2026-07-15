@@ -241,6 +241,19 @@ func (r *cnpgRepair) healInstance(ctx context.Context, targetPod, targetPVC stri
 	ns := cfg.Namespace
 	c := k8s.GetClients()
 
+	// #22 — fail-closed primary guard. Healing fences the instance and rm -rf's its
+	// pgdata; doing that to the CURRENT PRIMARY is a self-inflicted outage and data
+	// loss. Re-fetch live (not the cached CR) so a failover between assess and heal
+	// can't slip a newly-promoted primary past a stale check. If we can't verify the
+	// primary, refuse rather than gamble on a destructive rebuild.
+	guardObj, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("refusing to heal %s: cannot verify the current primary before a destructive rebuild: %w", targetPod, err)
+	}
+	if primary := k8s.GetNestedString(guardObj, "status", "currentPrimary"); targetPod == primary {
+		return fmt.Errorf("REFUSING to heal %s: it is the current primary — fencing and rebuilding the primary's datadir would cause an outage and data loss; fail over (switchover) to a replica first, then re-triage", targetPod)
+	}
+
 	// Derive names
 	parts := strings.Split(targetPod, "-")
 	instanceSuffix := parts[len(parts)-1]
