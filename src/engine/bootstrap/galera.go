@@ -264,8 +264,26 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	suspended := false
 	scaledDown := false
 	genLocked := false
+	safeBootMarked := false // safe_to_bootstrap=1 written on the candidate PVC (STEP 6)
+	forcePatched := false   // forceClusterBootstrapInPod set on the CR (STEP 7)
 
 	rescue := func() {
+		// Undo the AUTHORITY mutations first, while the pods are still scaled to 0,
+		// so a failed run never resumes the operator with a live directive to
+		// bootstrap from a candidate we just abandoned. Symmetric with STEP 6/7.
+		if forcePatched {
+			clearPatch := `[{"op":"remove","path":"/spec/galera/recovery/forceClusterBootstrapInPod"}]`
+			_, _ = c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(ns).Patch(
+				ctx, cfg.ClusterName, types.JSONPatchType, []byte(clearPatch), metav1.PatchOptions{})
+		}
+		if safeBootMarked {
+			revertScript := `set -e
+test -f /var/lib/mysql/grastate.dat || exit 0
+sed -i 's/safe_to_bootstrap: 1/safe_to_bootstrap: 0/' /var/lib/mysql/grastate.dat
+echo "reverted safe_to_bootstrap to 0"`
+			helperName := fmt.Sprintf("%s-safeboot-revert-%d", cfg.ClusterName, time.Now().Unix())
+			_ = b.p.RunHelperPod(ctx, helperName, fmt.Sprintf("storage-%s", candidatePod), "/var/lib/mysql", revertScript, sa)
+		}
 		// Remove generation lock on failure
 		if genLocked {
 			lockClearPatch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, bootstrapLockAn)
@@ -279,7 +297,7 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 			_ = b.p.ResumeCR(ctx)
 		}
 		if suspended || scaledDown || genLocked {
-			common.WarnLog("BOOTSTRAP FAILED. CR resumed, scale restored, lock cleared.")
+			common.WarnLog("BOOTSTRAP FAILED — rolled back (any authority markers cleared, scale restored, CR resumed).")
 		}
 	}
 
@@ -326,6 +344,12 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	}
 	scaledDown = true
 	markAction(model.PhaseScaleDown)
+
+	// Clear operator recovery pods before waiting: they carry the cluster label, so
+	// a hung one keeps WaitPodsTerminated blocked — and with the CR suspended,
+	// nothing else deletes it — spuriously failing an otherwise valid fence. Matches
+	// triage's deepRecover fence ordering.
+	b.p.DeleteRecoveryPods(ctx)
 
 	// Fence must be CONFIRMED complete before recover — a helper mariadbd must never
 	// open a datadir a real mysqld still holds. Abort (and rescue) if pods survive.
@@ -451,6 +475,7 @@ echo "=== Done ==="
 		rescue()
 		return fmt.Errorf("failed to set safe_to_bootstrap: %w", err)
 	}
+	safeBootMarked = true // rescue must now revert this on any later failure
 	markAction(model.PhaseBootstrapMark)
 
 	// STEP 7: Patch CR with forceClusterBootstrapInPod
@@ -462,6 +487,7 @@ echo "=== Done ==="
 		rescue()
 		return fmt.Errorf("failed to patch CR: %w", err)
 	}
+	forcePatched = true // rescue must now clear forceClusterBootstrapInPod on any later failure
 	markAction(model.PhaseClusterPatch)
 
 	// STEP 8: Scale back up
