@@ -301,8 +301,7 @@ func (r *cnpgRepair) waitUnfrozen(ctx context.Context, authority string) error {
 
 		ready := false
 		if ap, err := c.Clientset.CoreV1().Pods(cfg.Namespace).Get(ctx, authority, metav1.GetOptions{}); err == nil {
-			ready = ap.Status.Phase == corev1.PodRunning &&
-				len(ap.Status.ContainerStatuses) > 0 && ap.Status.ContainerStatuses[0].Ready
+			ready = k8s.PodReady(*ap, "postgres")
 		}
 
 		if !frozen && ready {

@@ -87,7 +87,7 @@ func (r *cnpgRepair) Assess(ctx context.Context) (*model.TriageResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ABORT: Primary pod %s not found: %w", primary, err)
 	}
-	if primaryPod.Status.Phase != "Running" || len(primaryPod.Status.ContainerStatuses) == 0 || !primaryPod.Status.ContainerStatuses[0].Ready {
+	if !k8s.PodReady(*primaryPod, "postgres") {
 		return nil, fmt.Errorf("ABORT: Primary %s is not running and ready. Fix primary first", primary)
 	}
 
@@ -435,8 +435,7 @@ echo "=== pg_basebackup complete! ==="`, hcfg.primaryIP)
 	for i := 0; i < 30; i++ {
 		time.Sleep(10 * time.Second)
 		pod, podErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
-		if podErr == nil && pod.Status.Phase == "Running" &&
-			len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
+		if podErr == nil && k8s.PodReady(*pod, "postgres") {
 			output.Success("Replica %s has been healed!", targetPod)
 			return nil
 		}
@@ -469,10 +468,7 @@ func (r *cnpgRepair) displayFinalStatus(ctx context.Context) {
 	})
 	if err == nil {
 		for _, p := range pods.Items {
-			podReady := false
-			if len(p.Status.ContainerStatuses) > 0 {
-				podReady = p.Status.ContainerStatuses[0].Ready
-			}
+			podReady := k8s.ContainerReadyByName(p, "postgres")
 			output.Bullet(0, "%s: %s ready=%v", p.Name, p.Status.Phase, podReady)
 		}
 	}
@@ -481,27 +477,10 @@ func (r *cnpgRepair) displayFinalStatus(ctx context.Context) {
 // waitForAllReady polls until all expected instances are Running and Ready.
 func (r *cnpgRepair) waitForAllReady(ctx context.Context) {
 	cfg := r.p.Config()
-	c := k8s.GetClients()
 	expected := int(r.p.Instances())
-
-	for i := 0; i < 30; i++ {
-		pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "cnpg.io/cluster=" + cfg.ClusterName,
-		})
-		if err == nil {
-			ready := 0
-			for _, p := range pods.Items {
-				if p.Status.Phase == "Running" && len(p.Status.ContainerStatuses) > 0 && p.Status.ContainerStatuses[0].Ready {
-					ready++
-				}
-			}
-			if ready == expected {
-				common.InfoLog("All %d pods are Running and Ready", expected)
-				return
-			}
-			common.DebugLog("Ready: %d/%d", ready, expected)
-		}
-		time.Sleep(10 * time.Second)
+	if k8s.WaitAllReady(ctx, cfg.Namespace, "cnpg.io/cluster="+cfg.ClusterName, expected, 30, 10, "postgres") {
+		common.InfoLog("All %d pods are Running and Ready", expected)
+		return
 	}
 	common.WarnLog("Not all pods became ready within timeout")
 }

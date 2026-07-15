@@ -191,7 +191,7 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 
 	// Identify crash-looping pods
 	for _, pod := range data.runningPods {
-		if len(pod.Status.ContainerStatuses) > 0 && !pod.Status.ContainerStatuses[0].Ready {
+		if !k8s.ContainerReadyByName(pod, "postgres") {
 			data.crashloopPods = append(data.crashloopPods, pod)
 		}
 	}
@@ -896,8 +896,7 @@ func cnpgDisplayPodDetails(data *cnpgTriageData) {
 	for _, pod := range data.nonRunningPods {
 		reason := "N/A"
 		restarts := int32(0)
-		if len(pod.Status.ContainerStatuses) > 0 {
-			cs := pod.Status.ContainerStatuses[0]
+		if cs, ok := k8s.ContainerStatusByName(pod, "postgres"); ok {
 			restarts = cs.RestartCount
 			if cs.State.Waiting != nil {
 				reason = cs.State.Waiting.Reason
@@ -909,8 +908,8 @@ func cnpgDisplayPodDetails(data *cnpgTriageData) {
 	}
 	for _, pod := range data.crashloopPods {
 		restarts := int32(0)
-		if len(pod.Status.ContainerStatuses) > 0 {
-			restarts = pod.Status.ContainerStatuses[0].RestartCount
+		if cs, ok := k8s.ContainerStatusByName(pod, "postgres"); ok {
+			restarts = cs.RestartCount
 		}
 		output.Printf("CRASH-LOOP: %s: phase=Running ready=false restarts=%d\n", pod.Name, restarts)
 	}

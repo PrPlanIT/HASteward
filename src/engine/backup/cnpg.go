@@ -76,7 +76,7 @@ func (b *cnpgBackup) BackupDump(ctx context.Context, backupType, donor, stdinFil
 	if err != nil {
 		return nil, fmt.Errorf("donor pod %s not found: %w", donor, err)
 	}
-	if pod.Status.Phase != "Running" || len(pod.Status.ContainerStatuses) == 0 || !pod.Status.ContainerStatuses[0].Ready {
+	if !k8s.PodReady(*pod, "postgres") {
 		return nil, fmt.Errorf("donor pod %s is not running and ready", donor)
 	}
 

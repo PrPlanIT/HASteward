@@ -768,27 +768,10 @@ func (g *galeraRepair) displayFinalStatus(ctx context.Context) {
 // waitForAllReady polls until all expected replicas are Running and Ready.
 func (g *galeraRepair) waitForAllReady(ctx context.Context) {
 	cfg := g.p.Config()
-	c := k8s.GetClients()
 	expected := int(g.p.Replicas())
-
-	for i := 0; i < 30; i++ {
-		pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName,
-		})
-		if err == nil {
-			ready := 0
-			for _, p := range pods.Items {
-				if k8s.PodReady(p, "mariadb") {
-					ready++
-				}
-			}
-			if ready == expected {
-				common.InfoLog("All %d pods are Running and Ready", expected)
-				return
-			}
-			common.DebugLog("Ready: %d/%d", ready, expected)
-		}
-		time.Sleep(10 * time.Second)
+	if k8s.WaitAllReady(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, expected, 30, 10, "mariadb") {
+		common.InfoLog("All %d pods are Running and Ready", expected)
+		return
 	}
 	common.WarnLog("Not all pods became ready within timeout")
 }

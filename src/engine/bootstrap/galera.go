@@ -774,29 +774,12 @@ func buildLineageGroups(recovered map[string]wsrepRecoverResult) []model.Lineage
 // waitForAllReady waits for all StatefulSet pods to become Running and Ready.
 // Soft timeout of 15 minutes — continues to verify step if not all ready.
 func (b *galeraBootstrap) waitForAllReady(ctx context.Context) {
-	c := k8s.GetClients()
 	cfg := b.p.Config()
 	expected := int(b.p.Replicas())
-
 	// 90 iterations × 10s = 15 minutes soft timeout
-	for i := 0; i < 90; i++ {
-		pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName,
-		})
-		if err == nil {
-			ready := 0
-			for _, p := range pods.Items {
-				if k8s.PodReady(p, "mariadb") {
-					ready++
-				}
-			}
-			if ready == expected {
-				common.InfoLog("All %d pods are Running and Ready", expected)
-				return
-			}
-			common.DebugLog("Ready: %d/%d", ready, expected)
-		}
-		time.Sleep(10 * time.Second)
+	if k8s.WaitAllReady(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, expected, 90, 10, "mariadb") {
+		common.InfoLog("All %d pods are Running and Ready", expected)
+		return
 	}
 	common.WarnLog("Not all pods became ready within 15 minute timeout — continuing to verify step")
 }

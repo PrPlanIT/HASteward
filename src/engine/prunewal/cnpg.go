@@ -250,8 +250,7 @@ echo "=== WAL prune complete ==="
 	for i := 0; i < 30; i++ {
 		time.Sleep(10 * time.Second)
 		pod, podErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{})
-		if podErr == nil && pod.Status.Phase == "Running" &&
-			len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Ready {
+		if podErr == nil && k8s.PodReady(*pod, "postgres") {
 			output.Success("Instance %s is back online!", targetPod)
 			return result, nil
 		}
@@ -296,7 +295,7 @@ func (w *cnpgPruner) discoverPostgresInfo(ctx context.Context, triageResult *mod
 		if podErr != nil {
 			continue
 		}
-		if pod.Status.Phase != "Running" || len(pod.Status.ContainerStatuses) == 0 || !pod.Status.ContainerStatuses[0].Ready {
+		if !k8s.PodReady(*pod, "postgres") {
 			continue
 		}
 		for _, container := range pod.Spec.Containers {

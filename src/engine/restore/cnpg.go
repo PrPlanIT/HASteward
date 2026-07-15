@@ -83,7 +83,7 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 	if err != nil {
 		return nil, fmt.Errorf("primary pod %s not found: %w", primary, err)
 	}
-	if pod.Status.Phase != "Running" || len(pod.Status.ContainerStatuses) == 0 || !pod.Status.ContainerStatuses[0].Ready {
+	if !k8s.PodReady(*pod, "postgres") {
 		return nil, fmt.Errorf("primary pod %s is not running and ready", primary)
 	}
 

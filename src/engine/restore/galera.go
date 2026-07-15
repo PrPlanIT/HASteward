@@ -14,8 +14,6 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 	"github.com/PrPlanIT/HASteward/src/restic"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // DumpFilenameGalera is the virtual filename used in restic snapshots for mysqldump output.
@@ -119,19 +117,5 @@ func (r *galeraRestore) restoreDump(ctx context.Context) (*model.RestoreResult, 
 // findHealthyPod returns the name of a healthy running MariaDB pod.
 func (r *galeraRestore) findHealthyPod(ctx context.Context) (string, error) {
 	cfg := r.p.Config()
-	c := k8s.GetClients()
-	pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/instance=" + cfg.ClusterName,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	for _, pod := range pods.Items {
-		if k8s.PodReady(pod, "mariadb") {
-			return pod.Name, nil
-		}
-	}
-
-	return "", fmt.Errorf("no healthy running pods found for %s in %s", cfg.ClusterName, cfg.Namespace)
+	return k8s.FindReadyPod(ctx, cfg.Namespace, "app.kubernetes.io/instance="+cfg.ClusterName, "mariadb")
 }
