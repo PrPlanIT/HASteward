@@ -81,6 +81,39 @@ func execViaSPDY(ctx context.Context, pod, namespace, container string, command 
 	}, nil
 }
 
+// podLogsImpl is the backend for PodLogs; tests override it via
+// SetPodLogsHookForTest to return canned logs (the fake clientset's GetLogs
+// returns a fixed string, not real container output).
+var podLogsImpl = podLogsViaAPI
+
+// PodLogs returns a pod's logs as a string, or "" on error.
+func PodLogs(ctx context.Context, namespace, pod string) string {
+	return podLogsImpl(ctx, namespace, pod)
+}
+
+// SetPodLogsHookForTest replaces the pod-logs backend and returns a restore func.
+// TEST-ONLY.
+func SetPodLogsHookForTest(fn func(ctx context.Context, namespace, pod string) string) (restore func()) {
+	prev := podLogsImpl
+	podLogsImpl = fn
+	return func() { podLogsImpl = prev }
+}
+
+func podLogsViaAPI(ctx context.Context, namespace, pod string) string {
+	c := GetClients()
+	if c == nil {
+		return ""
+	}
+	req := c.Clientset.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return ""
+	}
+	defer stream.Close()
+	data, _ := io.ReadAll(stream)
+	return string(data)
+}
+
 // ExecStream runs a command in a container with full streaming I/O control.
 // The caller provides stdin, stdout, and stderr writers/readers directly.
 // Any of stdin, stdout, stderr may be nil.

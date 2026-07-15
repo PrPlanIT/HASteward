@@ -43,6 +43,17 @@ func (p *GaleraProvider) PodSelector() string {
 // DataPVCName returns the datadir PVC name for a pod (Galera: storage-<pod>).
 func (p *GaleraProvider) DataPVCName(pod string) string { return "storage-" + pod }
 
+// NewGaleraProviderForTest builds a provider with injected state, bypassing
+// Validate (no live cluster/secret needed). TEST-ONLY — never call from
+// production code.
+func NewGaleraProviderForTest(cfg *common.Config, replicas int64, mariadb *unstructured.Unstructured) *GaleraProvider {
+	p := &GaleraProvider{cfg: cfg, replicas: replicas}
+	if mariadb != nil {
+		p.SetMariaDB(mariadb)
+	}
+	return p
+}
+
 func (p *GaleraProvider) MariaDB() *unstructured.Unstructured     { return p.mariadb }
 func (p *GaleraProvider) Spec() map[string]interface{}            { return p.mariadbSpec }
 func (p *GaleraProvider) Status() map[string]interface{}          { return p.mariadbStatus }

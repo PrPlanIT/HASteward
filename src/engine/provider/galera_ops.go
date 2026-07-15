@@ -218,16 +218,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 
 // helperPodOutput fetches a helper pod's logs.
 func (p *GaleraProvider) helperPodOutput(ctx context.Context, podName string) string {
-	c := k8s.GetClients()
-	cfg := p.Config()
-	req := c.Clientset.CoreV1().Pods(cfg.Namespace).GetLogs(podName, &corev1.PodLogOptions{})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return ""
-	}
-	defer stream.Close()
-	data, _ := io.ReadAll(stream)
-	return string(data)
+	return k8s.PodLogs(ctx, p.Config().Namespace, podName)
 }
 
 // ParseWsrepRecoverOutput extracts UUID, seqno, and lastCommitted from mariadbd
