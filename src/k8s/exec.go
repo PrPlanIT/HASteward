@@ -17,10 +17,29 @@ type ExecResult struct {
 	Stderr string
 }
 
+// execImpl is the backend for ExecCommand. Production uses execViaSPDY; tests
+// override it via SetExecHookForTest to return canned results, because the SPDY
+// executor needs a real API server and cannot be faked by the fake clientset.
+var execImpl = execViaSPDY
+
+// SetExecHookForTest replaces the exec backend and returns a restore func.
+// TEST-ONLY. The hook receives the FINAL argv — note ExecCommandWithEnv wraps its
+// command as `sh -c <script> sh <realcmd...>`, so match on a substring of
+// strings.Join(command, " ") (e.g. "grastate.dat", "SELECT 1", "wsrep_recover").
+func SetExecHookForTest(fn func(ctx context.Context, pod, namespace, container string, command []string) (*ExecResult, error)) (restore func()) {
+	prev := execImpl
+	execImpl = fn
+	return func() { execImpl = prev }
+}
+
 // ExecCommand runs a command in a container via the Kubernetes exec API.
 // If stdin is nil, no stdin is attached. stdout and stderr are captured
 // and returned. For streaming, use ExecStream instead.
 func ExecCommand(ctx context.Context, pod, namespace, container string, command []string) (*ExecResult, error) {
+	return execImpl(ctx, pod, namespace, container, command)
+}
+
+func execViaSPDY(ctx context.Context, pod, namespace, container string, command []string) (*ExecResult, error) {
 	c := GetClients()
 	if c == nil {
 		return nil, fmt.Errorf("kubernetes clients not initialized")

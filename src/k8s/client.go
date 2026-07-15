@@ -117,6 +117,16 @@ func GetClients() *Clients {
 	return clients
 }
 
+// SetClientsForTest injects a Clients (typically backed by kubernetes/fake and
+// dynamic/fake) and returns a restore func. TEST-ONLY: it bypasses Init's
+// sync.Once so flow tests can drive the engine against a fake API server. Never
+// call from production code.
+func SetClientsForTest(c *Clients) (restore func()) {
+	prev := clients
+	clients = c
+	return func() { clients = prev }
+}
+
 // ServiceAccountFromPods returns the ServiceAccountName from the first pod
 // with one set, falling back to "default". This lets spawned probe/heal pods
 // inherit the workload's own SA rather than assuming a specific name exists
