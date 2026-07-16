@@ -284,3 +284,9 @@ Read-only diagnostics for a database cluster
 
 **Usage:** `hasteward triage`
 
+### `hasteward version`
+
+Print the hasteward version and build info
+
+**Usage:** `hasteward version`
+
