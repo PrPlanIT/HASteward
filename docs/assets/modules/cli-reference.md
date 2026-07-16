@@ -155,20 +155,24 @@ List BackupRepository resources
 
 #### `hasteward get status`
 
-Show triage status of managed database clusters
+Show the current state of managed database clusters (alias of 'status')
 
 **Usage:** `hasteward get status`
 
 ### `hasteward prune`
 
-Remove stale data (backups, WAL)
+Apply retention — remove old backup snapshots
 
 ```
-Prune commands for cleaning up accumulated data.
+Prune retained artifacts per a retention policy. "Prune" here means only
+"remove retained data" — it is not a recovery operation.
 
 Available subcommands:
   backups    Apply retention policy and remove old backup snapshots
-  wal        Clear accumulated WAL from a disk-full CNPG instance
+
+Note: clearing WAL from a disk-full instance is storage-pressure RECOVERY, not
+retention — it now lives at the top level as 'prune-wal' ('prune wal' still works
+as a compat alias).
 ```
 
 **Usage:** `hasteward prune`
@@ -209,28 +213,53 @@ Examples:
 
 #### `hasteward prune wal`
 
-Clear accumulated WAL from a disk-full CNPG instance
+Clear accumulated WAL from a disk-full CNPG instance (alias of 'prune-wal')
 
 ```
 Clears accumulated WAL segments from a disk-full PostgreSQL primary.
 
-This is a DESTRUCTIVE operation. It deletes WAL files from the instance's
-PVC to free disk space when the primary is stuck in a WAL-accumulation
-deadlock (disk full -> can't start -> replicas can't connect -> replication
-slots hold WAL -> disk stays full).
+This is a DESTRUCTIVE storage-pressure RECOVERY operation — not backup retention.
+It deletes WAL files from the instance's PVC to free disk space when the primary is
+stuck in a WAL-accumulation deadlock (disk full -> can't start -> replicas can't
+connect -> replication slots hold WAL -> disk stays full).
 
-Safety: Only operates on CNPG clusters. Requires --instance to target a
-specific instance. Runs triage first to verify cluster state. Refuses to
-proceed if no healthy replicas exist.
+Safety: Only operates on CNPG clusters. Requires --instance to target a specific
+instance. Runs triage first and verifies each ready replica is caught up before it
+deletes anything.
 
 Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
 
 Examples:
-  hasteward prune wal -e cnpg -c nextcloud-postgres -n temple-of-time -i 2
-  hasteward prune wal -e cnpg -c grafana-postgres -n gossip-stone -i 1
+  hasteward prune-wal -e cnpg -c nextcloud-postgres -n temple-of-time -i 2
+  hasteward prune-wal -e cnpg -c grafana-postgres -n gossip-stone -i 1
 ```
 
 **Usage:** `hasteward prune wal`
+
+### `hasteward prune-wal`
+
+Clear accumulated WAL from a disk-full CNPG instance (storage-pressure recovery)
+
+```
+Clears accumulated WAL segments from a disk-full PostgreSQL primary.
+
+This is a DESTRUCTIVE storage-pressure RECOVERY operation — not backup retention.
+It deletes WAL files from the instance's PVC to free disk space when the primary is
+stuck in a WAL-accumulation deadlock (disk full -> can't start -> replicas can't
+connect -> replication slots hold WAL -> disk stays full).
+
+Safety: Only operates on CNPG clusters. Requires --instance to target a specific
+instance. Runs triage first and verifies each ready replica is caught up before it
+deletes anything.
+
+Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
+
+Examples:
+  hasteward prune-wal -e cnpg -c nextcloud-postgres -n temple-of-time -i 2
+  hasteward prune-wal -e cnpg -c grafana-postgres -n gossip-stone -i 1
+```
+
+**Usage:** `hasteward prune-wal`
 
 ### `hasteward reconfigure`
 
@@ -277,6 +306,20 @@ Endpoints:
 ```
 
 **Usage:** `hasteward serve`
+
+### `hasteward status`
+
+Show the current state of managed database clusters
+
+```
+Reports the current, factual state of the managed clusters — the "what is?"
+question: engine, namespace, whether HASteward manages it, last triage, last backup.
+
+For interpretation — what is WRONG and what to do next — use 'triage', which runs the
+diagnosis catalog and recommends a remedy.
+```
+
+**Usage:** `hasteward status`
 
 ### `hasteward triage`
 
