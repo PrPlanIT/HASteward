@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/PrPlanIT/HASteward/src/common"
-	"github.com/PrPlanIT/HASteward/src/env"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
+	"github.com/PrPlanIT/HASteward/src/env"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/printer"
@@ -57,12 +57,14 @@ func init() {
 	env.String(pf, &Cfg.BackupsPath, "backups-path", "", "BACKUPS_PATH", "", "Restic repository path or URL")
 	env.RawOrPrefixed(pf, &Cfg.ResticPassword, "restic-password", "", "RESTIC_PASSWORD", "", "Restic repository encryption password")
 	env.Bool(pf, &Cfg.NoEscrow, "no-escrow", "", "NO_ESCROW", false, "Skip pre-repair escrow backup")
-	env.Bool(pf, &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
-	env.Bool(pf, &Cfg.WipeDatadir, "wipe-datadir", "", "WIPE_DATADIR", false,
+	// Command-specific flags (demoted from persistent — #31: flag scope = "which cluster"
+	// stays global, "how this algorithm behaves" belongs on the owning command).
+	env.Bool(repairCmd.Flags(), &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
+	env.Bool(repairCmd.Flags(), &Cfg.WipeDatadir, "wipe-datadir", "", "WIPE_DATADIR", false,
 		"Wipe entire datadir on target instance (not just grastate). Forces full SST\n"+
 			"reseed from donor. Use when local data is irrecoverably corrupted. Requires\n"+
 			"--force and --instance.")
-	env.Bool(pf, &Cfg.FixBootstrap, "fix-bootstrap", "", "FIX_BOOTSTRAP", false,
+	env.Bool(reconfigureCmd.Flags(), &Cfg.FixBootstrap, "fix-bootstrap", "", "FIX_BOOTSTRAP", false,
 		"Reconfigure: clear grastate and remove bootstrap config on target instance.\n"+
 			"Prevents stale local bootstrap behavior during cluster restart.")
 	env.String(pf, &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
@@ -76,9 +78,10 @@ func init() {
 	pf.Bool("no-color", false, "Disable color output")
 	pf.Bool("debug", false, "Enable debug output")
 
-	// Instance and donor flags need special handling for optional int
+	// Instance and donor flags need special handling for optional int. --donor is
+	// repair-only; --instance is demoted to its consumers in each command's file.
 	env.StringP(pf, "instance", "i", "INSTANCE", "", "Target specific instance number")
-	env.StringP(pf, "donor", "d", "DONOR", "", "Explicit donor instance ordinal (declares authoritative source for repair)")
+	env.StringP(repairCmd.Flags(), "donor", "d", "DONOR", "", "Explicit donor instance ordinal (declares authoritative source for repair)")
 
 	RootCmd.AddCommand(triageCmd, repairCmd, reconfigureCmd, backupCmd, restoreCmd, serveCmd, getCmd, exportCmd, pruneCmd)
 }
