@@ -65,7 +65,7 @@ func init() {
 			"reseed from donor. Use when local data is irrecoverably corrupted. Requires\n"+
 			"--force and --instance.")
 	env.Bool(reconfigureCmd.Flags(), &Cfg.FixBootstrap, "fix-bootstrap", "", "FIX_BOOTSTRAP", false,
-		"Reconfigure: clear grastate and remove bootstrap config on target instance.\n"+
+		"reset-authority: clear grastate and remove bootstrap config on target instance.\n"+
 			"Prevents stale local bootstrap behavior during cluster restart.")
 	// --method (backup+restore), --snapshot (restore+export), --heal-timeout (repair+
 	// reconfigure): behavior knobs, demoted to their consumers. env dedups the binding so

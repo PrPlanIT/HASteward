@@ -11,39 +11,41 @@ import (
 )
 
 var reconfigureCmd = &cobra.Command{
-	Use:   "reconfigure",
-	Short: "Cluster-scoped authority correction (stops all pods, fixes metadata, restarts)",
-	Long: `Reconfigure performs cluster-scoped authority correction on a Galera cluster.
-This operation intentionally stops all database pods, modifies authority
-metadata on the target instance, and restarts the cluster.
+	Use:   "reset-authority",
+	Short: "Reset a Galera cluster's authority when its metadata is inconsistent (cluster-wide restart)",
+	Long: `Reset the cluster-wide authority on a Galera cluster. Use this when the nodes'
+authority metadata is inconsistent — no node can be trusted as the source of truth — and
+it must be forcibly corrected. It intentionally stops ALL database pods, rewrites the
+authority metadata on the target instance, and restarts the cluster; every node
+experiences downtime.
 
-This is NOT repair (instance-scoped). This is a cluster restart with
-corrected metadata. All nodes will experience downtime.
+This is NOT repair (instance-scoped data heal) and NOT bootstrap (declaring authority on a
+DOWN cluster). Reach for it when the cluster is up but its authority metadata is corrupt.
 
 Requires --force, --instance, and at least one action flag (--fix-bootstrap).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, err := InitPrinter("reconfigure")
+		_, err := InitPrinter("reset-authority")
 		if err != nil {
 			return err
 		}
 
 		// Mandatory enforcement BEFORE triage
 		if !Cfg.Force {
-			return fmt.Errorf("ABORT: reconfigure requires --force (this is a cluster-scoped operation)")
+			return fmt.Errorf("ABORT: reset-authority requires --force (this is a cluster-scoped operation)")
 		}
 		if !Cfg.FixBootstrap {
-			return fmt.Errorf("ABORT: no reconfigure action specified. Use --fix-bootstrap or another action flag")
+			return fmt.Errorf("ABORT: no reset-authority action specified. Use --fix-bootstrap or another action flag")
 		}
 
 		// PreRun parses --instance, validates required flags, inits K8s
-		prov, err := PreRun(cmd, "reconfigure")
+		prov, err := PreRun(cmd, "reset-authority")
 		if err != nil {
 			return err
 		}
 
 		// Instance check after PreRun (ResolveInstance parses the flag)
 		if Cfg.InstanceNumber == nil {
-			return fmt.Errorf("ABORT: reconfigure requires --instance (must target a specific node)")
+			return fmt.Errorf("ABORT: reset-authority requires --instance (must target a specific node)")
 		}
 		if *Cfg.InstanceNumber < 0 {
 			return fmt.Errorf("ABORT: instance must be non-negative, got %d", *Cfg.InstanceNumber)
@@ -76,7 +78,7 @@ Requires --force, --instance, and at least one action flag (--fix-bootstrap).`,
 			return err
 		}
 
-		output.Complete(fmt.Sprintf("Reconfigure complete (%s)", time.Since(start).Truncate(time.Second)))
+		output.Complete(fmt.Sprintf("Reset-authority complete (%s)", time.Since(start).Truncate(time.Second)))
 		return nil
 	},
 }
