@@ -181,6 +181,13 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 	rescue := func() {
 		output.Section("Rescue")
 
+		// The run's context may already be cancelled (e.g. the operation was interrupted
+		// by a signal); the rescue MUST still reach the API to restore scale and resume the
+		// operator — leaving it scaled-down/suspended is the worst outcome (#30). Run the
+		// whole rescue on a fresh, bounded context rather than the run's.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
 		// 1. Delete helpers
 		delErr1 := c.Clientset.CoreV1().Pods(ns).Delete(ctx, storageHelper, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 		if delErr1 != nil && !apierrors.IsNotFound(delErr1) {
