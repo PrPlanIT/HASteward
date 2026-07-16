@@ -6,6 +6,7 @@ unprefixed ones (e.g. `KUBECONFIG`) are standard tools' variables it honors.
 
 | Environment Variable | Flag | Type | Default | Description |
 |----------------------|------|------|---------|-------------|
+| `HASTEWARD_BACKUP_METHOD` | `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
 | `HASTEWARD_ENGINE` | `--engine`, `-e` | `string` | `—` | Database engine: cnpg or galera |
 | `HASTEWARD_CLUSTER` | `--cluster`, `-c` | `string` | `—` | Database cluster CR name |
 | `HASTEWARD_NAMESPACE` | `--namespace`, `-n` | `string` | `—` | Kubernetes namespace |
@@ -15,8 +16,7 @@ unprefixed ones (e.g. `KUBECONFIG`) are standard tools' variables it honors.
 | `HASTEWARD_NO_ESCROW` | `--no-escrow` | `bool` | `false` | Skip pre-repair escrow backup |
 | `HASTEWARD_UNWEDGE` | `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
 | `HASTEWARD_WIPE_DATADIR` | `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
-| `HASTEWARD_FIX_BOOTSTRAP` | `--fix-bootstrap` | `bool` | `false` | Reconfigure: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
-| `HASTEWARD_BACKUP_METHOD` | `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
+| `HASTEWARD_FIX_BOOTSTRAP` | `--fix-bootstrap` | `bool` | `false` | reset-authority: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
 | `HASTEWARD_SNAPSHOT` | `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
 | `HASTEWARD_HEAL_TIMEOUT` | `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
 | `HASTEWARD_DELETE_TIMEOUT` | `--delete-timeout` | `int` | `300` | Delete wait timeout in seconds |

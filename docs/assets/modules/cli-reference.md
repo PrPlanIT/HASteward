@@ -30,13 +30,122 @@ encryption, and compression.
 
 ### `hasteward backup`
 
-Back up a database cluster
+Manage cluster backups (create, list, restore, export, prune, policies, repositories)
 
-**Usage:** `hasteward backup [flags]`
+```
+Backup lifecycle for managed clusters. Use 'backup create' to take a backup.
+```
+
+**Usage:** `hasteward backup`
+
+#### `hasteward backup create`
+
+Create a backup of a database cluster
+
+**Usage:** `hasteward backup create [flags]`
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
+
+#### `hasteward backup export`
+
+Extract a backup snapshot to a local .sql.gz file
+
+```
+Exports a database dump from a restic snapshot to a local gzipped SQL file.
+
+For diverged snapshots, use -i to specify the instance ordinal.
+
+Examples:
+  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
+  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz
+```
+
+**Usage:** `hasteward backup export [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--file`, `-o` | `string` | `` | Output file path (e.g., dump.sql.gz) |
+| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
+
+#### `hasteward backup list`
+
+List restic backup snapshots
+
+**Usage:** `hasteward backup list [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-namespaces`, `-A` | `bool` | `false` | List across all namespaces |
+| `--type`, `-t` | `string` | `all` | Snapshot type filter: backup, diverged, or all |
+
+#### `hasteward backup policies`
+
+List BackupPolicy resources
+
+**Usage:** `hasteward backup policies [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-namespaces`, `-A` | `bool` | `false` | List across all namespaces |
+| `--type`, `-t` | `string` | `all` | Snapshot type filter: backup, diverged, or all |
+
+#### `hasteward backup prune`
+
+Apply retention policy and remove old backup snapshots
+
+```
+Prunes old backup snapshots from restic repositories according to the
+configured retention policy (keep-last, keep-daily, keep-weekly, keep-monthly).
+
+By default, only type=backup snapshots are pruned. Use -t diverged to prune
+only diverged snapshots, or -t all to prune both types.
+
+For diverged snapshots, retention is group-aware: snapshots sharing the same
+job tag (from one repair operation) are kept or removed as a unit. So
+--keep-last 3 means "keep the 3 most recent repair jobs" regardless of how
+many instances each job captured.
+
+Examples:
+  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
+  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+    --keep-last 7 --keep-daily 30 --keep-weekly 12 --keep-monthly 24
+  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+    -t diverged --keep-last 3
+```
+
+**Usage:** `hasteward backup prune [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--keep-daily` | `int` | `30` | Keep N daily snapshots (or jobs for diverged) |
+| `--keep-last` | `int` | `7` | Keep the last N snapshots (or jobs for diverged) |
+| `--keep-monthly` | `int` | `24` | Keep N monthly snapshots (or jobs for diverged) |
+| `--keep-weekly` | `int` | `12` | Keep N weekly snapshots (or jobs for diverged) |
+| `--type`, `-t` | `string` | `backup` | Snapshot type to prune: backup, diverged, or all |
+
+#### `hasteward backup repositories`
+
+List BackupRepository resources
+
+**Usage:** `hasteward backup repositories [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-namespaces`, `-A` | `bool` | `false` | List across all namespaces |
+| `--type`, `-t` | `string` | `all` | Snapshot type filter: backup, diverged, or all |
+
+#### `hasteward backup restore`
+
+Restore a database cluster from a restic snapshot
+
+**Usage:** `hasteward backup restore [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
+| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
 
 ### `hasteward bootstrap`
 
@@ -101,139 +210,6 @@ bindings actually being shipped, never a stale copy.
 | `--help`, `-h` | `bool` | `false` | help for generate |
 | `--output-dir` | `string` | `docs/assets/modules` | output directory for generated fragments |
 
-### `hasteward export`
-
-Extract a backup snapshot to a local .sql.gz file
-
-```
-Exports a database dump from a restic snapshot to a local gzipped SQL file.
-
-For diverged snapshots, use -i to specify the instance ordinal.
-
-Examples:
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz
-```
-
-**Usage:** `hasteward export [flags]`
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--file`, `-o` | `string` | `` | Output file path (e.g., dump.sql.gz) |
-| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
-
-### `hasteward get`
-
-Display resources (backups, policies, repositories, status)
-
-**Usage:** `hasteward get`
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--all-namespaces`, `-A` | `bool` | `false` | List across all namespaces |
-| `--type`, `-t` | `string` | `all` | Snapshot type filter: backup, diverged, or all |
-
-#### `hasteward get backups`
-
-List restic backup snapshots
-
-**Usage:** `hasteward get backups`
-
-#### `hasteward get policies`
-
-List BackupPolicy resources
-
-**Usage:** `hasteward get policies`
-
-#### `hasteward get repositories`
-
-List BackupRepository resources
-
-**Usage:** `hasteward get repositories`
-
-#### `hasteward get status`
-
-Show the current state of managed database clusters (alias of 'status')
-
-**Usage:** `hasteward get status`
-
-### `hasteward prune`
-
-Apply retention — remove old backup snapshots
-
-```
-Prune retained artifacts per a retention policy. "Prune" here means only
-"remove retained data" — it is not a recovery operation.
-
-Available subcommands:
-  backups    Apply retention policy and remove old backup snapshots
-
-Note: clearing WAL from a disk-full instance is storage-pressure RECOVERY, not
-retention — it now lives at the top level as 'prune-wal' ('prune wal' still works
-as a compat alias).
-```
-
-**Usage:** `hasteward prune`
-
-#### `hasteward prune backups`
-
-Apply retention policy and remove old backup snapshots
-
-```
-Prunes old backup snapshots from restic repositories according to the
-configured retention policy (keep-last, keep-daily, keep-weekly, keep-monthly).
-
-By default, only type=backup snapshots are pruned. Use -t diverged to prune
-only diverged snapshots, or -t all to prune both types.
-
-For diverged snapshots, retention is group-aware: snapshots sharing the same
-job tag (from one repair operation) are kept or removed as a unit. So
---keep-last 3 means "keep the 3 most recent repair jobs" regardless of how
-many instances each job captured.
-
-Examples:
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
-    --keep-last 7 --keep-daily 30 --keep-weekly 12 --keep-monthly 24
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
-    -t diverged --keep-last 3
-```
-
-**Usage:** `hasteward prune backups [flags]`
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--keep-daily` | `int` | `30` | Keep N daily snapshots (or jobs for diverged) |
-| `--keep-last` | `int` | `7` | Keep the last N snapshots (or jobs for diverged) |
-| `--keep-monthly` | `int` | `24` | Keep N monthly snapshots (or jobs for diverged) |
-| `--keep-weekly` | `int` | `12` | Keep N weekly snapshots (or jobs for diverged) |
-| `--type`, `-t` | `string` | `backup` | Snapshot type to prune: backup, diverged, or all |
-
-#### `hasteward prune wal`
-
-Clear accumulated WAL from a disk-full CNPG instance (alias of 'prune-wal')
-
-```
-Clears accumulated WAL segments from a disk-full PostgreSQL primary.
-
-This is a DESTRUCTIVE storage-pressure RECOVERY operation — not backup retention.
-It deletes WAL files from the instance's PVC to free disk space when the primary is
-stuck in a WAL-accumulation deadlock (disk full -> can't start -> replicas can't
-connect -> replication slots hold WAL -> disk stays full).
-
-Safety: Only operates on CNPG clusters. Requires --instance to target a specific
-instance. Runs triage first and verifies each ready replica is caught up before it
-deletes anything.
-
-Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
-
-Examples:
-  hasteward prune-wal -e cnpg -c nextcloud-postgres -n temple-of-time -i 2
-  hasteward prune-wal -e cnpg -c grafana-postgres -n gossip-stone -i 1
-```
-
-**Usage:** `hasteward prune wal`
-
 ### `hasteward prune-wal`
 
 Clear accumulated WAL from a disk-full CNPG instance (storage-pressure recovery)
@@ -259,28 +235,6 @@ Examples:
 
 **Usage:** `hasteward prune-wal`
 
-### `hasteward reconfigure`
-
-Cluster-scoped authority correction (stops all pods, fixes metadata, restarts)
-
-```
-Reconfigure performs cluster-scoped authority correction on a Galera cluster.
-This operation intentionally stops all database pods, modifies authority
-metadata on the target instance, and restarts the cluster.
-
-This is NOT repair (instance-scoped). This is a cluster restart with
-corrected metadata. All nodes will experience downtime.
-
-Requires --force, --instance, and at least one action flag (--fix-bootstrap).
-```
-
-**Usage:** `hasteward reconfigure [flags]`
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--fix-bootstrap` | `bool` | `false` | Reconfigure: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
-| `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
-
 ### `hasteward repair`
 
 Heal unhealthy database instances
@@ -294,16 +248,29 @@ Heal unhealthy database instances
 | `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
 | `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
 
-### `hasteward restore`
+### `hasteward reset-authority`
 
-Restore a database cluster from a restic snapshot
+Reset a Galera cluster's authority when its metadata is inconsistent (cluster-wide restart)
 
-**Usage:** `hasteward restore [flags]`
+```
+Reset the cluster-wide authority on a Galera cluster. Use this when the nodes'
+authority metadata is inconsistent — no node can be trusted as the source of truth — and
+it must be forcibly corrected. It intentionally stops ALL database pods, rewrites the
+authority metadata on the target instance, and restarts the cluster; every node
+experiences downtime.
+
+This is NOT repair (instance-scoped data heal) and NOT bootstrap (declaring authority on a
+DOWN cluster). Reach for it when the cluster is up but its authority metadata is corrupt.
+
+Requires --force, --instance, and at least one action flag (--fix-bootstrap).
+```
+
+**Usage:** `hasteward reset-authority [flags]`
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
-| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
+| `--fix-bootstrap` | `bool` | `false` | reset-authority: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
+| `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
 
 ### `hasteward serve`
 
@@ -341,6 +308,33 @@ diagnosis catalog and recommends a remedy.
 Read-only diagnostics for a database cluster
 
 **Usage:** `hasteward triage`
+
+### `hasteward update`
+
+Update this hasteward CLI binary in place from the published image
+
+```
+Pull the HASteward image and atomically replace the running binary with the one
+inside it.
+
+  hasteward update          docker.io/prplanit/hasteward:latest
+  hasteward update --dev    docker.io/prplanit/hasteward:latest-dev
+  hasteward update --image <ref>
+
+The image binary is static (CGO_ENABLED=0), so it runs on any linux host; it is
+verified to run here before the swap, and the swap is atomic — the running process
+is unaffected.
+
+Scope: this updates your LOCAL CLI binary only. The in-cluster operator (`serve`) is
+updated by changing its image tag (GitOps), NOT by this command.
+```
+
+**Usage:** `hasteward update [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dev` | `bool` | `false` | update from the latest-dev image instead of the latest release |
+| `--image` | `string` | `` | image ref to update from (overrides default and --dev) |
 
 ### `hasteward version`
 
