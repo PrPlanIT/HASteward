@@ -529,7 +529,7 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		RecommendedDonor: recommendedDonor,
 	}
 
-	result.OperatorWedge = t.detectOperatorWedge(data, comparison, assessments)
+	result.Diagnoses = t.diagnose(data, comparison, assessments)
 
 	t.triageDisplay(data, result)
 
@@ -970,23 +970,19 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 		output.SuggestedCommands("galera", t.p.Config().ClusterName, t.p.Config().Namespace)
 	}
 
-	if w := result.OperatorWedge; w != nil {
+	for _, d := range result.Diagnoses {
 		output.Println()
-		output.Section("OPERATOR WEDGE — data healthy, operator stuck in recovery")
-		output.Println("The data plane is HEALTHY (a Primary is formed and no node needs healing),")
-		output.Printf("but the mariadb-operator reports GaleraReady:False (%s: %s) and holds a stuck\n",
-			w.Reason, w.Message)
-		output.Printf("recovery snapshot for %s where no node resolved a valid seqno — so it can\n",
-			strings.Join(w.RecoveryNodes, ", "))
-		output.Println("neither finish nor abandon recovery, and re-loops it. This persists across")
-		output.Println("reboots (status.galeraRecovery), which is why the cluster flaps.")
-		if w.Suspended {
-			output.Println("The cluster is SUSPENDED — the wedge is LATENT: unsuspending resumes the loop")
-			output.Println("until the persisted snapshot is cleared.")
+		output.Section("DIAGNOSIS: " + d.ID)
+		output.Println(d.Summary)
+		if d.Detail != "" {
+			output.Println(d.Detail)
 		}
-		output.Printf("Best-known node (unstick target): %s\n", w.BestCandidate)
-		output.Println("Remediation: force-bootstrap that node and clear status.galeraRecovery")
-		output.Println("(the operator's forceClusterBootstrapInPod escape hatch).")
+		if d.Target != "" {
+			output.Field("Remediation target", d.Target)
+		}
+		if d.Remedy != "" {
+			output.Field("Remedy", d.Remedy)
+		}
 	}
 
 	if data.allNodesDown {
@@ -1342,14 +1338,25 @@ func getMapString(m map[string]interface{}, key string) string {
 	return "Unknown"
 }
 
-// detectOperatorWedge flags a control-plane wedge: the data plane is healthy but the
-// mariadb-operator is stuck in recovery. It fires only on the precise contradiction —
-// a formed Primary with nothing to heal, GaleraReady:False, and a status.galeraRecovery
-// snapshot where NO node resolved a valid seqno (every position < 0), so the operator can
-// neither finish nor abandon recovery and re-loops it (persisting across reboots). Returns
-// nil when any leg is absent — the normal data-plane assessments already cover those.
-func (t *galeraTriage) detectOperatorWedge(data *galeraTriageData, comparison model.DataComparison, assessments []model.InstanceAssessment) *model.OperatorWedge {
-	// The data plane must see nothing wrong: not all-down, unambiguous authority, no heal.
+// diagnose runs the Galera diagnosis catalog over the triaged state and returns every
+// recognized failure condition, each paired with its safe remedy. New failure modes are
+// added here as new catalog entries.
+func (t *galeraTriage) diagnose(data *galeraTriageData, comparison model.DataComparison, assessments []model.InstanceAssessment) []model.Diagnosis {
+	var out []model.Diagnosis
+	if d := t.diagnoseRecoveryDeadlock(data, comparison, assessments); d != nil {
+		out = append(out, *d)
+	}
+	return out
+}
+
+// diagnoseRecoveryDeadlock recognizes `galera-operator-recovery-deadlock`: the
+// mariadb-operator holds a status.galeraRecovery snapshot in which NO node resolved a
+// sequence number (every state[*].seqno < 0), so it cannot pick a bootstrap source and
+// re-runs recovery indefinitely — while the data plane is healthy (a Primary is formed,
+// nothing needs healing). It persists across restarts, which is why the cluster flaps.
+// Returns nil when the condition is absent — the data-plane assessments cover the rest.
+func (t *galeraTriage) diagnoseRecoveryDeadlock(data *galeraTriageData, comparison model.DataComparison, assessments []model.InstanceAssessment) *model.Diagnosis {
+	// Data plane must see nothing wrong: not all-down, unambiguous authority, no heal.
 	if data.allNodesDown || !comparison.SafeToHeal {
 		return nil
 	}
@@ -1359,12 +1366,11 @@ func (t *galeraTriage) detectOperatorWedge(data *galeraTriageData, comparison mo
 		}
 	}
 	// The operator disagrees: GaleraReady is False.
-	cond := t.p.GaleraCondition()
-	if getConditionStatus(cond) != "False" {
+	if getConditionStatus(t.p.GaleraCondition()) != "False" {
 		return nil
 	}
-	// ...and it is stuck: a galeraRecovery snapshot where NO node resolved a valid seqno.
-	// If any node shows seqno >= 0 the operator can still bootstrap from it — not wedged.
+	// ...and it is deadlocked: a recovery snapshot where NO node resolved a seqno. If any
+	// node shows seqno >= 0 the operator can still bootstrap from it — not deadlocked.
 	state := getRecoveryMap(t.p.GaleraRecovery(), "state")
 	if len(state) == 0 {
 		return nil
@@ -1384,25 +1390,24 @@ func (t *galeraTriage) detectOperatorWedge(data *galeraTriageData, comparison mo
 		return nil
 	}
 	sort.Strings(nodes)
-	return &model.OperatorWedge{
-		GaleraReady:   "False",
-		Reason:        condField(cond, "reason"),
-		Message:       condField(cond, "message"),
-		Suspended:     t.p.IsSuspended(),
-		RecoveryNodes: nodes,
-		BestCandidate: data.bestSeqnoNode,
-	}
-}
 
-// condField reads a string field from a k8s condition map ("" when absent).
-func condField(cond map[string]interface{}, key string) string {
-	if cond == nil {
-		return ""
+	cfg := t.p.Config()
+	detail := fmt.Sprintf(
+		"The mariadb-operator holds a recovery snapshot for %s in which no node resolved a "+
+			"sequence number, so it cannot choose a bootstrap source and re-runs recovery "+
+			"indefinitely. The data plane is healthy (a Primary is formed and no node needs "+
+			"healing). This persists across restarts (status.galeraRecovery), which is why the "+
+			"cluster flaps.", strings.Join(nodes, ", "))
+	if t.p.IsSuspended() {
+		detail += " The cluster is currently SUSPENDED — the condition is latent and resumes on unsuspend."
 	}
-	if v, ok := cond[key]; ok {
-		return fmt.Sprintf("%v", v)
+	return &model.Diagnosis{
+		ID:      "galera-operator-recovery-deadlock",
+		Summary: "mariadb-operator stuck in Galera recovery (no node resolved a seqno) while the data is healthy",
+		Detail:  detail,
+		Remedy:  fmt.Sprintf("hasteward bootstrap -e galera -c %s -n %s --dry-run", cfg.ClusterName, cfg.Namespace),
+		Target:  data.bestSeqnoNode,
 	}
-	return ""
 }
 
 // nestedInt64 coerces a numeric map value to int64. Unstructured stores JSON integers

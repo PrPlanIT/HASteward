@@ -10,10 +10,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// wedgeCR builds a MariaDB CR with a GaleraReady condition, optional spec.suspend, and an
-// optional status.galeraRecovery.state (pod -> seqno) — the real shapes observed on the
-// live kimai-mariadb wedge.
-func wedgeCR(galeraReadyStatus string, suspend bool, recoveryState map[string]int64) *unstructured.Unstructured {
+// deadlockCR builds a MariaDB CR with a GaleraReady condition, optional spec.suspend, and
+// an optional status.galeraRecovery.state (pod -> seqno) — the real shapes observed on the
+// live kimai-mariadb galera-operator-recovery-deadlock.
+func deadlockCR(galeraReadyStatus string, suspend bool, recoveryState map[string]int64) *unstructured.Unstructured {
 	status := map[string]interface{}{
 		"conditions": []interface{}{
 			map[string]interface{}{
@@ -40,13 +40,13 @@ func wedgeCR(galeraReadyStatus string, suspend bool, recoveryState map[string]in
 	}}
 }
 
-func detectWedge(cr *unstructured.Unstructured, data *galeraTriageData, cmp model.DataComparison, as []model.InstanceAssessment) *model.OperatorWedge {
+func runDiagnose(cr *unstructured.Unstructured, data *galeraTriageData, cmp model.DataComparison, as []model.InstanceAssessment) *model.Diagnosis {
 	p := provider.NewGaleraProviderForTest(&common.Config{ClusterName: "c", Namespace: "ns"}, 3, cr)
-	return (&galeraTriage{p: p}).detectOperatorWedge(data, cmp, as)
+	return (&galeraTriage{p: p}).diagnoseRecoveryDeadlock(data, cmp, as)
 }
 
 // healthyData / healthyCmp / healthyAssessments describe a data plane with nothing wrong —
-// the basis on which a control-plane wedge is the only remaining explanation for the flap.
+// the basis on which a control-plane condition is the only remaining explanation.
 func healthyData() *galeraTriageData {
 	return &galeraTriageData{allNodesDown: false, bestSeqnoNode: "c-0"}
 }
@@ -58,32 +58,26 @@ func healthyAssessments() []model.InstanceAssessment {
 // stuckRecovery is the live signature: every node's seqno unresolved (-1).
 var stuckRecovery = map[string]int64{"c-0": -1, "c-1": -1, "c-2": -1}
 
-// TestDetectOperatorWedge_FiresOnLiveSignature reproduces the kimai case: healthy data,
-// GaleraReady:False, a galeraRecovery snapshot with all seqno -1, cluster suspended.
-func TestDetectOperatorWedge_FiresOnLiveSignature(t *testing.T) {
-	w := detectWedge(wedgeCR("False", true, stuckRecovery), healthyData(), healthyCmp(), healthyAssessments())
-	if w == nil {
-		t.Fatal("expected an operator wedge to be detected (data healthy + GaleraReady:False + stuck recovery)")
+// TestDiagnoseRecoveryDeadlock_FiresOnLiveSignature reproduces the kimai case: healthy
+// data, GaleraReady:False, a galeraRecovery snapshot with all seqno -1, cluster suspended.
+func TestDiagnoseRecoveryDeadlock_FiresOnLiveSignature(t *testing.T) {
+	d := runDiagnose(deadlockCR("False", true, stuckRecovery), healthyData(), healthyCmp(), healthyAssessments())
+	if d == nil {
+		t.Fatal("expected the galera-operator-recovery-deadlock diagnosis (data healthy + GaleraReady:False + all-unresolved recovery)")
 	}
-	if !w.Suspended {
-		t.Error("wedge should be marked Suspended (latent) — spec.suspend was true")
+	if d.ID != "galera-operator-recovery-deadlock" {
+		t.Errorf("unexpected diagnosis ID: %q", d.ID)
 	}
-	if len(w.RecoveryNodes) != 3 {
-		t.Errorf("expected all 3 unresolved nodes, got %v", w.RecoveryNodes)
+	if d.Target != "c-0" {
+		t.Errorf("expected Target c-0 (the bootstrap source), got %q", d.Target)
 	}
-	if w.RecoveryNodes[0] != "c-0" {
-		t.Errorf("recovery nodes should be sorted, got %v", w.RecoveryNodes)
-	}
-	if w.BestCandidate != "c-0" {
-		t.Errorf("expected BestCandidate c-0 (the unstick target), got %q", w.BestCandidate)
-	}
-	if w.Reason != "GaleraNotReady" || w.Message != "Galera not ready" {
-		t.Errorf("condition reason/message not captured: %q / %q", w.Reason, w.Message)
+	if d.Remedy == "" || d.Summary == "" {
+		t.Errorf("diagnosis must carry a Summary and a Remedy: %+v", d)
 	}
 }
 
-// TestDetectOperatorWedge_NegativeCases: each leg of the contradiction is necessary.
-func TestDetectOperatorWedge_NegativeCases(t *testing.T) {
+// TestDiagnoseRecoveryDeadlock_NegativeCases: each leg of the condition is necessary.
+func TestDiagnoseRecoveryDeadlock_NegativeCases(t *testing.T) {
 	tests := []struct {
 		name string
 		cr   *unstructured.Unstructured
@@ -93,37 +87,37 @@ func TestDetectOperatorWedge_NegativeCases(t *testing.T) {
 	}{
 		{
 			name: "operator agrees cluster is healthy (GaleraReady:True)",
-			cr:   wedgeCR("True", false, stuckRecovery), data: healthyData(), cmp: healthyCmp(), as: healthyAssessments(),
+			cr:   deadlockCR("True", false, stuckRecovery), data: healthyData(), cmp: healthyCmp(), as: healthyAssessments(),
 		},
 		{
 			name: "no recovery snapshot at all",
-			cr:   wedgeCR("False", false, nil), data: healthyData(), cmp: healthyCmp(), as: healthyAssessments(),
+			cr:   deadlockCR("False", false, nil), data: healthyData(), cmp: healthyCmp(), as: healthyAssessments(),
 		},
 		{
-			name: "a node resolved a valid seqno (operator can bootstrap — not wedged)",
-			cr:   wedgeCR("False", false, map[string]int64{"c-0": 1655026, "c-1": -1, "c-2": -1}),
+			name: "a node resolved a valid seqno (operator can bootstrap — not deadlocked)",
+			cr:   deadlockCR("False", false, map[string]int64{"c-0": 1655026, "c-1": -1, "c-2": -1}),
 			data: healthyData(), cmp: healthyCmp(), as: healthyAssessments(),
 		},
 		{
 			name: "data plane has real work (a node needs heal)",
-			cr:   wedgeCR("False", false, stuckRecovery), data: healthyData(), cmp: healthyCmp(),
+			cr:   deadlockCR("False", false, stuckRecovery), data: healthyData(), cmp: healthyCmp(),
 			as: []model.InstanceAssessment{{Pod: "c-0"}, {Pod: "c-1", NeedsHeal: true}, {Pod: "c-2"}},
 		},
 		{
 			name: "authority ambiguous (not safe to heal)",
-			cr:   wedgeCR("False", false, stuckRecovery), data: healthyData(),
+			cr:   deadlockCR("False", false, stuckRecovery), data: healthyData(),
 			cmp: model.DataComparison{SafeToHeal: false}, as: healthyAssessments(),
 		},
 		{
-			name: "all nodes down (a real cluster-down, not a control-plane wedge)",
-			cr:   wedgeCR("False", false, stuckRecovery),
+			name: "all nodes down (a real cluster-down, not a control-plane condition)",
+			cr:   deadlockCR("False", false, stuckRecovery),
 			data: &galeraTriageData{allNodesDown: true, bestSeqnoNode: "c-0"}, cmp: healthyCmp(), as: healthyAssessments(),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if w := detectWedge(tc.cr, tc.data, tc.cmp, tc.as); w != nil {
-				t.Fatalf("expected NO wedge, got %+v", w)
+			if d := runDiagnose(tc.cr, tc.data, tc.cmp, tc.as); d != nil {
+				t.Fatalf("expected NO diagnosis, got %+v", d)
 			}
 		})
 	}
