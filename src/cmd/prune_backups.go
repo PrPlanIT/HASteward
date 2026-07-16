@@ -26,10 +26,10 @@ job tag (from one repair operation) are kept or removed as a unit. So
 many instances each job captured.
 
 Examples:
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
     --keep-last 7 --keep-daily 30 --keep-weekly 12 --keep-monthly 24
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
     -t diverged --keep-last 3`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := InitPrinter("prune-backups")

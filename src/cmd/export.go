@@ -24,8 +24,8 @@ var exportCmd = &cobra.Command{
 For diverged snapshots, use -i to specify the instance ordinal.
 
 Examples:
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz`,
+  hasteward backup export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
+  hasteward backup export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := InitPrinter("export")
 		if err != nil {
