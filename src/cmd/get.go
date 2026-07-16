@@ -231,51 +231,56 @@ var getRepositoriesCmd = &cobra.Command{
 
 var getStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show triage status of managed database clusters",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := InitPrinter("get-status")
-		if err != nil {
-			return err
-		}
+	Short: "Show the current state of managed database clusters (alias of 'status')",
+	RunE:  runStatus,
+}
 
-		if err := initGetClients(); err != nil {
-			return err
-		}
+// runStatus reports the current, factual state of managed clusters — the "what is?"
+// question, distinct from `triage` (which interprets "what's wrong + what next"). Shared
+// by the top-level `status` command and the compat `get status`.
+func runStatus(cmd *cobra.Command, args []string) error {
+	p, err := InitPrinter(cmd.Name())
+	if err != nil {
+		return err
+	}
 
-		var entries []model.ClusterStatusEntry
-		c := k8s.GetClients()
+	if err := initGetClients(); err != nil {
+		return err
+	}
 
-		cnpgList, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(Cfg.Namespace).List(cmd.Context(), k8s.ListOptions())
-		if err == nil {
-			for _, obj := range cnpgList.Items {
-				if e := extractStatus(&obj, "cnpg"); e != nil {
-					entries = append(entries, *e)
-				}
+	var entries []model.ClusterStatusEntry
+	c := k8s.GetClients()
+
+	cnpgList, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(Cfg.Namespace).List(cmd.Context(), k8s.ListOptions())
+	if err == nil {
+		for _, obj := range cnpgList.Items {
+			if e := extractStatus(&obj, "cnpg"); e != nil {
+				entries = append(entries, *e)
 			}
 		}
+	}
 
-		mariaList, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(Cfg.Namespace).List(cmd.Context(), k8s.ListOptions())
-		if err == nil {
-			for _, obj := range mariaList.Items {
-				if e := extractStatus(&obj, "galera"); e != nil {
-					entries = append(entries, *e)
-				}
+	mariaList, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(Cfg.Namespace).List(cmd.Context(), k8s.ListOptions())
+	if err == nil {
+		for _, obj := range mariaList.Items {
+			if e := extractStatus(&obj, "galera"); e != nil {
+				entries = append(entries, *e)
 			}
 		}
+	}
 
-		if p.IsHuman() {
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintf(w, "ENGINE\tNAMESPACE\tCLUSTER\tMANAGED\tSTATUS\tLAST TRIAGE\tLAST BACKUP\n")
-			for _, e := range entries {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					e.Engine, e.Namespace, e.Name, e.Managed, e.TriageResult, e.LastTriage, e.LastBackup)
-			}
-			w.Flush()
-		} else {
-			printer.PrintResult(p, &model.GetStatusResult{Clusters: entries}, nil, nil)
+	if p.IsHuman() {
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintf(w, "ENGINE\tNAMESPACE\tCLUSTER\tMANAGED\tSTATUS\tLAST TRIAGE\tLAST BACKUP\n")
+		for _, e := range entries {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				e.Engine, e.Namespace, e.Name, e.Managed, e.TriageResult, e.LastTriage, e.LastBackup)
 		}
-		return nil
-	},
+		w.Flush()
+	} else {
+		printer.PrintResult(p, &model.GetStatusResult{Clusters: entries}, nil, nil)
+	}
+	return nil
 }
 
 func extractStatus(obj *unstructured.Unstructured, eng string) *model.ClusterStatusEntry {
