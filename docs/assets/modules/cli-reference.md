@@ -58,8 +58,8 @@ Exports a database dump from a restic snapshot to a local gzipped SQL file.
 For diverged snapshots, use -i to specify the instance ordinal.
 
 Examples:
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
-  hasteward export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz
+  hasteward backup export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot latest -o dump.sql.gz
+  hasteward backup export -e cnpg -c zitadel-postgres -n zeldas-lullaby --snapshot abc123 -i 2 -o instance2.sql.gz
 ```
 
 **Usage:** `hasteward backup export [flags]`
@@ -108,10 +108,10 @@ job tag (from one repair operation) are kept or removed as a unit. So
 many instances each job captured.
 
 Examples:
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
     --keep-last 7 --keep-daily 30 --keep-weekly 12 --keep-monthly 24
-  hasteward prune backups -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
+  hasteward backup prune -e cnpg -c zitadel-postgres -n zeldas-lullaby --backups-path /backups \
     -t diverged --keep-last 3
 ```
 
