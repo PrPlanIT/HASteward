@@ -14,24 +14,17 @@ encryption, and compression.
 | `--cluster`, `-c` | `string` | `` | Database cluster CR name |
 | `--debug` | `bool` | `false` | Enable debug output |
 | `--delete-timeout` | `int` | `300` | Delete wait timeout in seconds |
-| `--donor`, `-d` | `string` | `` | Explicit donor instance ordinal (declares authoritative source for repair) |
 | `--dry-run` | `bool` | `false` | Show planned actions without executing (destructive commands) |
 | `--engine`, `-e` | `string` | `` | Database engine: cnpg or galera |
-| `--fix-bootstrap` | `bool` | `false` | Reconfigure: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
 | `--force`, `-f` | `bool` | `false` | Override automatic safety refusal for targeted repair. In ambiguous Galera recovery states (divergent UUIDs, split-brain, no clear primary), --donor is required to declare the authoritative source node. |
-| `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
 | `--instance`, `-i` | `string` | `` | Target specific instance number |
 | `--kubeconfig` | `string` | `` | Path to kubeconfig file |
-| `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
 | `--namespace`, `-n` | `string` | `` | Kubernetes namespace |
 | `--no-color` | `bool` | `false` | Disable color output |
 | `--no-escrow` | `bool` | `false` | Skip pre-repair escrow backup |
 | `--output` | `string` | `auto` | Output format: auto, human, json, jsonl |
 | `--restic-password` | `string` | `` | Restic repository encryption password |
-| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
-| `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
 | `--verbose`, `-v` | `bool` | `false` | Verbose output (debug logging) |
-| `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
 
 ## Commands
 
@@ -39,7 +32,11 @@ encryption, and compression.
 
 Back up a database cluster
 
-**Usage:** `hasteward backup`
+**Usage:** `hasteward backup [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
 
 ### `hasteward bootstrap`
 
@@ -123,6 +120,7 @@ Examples:
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--file`, `-o` | `string` | `` | Output file path (e.g., dump.sql.gz) |
+| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
 
 ### `hasteward get`
 
@@ -276,19 +274,36 @@ corrected metadata. All nodes will experience downtime.
 Requires --force, --instance, and at least one action flag (--fix-bootstrap).
 ```
 
-**Usage:** `hasteward reconfigure`
+**Usage:** `hasteward reconfigure [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fix-bootstrap` | `bool` | `false` | Reconfigure: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
+| `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
 
 ### `hasteward repair`
 
 Heal unhealthy database instances
 
-**Usage:** `hasteward repair`
+**Usage:** `hasteward repair [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--donor`, `-d` | `string` | `` | Explicit donor instance ordinal (declares authoritative source for repair) |
+| `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
+| `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
+| `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
 
 ### `hasteward restore`
 
 Restore a database cluster from a restic snapshot
 
-**Usage:** `hasteward restore`
+**Usage:** `hasteward restore [flags]`
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--method`, `-m` | `string` | `dump` | Backup method: dump or native |
+| `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
 
 ### `hasteward serve`
 
