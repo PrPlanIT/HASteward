@@ -7,7 +7,28 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/env"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
+
+// findFlag locates a bound flag whether it lives on root's persistent flags or has been
+// scoped down to a subcommand (some flags are command-specific — e.g. --method on backup
+// and restore). Env-var bindings must be documented regardless of where the flag sits.
+func findFlag(root *cobra.Command, name string) *pflag.Flag {
+	if f := root.PersistentFlags().Lookup(name); f != nil {
+		return f
+	}
+	for _, c := range root.Commands() {
+		if f := c.Flags().Lookup(name); f != nil {
+			return f
+		}
+		for _, gc := range c.Commands() { // one level of nesting (get/prune subgroups)
+			if f := gc.Flags().Lookup(name); f != nil {
+				return f
+			}
+		}
+	}
+	return nil
+}
 
 func init() {
 	Register(Generator{Name: "env-reference", Title: "Environment reference", Fn: GenerateEnvReference})
@@ -35,7 +56,7 @@ func GenerateEnvReference(root *cobra.Command, w io.Writer) error {
 	fmt.Fprintln(w, "| Environment Variable | Flag | Type | Default | Description |")
 	fmt.Fprintln(w, "|----------------------|------|------|---------|-------------|")
 	for _, b := range bindings {
-		f := root.PersistentFlags().Lookup(b.Flag)
+		f := findFlag(root, b.Flag)
 		if f == nil || f.Hidden {
 			continue
 		}

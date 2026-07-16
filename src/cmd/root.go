@@ -67,9 +67,17 @@ func init() {
 	env.Bool(reconfigureCmd.Flags(), &Cfg.FixBootstrap, "fix-bootstrap", "", "FIX_BOOTSTRAP", false,
 		"Reconfigure: clear grastate and remove bootstrap config on target instance.\n"+
 			"Prevents stale local bootstrap behavior during cluster restart.")
-	env.String(pf, &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
-	env.String(pf, &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
-	env.Int(pf, &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
+	// --method (backup+restore), --snapshot (restore+export), --heal-timeout (repair+
+	// reconfigure): behavior knobs, demoted to their consumers. env dedups the binding so
+	// each still appears once in the env reference. --delete-timeout stays global (used by
+	// triage/bootstrap/repair/prune-wal/reconfigure — effectively a global default), as
+	// does --instance (addressing: "which node").
+	env.String(backupCmd.Flags(), &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
+	env.String(restoreCmd.Flags(), &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
+	env.String(restoreCmd.Flags(), &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
+	env.String(exportCmd.Flags(), &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
+	env.Int(repairCmd.Flags(), &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
+	env.Int(reconfigureCmd.Flags(), &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
 	env.Int(pf, &Cfg.DeleteTimeout, "delete-timeout", "", "DELETE_TIMEOUT", 300, "Delete wait timeout in seconds")
 	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
 	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")

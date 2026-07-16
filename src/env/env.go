@@ -39,7 +39,17 @@ var bindings []Binding
 // Bindings returns the registered env↔flag bindings in declaration order.
 func Bindings() []Binding { return bindings }
 
-func register(b Binding) { bindings = append(bindings, b) }
+// register records the env↔flag binding, deduping by flag name: the same flag may be
+// exposed on more than one command (e.g. --method on backup and restore), but it maps to
+// one environment variable, so it should appear once in the reference.
+func register(b Binding) {
+	for _, e := range bindings {
+		if e.Flag == b.Flag {
+			return
+		}
+	}
+	bindings = append(bindings, b)
+}
 
 // String binds --<flag> to *p, defaulting to HASTEWARD_<key> (else def), and registers it.
 func String(pf *pflag.FlagSet, p *string, flag, shorthand, key, def, usage string) {
