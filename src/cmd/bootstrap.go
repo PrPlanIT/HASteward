@@ -12,16 +12,23 @@ import (
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
-	Short: "Bootstrap a fully-down Galera cluster from the best candidate",
-	Long: `Performs a full Galera cluster bootstrap when ALL nodes are down.
+	Short: "Bootstrap a Galera cluster by declaring which node the operator bootstraps from",
+	Long: `Bootstrap a Galera cluster by declaring which node the operator should bootstrap
+from. There are two situations, one goal (force the operator to bootstrap the
+authoritative node); bootstrap picks the path from the cluster's state:
 
-This is a DANGEROUS operation. It identifies the node with the highest
-sequence number (most recent data), sets safe_to_bootstrap=1, patches
-the MariaDB CR with forceClusterBootstrapInPod, and brings the cluster
-back from total failure.
+  ALL NODES DOWN (offline) — DANGEROUS. Identifies the highest-seqno node, establishes
+  authority offline (scale to 0 -> wsrep_recover), sets safe_to_bootstrap=1, patches the
+  CR with forceClusterBootstrapInPod, and brings the cluster back from total failure.
+
+  OPERATOR RECOVERY DEADLOCK (online) — when triage diagnoses
+  'galera-operator-recovery-deadlock' (the operator is stuck in a recovery it cannot
+  resolve because no node yields a seqno, while the DATA is healthy), force-bootstraps the
+  already-synced authority on the LIVE cluster (no scale-to-0), deletes the stuck recovery
+  jobs, and lets the operator reform. Non-destructive.
 
 Safety gates:
-  - Refuses if any healthy nodes exist (use 'repair' instead)
+  - Refuses on a healthy cluster UNLESS triage diagnosed a recovery deadlock (else use 'repair')
   - Refuses if seqno is ambiguous across nodes (unless --force)
   - Refuses if split-brain is detected (unless --force)
   - Supports --dry-run to preview the plan without mutation

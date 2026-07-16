@@ -71,6 +71,34 @@ func (p *GaleraProvider) ResumeCR(ctx context.Context) error {
 	return err
 }
 
+// ForceBootstrapLive atomically resumes the operator AND forces it to bootstrap the given
+// pod — an ONLINE bootstrap for a data-healthy but recovery-deadlocked cluster (no
+// scale-to-0). The operator reforms the cluster from that node, then clears its own
+// recovery status and unsets forceClusterBootstrapInPod.
+func (p *GaleraProvider) ForceBootstrapLive(ctx context.Context, pod string) error {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	patch := fmt.Sprintf(`{"spec":{"suspend":false,"galera":{"recovery":{"forceClusterBootstrapInPod":%q}}}}`, pod)
+	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
+		ctx, cfg.ClusterName, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	return err
+}
+
+// ClearForceBootstrap removes spec.galera.recovery.forceClusterBootstrapInPod — a
+// defensive unset in case the operator did not clear it itself (leaving it set would
+// re-force a bootstrap on every restart). A no-op if the field is already absent.
+func (p *GaleraProvider) ClearForceBootstrap(ctx context.Context) error {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	patch := `[{"op":"remove","path":"/spec/galera/recovery/forceClusterBootstrapInPod"}]`
+	_, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Patch(
+		ctx, cfg.ClusterName, types.JSONPatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil && apierrors.IsInvalid(err) {
+		return nil // field already absent — nothing to remove
+	}
+	return err
+}
+
 // FenceLockAnnotation serializes the disruptive fence->recover operations
 // (bootstrap, triage deep-recover) so two cannot fight over suspend/scale/recover
 // on the same cluster. Value format: "<holder>@<RFC3339 timestamp>".

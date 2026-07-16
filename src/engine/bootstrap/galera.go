@@ -110,6 +110,14 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 		return nil, fmt.Errorf("triage failed: %w", err)
 	}
 
+	// Online remedy: a data-healthy cluster that triage diagnosed as an operator recovery
+	// deadlock. Bootstrap IS the fix (the operator needs a bootstrap source), but the LIGHT
+	// way — force-bootstrap the source on the LIVE cluster, no scale-to-0. Any OTHER healthy
+	// cluster is still refused by Gate 1 below.
+	if d := findDiagnosis(triageResult, "galera-operator-recovery-deadlock"); d != nil {
+		return b.bootstrapOnline(ctx, *d, dryRun, result)
+	}
+
 	// Phase 2: Safety gates
 	output.Section("Bootstrap Phase 2: Safety Gates")
 
@@ -244,6 +252,100 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	}
 
 	return result, nil
+}
+
+// findDiagnosis returns the diagnosis with the given ID from a triage result, or nil.
+func findDiagnosis(t *model.TriageResult, id string) *model.Diagnosis {
+	for i := range t.Diagnoses {
+		if t.Diagnoses[i].ID == id {
+			return &t.Diagnoses[i]
+		}
+	}
+	return nil
+}
+
+// bootstrapOnline resolves a galera-operator-recovery-deadlock on a LIVE, data-healthy
+// cluster: force the operator to bootstrap the (already-synced) authority, delete the
+// stuck recovery jobs, and wait for it to reform — WITHOUT scaling the cluster to zero.
+// The operator clears its own recovery status + unsets the force patch; we verify and
+// defensively unset. This is the light counterpart to the all-down offline flow.
+func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis, dryRun bool, result *model.BootstrapResult) (*model.BootstrapResult, error) {
+	cfg := b.p.Config()
+	target := d.Target
+	if target == "" {
+		return result, fmt.Errorf("ABORT: %s diagnosed but no bootstrap source identified", d.ID)
+	}
+	crRef := model.ObjectRef{APIVersion: "k8s.mariadb.com/v1alpha1", Kind: "MariaDB", Namespace: cfg.Namespace, Name: cfg.ClusterName}
+
+	result.Decision = model.BootstrapDecision{
+		Eligible:      true,
+		Reason:        "operator recovery deadlock — force-bootstrap the synced authority on the live cluster",
+		CandidatePod:  target,
+		SafeToProceed: true,
+	}
+	result.ActionsPlanned = []model.BootstrapAction{
+		{Phase: model.PhaseClusterPatch, Description: "Resume CR + patch forceClusterBootstrapInPod=" + target + " (live, no scale-to-0)", Resource: &crRef},
+		{Phase: model.PhaseCleanup, Description: "Delete stuck operator recovery jobs"},
+		{Phase: model.PhaseWaitReady, Description: "Wait for GaleraReady=True (operator reforms from " + target + ")"},
+		{Phase: model.PhaseVerify, Description: "Unset forceClusterBootstrapInPod if the operator left it"},
+	}
+
+	output.Section("Bootstrap: online recovery-deadlock remedy")
+	output.Field("Diagnosis", d.ID)
+	output.Field("Bootstrap source", target)
+
+	if dryRun {
+		output.Info("DRY RUN — would force-bootstrap %s on the LIVE cluster (no scale-to-0), delete recovery jobs, and wait for GaleraReady", target)
+		return result, nil
+	}
+
+	output.Section("Bootstrap Phase 3: Execute (online)")
+
+	// 1. Atomic patch: resume + force the operator to bootstrap the synced authority.
+	common.InfoLog("Patching CR: forceClusterBootstrapInPod=%s (+ resume)", target)
+	if err := b.p.ForceBootstrapLive(ctx, target); err != nil {
+		return result, fmt.Errorf("failed to force-bootstrap %s: %w", target, err)
+	}
+
+	// 2. Drop the stuck recovery jobs so the operator re-bootstraps cleanly.
+	b.p.DeleteRecoveryPods(ctx)
+
+	// 3. Wait for the operator to reform the cluster from the source.
+	common.InfoLog("Waiting for the operator to reform the cluster (GaleraReady=True)...")
+	if err := b.waitGaleraReady(ctx); err != nil {
+		return result, err
+	}
+
+	// 4. The operator normally clears its own recovery status + force patch; defensively
+	//    unset so a stale force can't re-bootstrap on the next restart.
+	if err := b.p.ClearForceBootstrap(ctx); err != nil {
+		common.WarnLog("could not clear forceClusterBootstrapInPod (operator may have already): %v", err)
+	}
+
+	output.Success("Operator recovery deadlock resolved — cluster is GaleraReady (bootstrapped from %s)", target)
+	result.Decision.Reason = "resolved: operator recovery deadlock cleared via forceClusterBootstrapInPod=" + target
+	return result, nil
+}
+
+// waitGaleraReady polls the MariaDB CR until its GaleraReady condition is True (the
+// operator finished reforming the cluster) or the bound elapses.
+func (b *galeraBootstrap) waitGaleraReady(ctx context.Context) error {
+	cfg := b.p.Config()
+	c := k8s.GetClients()
+	for i := 0; i < 60; i++ { // ~10 min at 10s
+		common.Sleep(10 * time.Second)
+		obj, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		cond := k8s.FindCondition(k8s.GetNestedMap(obj, "status"), "GaleraReady")
+		if cond != nil {
+			if s, _ := cond["status"].(string); s == "True" {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("timeout: GaleraReady did not become True after force-bootstrap — check the operator and pods")
 }
 
 func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod string, bellyUp bool, assessments []model.InstanceAssessment, result *model.BootstrapResult) error {
