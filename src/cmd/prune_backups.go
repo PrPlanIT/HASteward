@@ -12,7 +12,7 @@ import (
 )
 
 var pruneBackupsCmd = &cobra.Command{
-	Use:   "backups",
+	Use:   "prune",
 	Short: "Apply retention policy and remove old backup snapshots",
 	Long: `Prunes old backup snapshots from restic repositories according to the
 configured retention policy (keep-last, keep-daily, keep-weekly, keep-monthly).

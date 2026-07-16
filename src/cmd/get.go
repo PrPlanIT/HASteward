@@ -27,21 +27,10 @@ var (
 	getType       string
 )
 
-var getCmd = &cobra.Command{
-	Use:   "get",
-	Short: "Display resources (backups, policies, repositories, status)",
-}
-
-func init() {
-	getCmd.PersistentFlags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "List across all namespaces")
-	getCmd.PersistentFlags().StringVarP(&getType, "type", "t", "all", "Snapshot type filter: backup, diverged, or all")
-	getCmd.AddCommand(getBackupsCmd, getPoliciesCmd, getRepositoriesCmd, getStatusCmd)
-}
-
-// --- get backups ---
+// --- backup list (reparented under `backup`; flags added in backup_group.go) ---
 
 var getBackupsCmd = &cobra.Command{
-	Use:   "backups",
+	Use:   "list",
 	Short: "List restic backup snapshots",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := InitPrinter("get-backups")
@@ -225,14 +214,6 @@ var getRepositoriesCmd = &cobra.Command{
 		}
 		return nil
 	},
-}
-
-// --- get status ---
-
-var getStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show the current state of managed database clusters (alias of 'status')",
-	RunE:  runStatus,
 }
 
 // runStatus reports the current, factual state of managed clusters — the "what is?"

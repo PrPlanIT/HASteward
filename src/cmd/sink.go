@@ -20,7 +20,7 @@ func (s *printerSink) Step(name, status string) {
 	switch status {
 	case "running":
 		s.p.EmitEvent(model.NewEvent(model.EventStepStarted, s.p.Command, s.p.RunID).
-			WithPhase(name).WithMessage(name+" started"))
+			WithPhase(name).WithMessage(name + " started"))
 		if s.p.IsHuman() {
 			output.Section(name)
 		}

@@ -72,12 +72,11 @@ func init() {
 	// each still appears once in the env reference. --delete-timeout stays global (used by
 	// triage/bootstrap/repair/prune-wal/reconfigure — effectively a global default), as
 	// does --instance (addressing: "which node").
-	env.String(backupCmd.Flags(), &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
-	env.String(restoreCmd.Flags(), &Cfg.BackupMethod, "method", "m", "BACKUP_METHOD", "dump", "Backup method: dump or native")
-	env.String(restoreCmd.Flags(), &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
-	env.String(exportCmd.Flags(), &Cfg.Snapshot, "snapshot", "", "SNAPSHOT", "latest", "Restic snapshot ID or 'latest' (for restore)")
-	env.Int(repairCmd.Flags(), &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
-	env.Int(reconfigureCmd.Flags(), &Cfg.HealTimeout, "heal-timeout", "", "HEAL_TIMEOUT", 600, "Heal wait timeout in seconds")
+	addMethodFlag(restoreCmd.Flags())
+	addSnapshotFlag(restoreCmd.Flags())
+	addSnapshotFlag(exportCmd.Flags())
+	addHealTimeoutFlag(repairCmd.Flags())
+	addHealTimeoutFlag(reconfigureCmd.Flags())
 	env.Int(pf, &Cfg.DeleteTimeout, "delete-timeout", "", "DELETE_TIMEOUT", 300, "Delete wait timeout in seconds")
 	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
 	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")
@@ -91,7 +90,10 @@ func init() {
 	env.StringP(pf, "instance", "i", "INSTANCE", "", "Target specific instance number")
 	env.StringP(repairCmd.Flags(), "donor", "d", "DONOR", "", "Explicit donor instance ordinal (declares authoritative source for repair)")
 
-	RootCmd.AddCommand(triageCmd, repairCmd, reconfigureCmd, backupCmd, restoreCmd, serveCmd, getCmd, exportCmd, pruneCmd)
+	// Top-level: diagnose (triage/status via their own files), recover (repair/bootstrap/
+	// reconfigure/prune-wal), protect (backup group), operate (serve/docs/version). restore/
+	// export/get/prune are reparented under `backup` — not top-level (#31 Phase 2).
+	RootCmd.AddCommand(triageCmd, repairCmd, reconfigureCmd, backupCmd, serveCmd)
 }
 
 // IsDryRun returns whether --dry-run was specified.

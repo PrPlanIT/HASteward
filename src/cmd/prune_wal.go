@@ -35,14 +35,6 @@ var pruneWALTopCmd = &cobra.Command{
 	RunE:  runPruneWAL,
 }
 
-// pruneWALCmd is the compat `prune wal` — kept as an alias of `prune-wal`.
-var pruneWALCmd = &cobra.Command{
-	Use:   "wal",
-	Short: "Clear accumulated WAL from a disk-full CNPG instance (alias of 'prune-wal')",
-	Long:  pruneWALLong,
-	RunE:  runPruneWAL,
-}
-
 func init() {
 	RootCmd.AddCommand(pruneWALTopCmd)
 }

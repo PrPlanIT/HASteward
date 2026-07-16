@@ -14,7 +14,8 @@ import (
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
-	Short: "Back up a database cluster",
+	Short: "Manage cluster backups (create, list, restore, export, prune, policies, repositories)",
+	Long:  "Backup lifecycle for managed clusters. Use 'backup create' to take a backup.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := InitPrinter("backup")
 		if err != nil {

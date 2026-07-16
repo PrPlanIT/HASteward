@@ -3,8 +3,8 @@ package cmd
 import (
 	"os"
 
-	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/controller"
+	"github.com/PrPlanIT/HASteward/src/common"
 
 	"github.com/spf13/cobra"
 )
