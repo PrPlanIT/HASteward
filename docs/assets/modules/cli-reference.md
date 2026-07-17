@@ -317,8 +317,8 @@ Update this hasteward CLI binary in place from the published image
 Pull the HASteward image and atomically replace the running binary with the one
 inside it.
 
-  hasteward update          docker.io/prplanit/hasteward:latest
-  hasteward update --dev    docker.io/prplanit/hasteward:latest-dev
+  hasteward update          ghcr.io/prplanit/hasteward:latest
+  hasteward update --dev    ghcr.io/prplanit/hasteward:latest-dev
   hasteward update --image <ref>
 
 The image binary is static (CGO_ENABLED=0), so it runs on any linux host; it is
