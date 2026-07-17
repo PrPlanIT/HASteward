@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	updateDefaultImage = "docker.io/prplanit/hasteward:latest"
-	updateDevImage     = "docker.io/prplanit/hasteward:latest-dev"
+	// GHCR by default: public GHCR pulls have no rate limits (unlike anonymous Docker Hub).
+	// Requires the ghcr.io/prplanit/hasteward package to be PUBLIC. Override with --image
+	// (e.g. docker.io/prplanit/hasteward:latest) if needed.
+	updateDefaultImage = "ghcr.io/prplanit/hasteward:latest"
+	updateDevImage     = "ghcr.io/prplanit/hasteward:latest-dev"
 	imageBinaryPath    = "/hasteward" // location inside the (scratch) image
 )
 

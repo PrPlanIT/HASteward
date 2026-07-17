@@ -112,6 +112,17 @@ registries:
     credentials: HARBOR
     default_path: "{var:org}/{var:repo}"
 
+  # GitHub Container Registry (ghcr.io/prplanit/hasteward, resolves under the PrPlanIT
+  # GitHub org). Public GHCR pulls have NO rate limits (unlike anonymous Docker Hub) —
+  # this is the default source for `hasteward update`. Auth: GHCR_USER + GHCR_TOKEN (a PAT
+  # with write:packages) in CI. NOTE: make the package PUBLIC in GitHub package settings
+  # for anonymous `update` pulls to work.
+  - id: ghcr
+    provider: ghcr
+    url: ghcr.io
+    credentials: GHCR
+    default_path: "{var:org}/{var:repo}"
+
 targets:
   # ── Docker Hub: stable releases ─────────────────────────────────
   - id: dockerhub-stable
@@ -133,6 +144,33 @@ targets:
   - id: dockerhub-dev
     kind: registry
     registry: dockerhub
+    build: hasteward
+    tags: ["dev-{sha:8}", "latest-dev"]
+    when: { branches: [main], events: [push] }
+    retention:
+      keep_last: 6
+      protect: ["latest-dev"]
+
+  # ── GHCR: stable releases ────────────────────────────────────────
+  - id: ghcr-stable
+    kind: registry
+    registry: ghcr
+    build: hasteward
+    tags: ["v{version}", "latest"]
+    when: { git_tags: [stable], events: [tag] }
+
+  # ── GHCR: pre-releases (alpha/beta/rc) ───────────────────────────
+  - id: ghcr-prerelease
+    kind: registry
+    registry: ghcr
+    build: hasteward
+    tags: ["v{version}"]
+    when: { git_tags: [prerelease], events: [tag] }
+
+  # ── GHCR: dev builds on every commit ─────────────────────────────
+  - id: ghcr-dev
+    kind: registry
+    registry: ghcr
     build: hasteward
     tags: ["dev-{sha:8}", "latest-dev"]
     when: { branches: [main], events: [push] }
