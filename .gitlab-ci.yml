@@ -87,7 +87,7 @@ review:
   artifacts:
     paths:
       - .stagefreight/security/
-      - .stagefreight/pipeline.json
+      - .stagefreight/subsystems/
     expire_in: 1 week
   allow_failure: true
 
