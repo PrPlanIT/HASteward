@@ -668,6 +668,45 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 					fmt.Sprintf("%s LSN %s ahead of primary %s on same timeline",
 						inst.Pod, inst.CheckpointLocation, pLSN))
 			}
+		} else if instTL < pTL && inst.CheckpointLocation != "unknown" && pLSN != "unknown" {
+			// A node on an OLDER timeline than the primary is normally "behind": its
+			// history is an ancestor of the primary's lineage, so re-cloning it from the
+			// primary loses nothing. That invariant holds ONLY while its LSN is at or
+			// before the point where the primary's timeline forked away from it. The
+			// primary's current LSN is always >= that fork point, so an older-timeline
+			// node whose checkpoint LSN is AHEAD of the primary's necessarily carries WAL
+			// past the fork — committed data the primary never received. That is the
+			// fingerprint of a primary that was restored from a stale backup (a higher
+			// timeline NUMBER but OLDER data): "highest timeline wins" would mark the
+			// older node disposable and heal it from the stale primary, silently
+			// destroying the newer data. Fail closed — treat it as split-brain.
+			if parseLSNValue(inst.CheckpointLocation) > parseLSNValue(pLSN) {
+				mostAdvanced = inst.Pod
+				mostAdvancedLSN = inst.CheckpointLocation
+				splitBrain = append(splitBrain,
+					fmt.Sprintf("%s on older timeline %s has checkpoint LSN %s ahead of primary %s (LSN %s) — "+
+						"primary may be a stale restore; healing would discard newer data",
+						inst.Pod, inst.Timeline, inst.CheckpointLocation, primaryName, pLSN))
+			}
+		}
+	}
+
+	// FAIL-CLOSED on an unreadable-but-present instance (mirrors the Galera
+	// unread-seqno gate). An instance whose PVC is Bound — data IS on disk — but
+	// whose pg_controldata could not be read leaves us blind to a node that might
+	// hold the most-advanced, or a divergent, history. Declaring "safe to heal"
+	// while blind is exactly how a stale authority slips through, so treat it as an
+	// undeterminable authority. A genuinely absent instance (no Bound PVC) has no
+	// data to lose and never blocks; --force remains the escape hatch for a known
+	// empty replica.
+	for _, inst := range data.controlData {
+		if inst.Pod == primaryName {
+			continue
+		}
+		if inst.Timeline == "unknown" && data.pvcStates[inst.Pod] == "Bound" {
+			splitBrain = append(splitBrain,
+				fmt.Sprintf("%s has a Bound PVC but its position is UNREAD — authority "+
+					"undeterminable while blind to it (probe it before ANY heal)", inst.Pod))
 		}
 	}
 
