@@ -255,43 +255,20 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 	helperName := fmt.Sprintf("%s-wsrep-%s-%d", cfg.ClusterName, podName, time.Now().Unix())
 
 	uid := mariadbDataDirUID
-	deadline := int64(150)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      helperName,
-			Namespace: ns,
-			Labels:    map[string]string{"hasteward": "heal-helper"},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy:         corev1.RestartPolicyNever,
-			ServiceAccountName:    sa,
-			ActiveDeadlineSeconds: &deadline,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:  &uid,
-				RunAsGroup: &uid,
-				FSGroup:    &uid,
-			},
-			Containers: []corev1.Container{{
-				Name:  "wsrep-recover",
-				Image: image,
-				Command: []string{"sh", "-c", fmt.Sprintf(
-					"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
-						"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
-						"--log-error-verbosity=3 2>&1; exit 0", galeraProviderSO)},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "data", MountPath: "/var/lib/mysql"},
-				},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-					},
-				},
-			}},
-		},
-	}
+	// Built via the shared helper-pod builder so the Istio-injection exemption is
+	// applied — without it a sidecar keeps this pod Running forever and the authority
+	// read below hangs to its deadline in every meshed namespace.
+	pod := k8s.BuildHelperPod(k8s.HelperPodOpts{
+		Name: helperName, Namespace: ns, Image: image, ServiceAccount: sa,
+		PVCName: pvcName, MountPath: "/var/lib/mysql",
+		RunAsUID: &uid, RunAsGID: &uid, FSGroup: &uid,
+		Labels:                map[string]string{"hasteward": "heal-helper"},
+		ActiveDeadlineSeconds: 150,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
+				"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
+				"--log-error-verbosity=3 2>&1; exit 0", galeraProviderSO)},
+	})
 
 	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -299,12 +276,14 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 	}
 
 	var podOutput string
+	var lastPod *corev1.Pod
 	for i := 0; i < 30; i++ {
 		common.Sleep(5 * time.Second)
 		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, helperName, metav1.GetOptions{})
 		if pErr != nil {
 			continue
 		}
+		lastPod = pd
 		phase := string(pd.Status.Phase)
 		if phase == "Succeeded" || phase == "Failed" {
 			podOutput = p.helperPodOutput(ctx, helperName)
@@ -320,6 +299,11 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, helperName, metav1.DeleteOptions{
 			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
+		// Explain a stuck pod instead of a bare timeout — the node may be at its pod
+		// cap, cordoned, or NotReady, which must not be mistaken for a data problem.
+		if sched := k8s.DescribePodScheduling(lastPod); sched != "" {
+			return WsrepRecoverResult{}, fmt.Errorf("wsrep_recover pod %s did not complete — %s", helperName, sched)
+		}
 		return WsrepRecoverResult{}, fmt.Errorf("wsrep_recover pod %s produced no output or timed out", helperName)
 	}
 
@@ -400,29 +384,14 @@ func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpe
 	if labels == nil {
 		labels = map[string]string{"hasteward": "heal-helper"}
 	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: spec.Name, Namespace: ns, Labels: labels},
-		Spec: corev1.PodSpec{
-			RestartPolicy:      corev1.RestartPolicyNever,
-			ServiceAccountName: spec.SA,
-			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: &root},
-			Containers: []corev1.Container{{
-				Name:         "helper",
-				Image:        "docker.io/library/busybox:latest",
-				Command:      spec.Command,
-				VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: spec.MountPath, ReadOnly: spec.ReadOnly}},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: spec.PVCName},
-				},
-			}},
-		},
-	}
-	if spec.NodeName != "" {
-		pod.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": spec.NodeName}
-	}
+	// Shared builder → Istio exemption applied. RunAsUID only (root); FSGroup is
+	// deliberately omitted (it would recursively chown the mounted DB volume on start).
+	pod := k8s.BuildHelperPod(k8s.HelperPodOpts{
+		Name: spec.Name, Namespace: ns, Image: "docker.io/library/busybox:latest",
+		Command: spec.Command, ServiceAccount: spec.SA,
+		PVCName: spec.PVCName, MountPath: spec.MountPath, ReadOnly: spec.ReadOnly,
+		RunAsUID: &root, NodeName: spec.NodeName, Labels: labels,
+	})
 
 	if _, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return "", false, fmt.Errorf("failed to create helper pod %s: %w", spec.Name, err)
@@ -431,12 +400,14 @@ func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpe
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, spec.Name, metav1.DeleteOptions{GracePeriodSeconds: common.Ptr(int64(0))})
 	}
 
+	var lastPod *corev1.Pod
 	for i := 0; i < 30; i++ {
 		common.Sleep(5 * time.Second)
 		pd, pErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, spec.Name, metav1.GetOptions{})
 		if pErr != nil {
 			continue
 		}
+		lastPod = pd
 		switch pd.Status.Phase {
 		case corev1.PodSucceeded:
 			logs := k8s.PodLogs(ctx, ns, spec.Name)
@@ -449,6 +420,9 @@ func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpe
 		}
 	}
 	del()
+	if sched := k8s.DescribePodScheduling(lastPod); sched != "" {
+		return "", false, fmt.Errorf("helper pod %s did not complete — %s", spec.Name, sched)
+	}
 	return "", false, fmt.Errorf("helper pod %s timed out", spec.Name)
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -48,6 +49,16 @@ type controlData struct {
 	CheckpointTime     string
 	MinRecoveryEnd     string
 	CrashReason        string
+	// HistoryRaw is the concatenated content of the instance's pg_wal/*.history
+	// files — the timeline fork points that make authority provable rather than
+	// guessed. Empty for a timeline-1 instance (no history exists) or when history
+	// could not be read (a timeline->1 instance with empty HistoryRaw is treated as
+	// Unread — its lineage is unknown, so ranking it would be a guess).
+	HistoryRaw string
+	// PGDataPresent records whether a data directory was found on the volume:
+	// "yes" (pg_control present), "no" (mounted and provably empty — nothing to
+	// lose), or "" (not determined, e.g. a live exec where presence is implicit).
+	PGDataPresent string
 }
 
 // replicaInfo holds parsed pg_stat_replication row for one replica.
@@ -161,7 +172,16 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 	for _, name := range data.expectedInstances {
 		pvc, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			data.pvcStates[name] = "MISSING"
+			// Only a genuine NotFound proves the PVC is absent (no data on a claim to
+			// lose). ANY other error — API timeout, throttle, network blip, RBAC — is a
+			// transient UNKNOWN: it must NEVER be read as "absent", or a connectivity
+			// failure would discredit a node that in fact holds the winning data. UNKNOWN
+			// fails closed downstream (treated as Unread), exactly like Bound-but-unread.
+			if apierrors.IsNotFound(err) {
+				data.pvcStates[name] = "MISSING"
+			} else {
+				data.pvcStates[name] = "UNKNOWN"
+			}
 		} else {
 			data.pvcStates[name] = string(pvc.Status.Phase)
 			if q, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
@@ -232,6 +252,13 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 		}
 		cd := parseControlData(pod.Name, "exec", result.Stdout)
 		cd.Reachable = true
+		cd.PGDataPresent = "yes" // a live postgres implies a data directory
+		// Read the timeline-history files: the fork points authority is decided on.
+		// Best-effort — a timeline-1 instance legitimately has none.
+		if hr, herr := k8s.ExecCommand(ctx, pod.Name, ns, "postgres",
+			[]string{"sh", "-c", "cat /var/lib/postgresql/data/pgdata/pg_wal/*.history 2>/dev/null"}); herr == nil {
+			cd.HistoryRaw = strings.TrimSpace(hr.Stdout)
+		}
 		healthyControlData = append(healthyControlData, cd)
 	}
 
@@ -295,6 +322,12 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 	}
 
 	data.controlData = healthyControlData
+
+	// Belly-up escalation: if nothing is serving and an instance holds data we could
+	// not read (a crash-looping pod holding its RWO PVC), fence it read-only and read
+	// its position, turning UNREAD into READ before authority is decided. No-op on a
+	// live cluster or when every present instance was already read.
+	t.maybeDeepRecover(ctx, data)
 
 	// Display per-instance controldata
 	for _, cd := range data.controlData {
@@ -464,46 +497,21 @@ func (t *cnpgTriage) runPVCProbes(ctx context.Context, targets []cnpgProbeTarget
 	for _, tgt := range targets {
 		probeName := tgt.Name + "-triage-probe"
 
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      probeName,
-				Namespace: ns,
-				Labels:    map[string]string{"cnpg-triage": "probe"},
-			},
-			Spec: corev1.PodSpec{
-				RestartPolicy:      corev1.RestartPolicyNever,
-				ServiceAccountName: sa,
-				SecurityContext: &corev1.PodSecurityContext{
-					RunAsUser:  &uid,
-					RunAsGroup: &uid,
-					FSGroup:    &uid,
-				},
-				Containers: []corev1.Container{{
-					Name:  "probe",
-					Image: imageName,
-					// Read pg_controldata AND the disk breakdown in one read-only pass,
-					// so stranded (down / crash-looping) instances still report true usage.
-					Command: []string{"sh", "-c", "pg_controldata /var/lib/postgresql/data/pgdata 2>/dev/null; " + cnpgDiskScript},
-					VolumeMounts: []corev1.VolumeMount{{
-						Name:      "pgdata",
-						MountPath: "/var/lib/postgresql/data",
-						ReadOnly:  true,
-					}},
-				}},
-				Volumes: []corev1.Volume{{
-					Name: "pgdata",
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: tgt.Name,
-						},
-					},
-				}},
-			},
-		}
-
-		if tgt.Node != "" {
-			pod.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": tgt.Node}
-		}
+		// Read pg_controldata, the timeline-history files, a data-directory presence
+		// marker, AND the disk breakdown in one read-only pass, so a stranded (down /
+		// crash-looping) instance reports its full authority position and true usage
+		// without a running postgres. Built via the shared helper-pod builder so the
+		// Istio-injection exemption (a sidecar would strand it Running → Unread in a
+		// mesh) is applied consistently.
+		pod := k8s.BuildHelperPod(k8s.HelperPodOpts{
+			Name: probeName, Namespace: ns, Image: imageName, ServiceAccount: sa,
+			PVCName: tgt.Name, MountPath: "/var/lib/postgresql/data", ReadOnly: true,
+			RunAsUID: &uid, RunAsGID: &uid, FSGroup: &uid,
+			NodeName: tgt.Node, Labels: map[string]string{"cnpg-triage": "probe"},
+			Command: []string{"sh", "-c",
+				"pg_controldata /var/lib/postgresql/data/pgdata 2>/dev/null; " +
+					cnpgHistoryScript + "; " + cnpgPGDataPresentScript + "; " + cnpgDiskScript},
+		})
 
 		_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 		if err != nil {
@@ -531,21 +539,33 @@ func (t *cnpgTriage) waitAndCollectProbe(ctx context.Context, probeName, instanc
 	c := k8s.GetClients()
 
 	// Poll for completion (30 retries, 5s delay = 150s max)
+	var lastPod *corev1.Pod
+	terminated := false
 	for attempt := 0; attempt < 30; attempt++ {
 		pod, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, probeName, metav1.GetOptions{})
 		if err != nil {
 			break
 		}
+		lastPod = pod
 		phase := pod.Status.Phase
 		if phase == corev1.PodSucceeded || phase == corev1.PodFailed {
+			terminated = true
 			break
 		}
 		time.Sleep(5 * time.Second)
 	}
+	// A probe that never terminated is usually STUCK, not slow — surface why (node at
+	// its pod cap, cordoned, NotReady) instead of silently reporting the instance
+	// Unread, so the operator can free the node and re-triage.
+	if !terminated {
+		if sched := k8s.DescribePodScheduling(lastPod); sched != "" {
+			common.WarnLog("probe for %s did not complete — %s", instanceName, sched)
+		}
+	}
 
 	// Get logs
 	logReq := c.Clientset.CoreV1().Pods(ns).GetLogs(probeName, &corev1.PodLogOptions{
-		Container: "probe",
+		Container: "helper",
 	})
 	logBytes, err := logReq.DoRaw(ctx)
 	if err != nil || len(logBytes) == 0 {
@@ -555,6 +575,8 @@ func (t *cnpgTriage) waitAndCollectProbe(ctx context.Context, probeName, instanc
 	}
 
 	cd := parseControlData(instanceName, "pvc_probe", string(logBytes))
+	cd.HistoryRaw = parseHistorySection(string(logBytes))
+	cd.PGDataPresent = parsePGDataPresent(string(logBytes))
 	ds := parseDiskStats(string(logBytes), "pvc_probe")
 	return cd, ds
 }
@@ -577,16 +599,7 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 	for _, w := range comparison.Warnings {
 		output.Println(w)
 	}
-	if !comparison.SafeToHeal {
-		output.Println()
-		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		output.Println("  CRITICAL: POTENTIAL SPLIT-BRAIN DETECTED")
-		output.Println("  A non-primary instance has MORE RECENT data than the primary!")
-		output.Printf("  Most advanced instance: %s\n", comparison.MostAdvanced)
-		output.Println("  DO NOT blindly heal - review the data above and decide manually.")
-		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		output.Println()
-	}
+	renderAuthorityBanner(comparison)
 
 	// Flag timeline divergence
 	for _, cd := range data.controlData {
@@ -618,7 +631,10 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		TotalCount:     int(t.p.Instances()),
 	}
 
-	// CNPG authority status (mirrors the Galera pattern) + recovery projection.
+	// CNPG authority status (mirrors the Galera pattern) + recovery projection. Only
+	// a provable authority that IS the primary (SafeToHeal) authorizes the automatic
+	// heal-from-primary path in repair PreAssess; every other outcome fails closed.
+	// The specific reason lives in comparison.Authority + SplitBrainDetails.
 	if comparison.SafeToHeal && currentPrimary != "" {
 		result.AuthorityStatus = "unambiguous"
 		result.RecommendedDonor = cnpgOrdinal(currentPrimary)
@@ -634,87 +650,119 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 	return result, nil
 }
 
+// buildAuthorityInputs projects the collected control data into the pure authority
+// inputs: it classifies each expected instance's ReadState — failing closed on
+// anything that could hold data but was not read — and parses its timeline lineage.
+func buildAuthorityInputs(data *cnpgTriageData, primaryName string) []authorityInput {
+	var inputs []authorityInput
+	for _, cd := range data.controlData {
+		in := authorityInput{Pod: cd.Pod, IsPrimary: cd.Pod == primaryName}
+		tl := strings.TrimSpace(cd.Timeline)
+		pvcState := data.pvcStates[cd.Pod]
+
+		switch {
+		case tl != "" && tl != "unknown":
+			// We read a position. Parse the lineage. An instance past timeline 1 with
+			// NO readable history has unknown fork points — ranking it would be a guess,
+			// so treat it as Unread rather than compare it blind.
+			in.Timeline = parseTimelineInt(tl)
+			in.CheckpointLSN = parseLSNValue(strings.TrimSpace(cd.CheckpointLocation))
+			in.Switches = parseTimelineHistory(cd.HistoryRaw)
+			if in.Timeline > 1 && len(in.Switches) == 0 {
+				in.ReadState = ReadStateUnread
+				in.UnreadReason = fmt.Sprintf(
+					"on timeline %d but its timeline-history is unread — fork points unknown; "+
+						"re-probe (fenced inspection) before any heal", in.Timeline)
+			} else {
+				in.ReadState = ReadStateRead
+			}
+
+		case cd.PGDataPresent == "empty":
+			// The probe POSITIVELY confirmed an empty data directory (ls succeeded and
+			// the dir is empty) — nothing to lose; never blocks. A merely "unknown"
+			// presence (mount glitch / permission error) is NOT proof and falls through.
+			in.ReadState = ReadStateAbsentNoData
+
+		case pvcState == "MISSING":
+			// Proven NotFound (not a transient API error) → no data on a claim to lose.
+			in.ReadState = ReadStateAbsentNoData
+
+		default:
+			// Anything not PROVEN empty/absent and not read — a PVC in any present state
+			// (Bound/Pending/Lost/Released), an UNKNOWN (transient API-error) PVC, or an
+			// "unknown" data-directory probe — blocks. Data may be here; refuse to decide
+			// past it. A connectivity/mount failure can only land HERE, never in an
+			// AbsentNoData branch, so it can never discredit a data-bearing node.
+			in.ReadState = ReadStateUnread
+			reason := "position UNREAD"
+			if pvcState != "" {
+				reason = fmt.Sprintf("PVC %s, position UNREAD", pvcState)
+			}
+			in.UnreadReason = reason + " — bring it up for inspection (fenced read) before any heal"
+		}
+		inputs = append(inputs, in)
+	}
+	return inputs
+}
+
+// cnpgCrossInstanceComparison determines authority over the cluster by WAL lineage
+// (see determineAuthority): unread instances that could hold data block the verdict,
+// fork points — not the timeline NUMBER — decide recency, and true divergence
+// refuses. It emits the SAME model.DataComparison shape as galera's sibling
+// crossInstanceComparison — a splitBrain reason list that drives SafeToHeal — so the
+// downstream assessments, AuthorityStatus, and Classify verdict are engine-agnostic.
 func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model.DataComparison {
-	pTL := int64(0)
-	pLSN := "unknown"
-	if data.primaryControlData != nil {
-		pTL = parseTimelineInt(data.primaryTimeline)
-		pLSN = data.primaryControlData.CheckpointLocation
+	inputs := buildAuthorityInputs(data, primaryName)
+	decision := determineAuthority(inputs)
+
+	// MostAdvanced carries the decisive authority when there is one — the primary in
+	// the normal case, or a lower-timeline replica in a decisive stale-restore
+	// (mirrors galera surfacing bestSeqnoNode even when it is not the live primary).
+	mostAdvanced := decision.Leader
+	if mostAdvanced == "" && decision.Determinable && !decision.Diverged {
+		mostAdvanced = primaryName
 	}
 
-	mostAdvanced := primaryName
-	mostAdvancedTL := pTL
-	mostAdvancedLSN := pLSN
+	// Map the lineage decision onto the shared AuthorityOutcome + the splitBrain
+	// reason list (the galera idiom). SafeToHeal is true only for AuthorityProvable —
+	// the decisive leader IS the primary; every other outcome adds a reason and fails
+	// closed.
+	var splitBrain []string
+	var outcome model.AuthorityOutcome
+	switch {
+	case !decision.Determinable:
+		outcome = model.AuthorityUndeterminable
+		splitBrain = append(splitBrain, decision.Blockers...)
+	case decision.Diverged:
+		outcome = model.AuthorityDiverged
+		splitBrain = append(splitBrain, decision.Divergences...)
+	case decision.Leader != "" && decision.Leader != primaryName:
+		outcome = model.AuthorityLeaderNotPrimary
+		splitBrain = append(splitBrain, fmt.Sprintf(
+			"AUTHORITY IS NOT THE PRIMARY: %s holds the winning data, not %s — %s",
+			decision.Leader, primaryName, decision.LeaderReason))
+	case decision.Leader == primaryName && primaryName != "":
+		outcome = model.AuthorityProvable
+	default:
+		// Leader == "" — every instance is provably empty, or there is no primary to
+		// heal from. No authority to prove; refuse rather than heal from nothing.
+		outcome = model.AuthorityUndeterminable
+		splitBrain = append(splitBrain, "no instance holds readable data (all provably empty)")
+	}
+	safe := outcome == model.AuthorityProvable
 
 	var warnings []string
-	var splitBrain []string
-
-	for _, inst := range data.controlData {
-		if inst.Pod == primaryName || inst.Timeline == "unknown" {
-			continue
-		}
-		instTL := parseTimelineInt(inst.Timeline)
-		if instTL > mostAdvancedTL {
-			mostAdvanced = inst.Pod
-			mostAdvancedTL = instTL
-			mostAdvancedLSN = inst.CheckpointLocation
-			splitBrain = append(splitBrain,
-				fmt.Sprintf("%s has timeline %s > primary timeline %d", inst.Pod, inst.Timeline, pTL))
-		} else if instTL == mostAdvancedTL && inst.CheckpointLocation != "unknown" && pLSN != "unknown" {
-			instLSNVal := parseLSNValue(inst.CheckpointLocation)
-			pLSNVal := parseLSNValue(pLSN)
-			if instLSNVal > pLSNVal {
-				splitBrain = append(splitBrain,
-					fmt.Sprintf("%s LSN %s ahead of primary %s on same timeline",
-						inst.Pod, inst.CheckpointLocation, pLSN))
-			}
-		} else if instTL < pTL && inst.CheckpointLocation != "unknown" && pLSN != "unknown" {
-			// A node on an OLDER timeline than the primary is normally "behind": its
-			// history is an ancestor of the primary's lineage, so re-cloning it from the
-			// primary loses nothing. That invariant holds ONLY while its LSN is at or
-			// before the point where the primary's timeline forked away from it. The
-			// primary's current LSN is always >= that fork point, so an older-timeline
-			// node whose checkpoint LSN is AHEAD of the primary's necessarily carries WAL
-			// past the fork — committed data the primary never received. That is the
-			// fingerprint of a primary that was restored from a stale backup (a higher
-			// timeline NUMBER but OLDER data): "highest timeline wins" would mark the
-			// older node disposable and heal it from the stale primary, silently
-			// destroying the newer data. Fail closed — treat it as split-brain.
-			if parseLSNValue(inst.CheckpointLocation) > parseLSNValue(pLSN) {
-				mostAdvanced = inst.Pod
-				mostAdvancedLSN = inst.CheckpointLocation
-				splitBrain = append(splitBrain,
-					fmt.Sprintf("%s on older timeline %s has checkpoint LSN %s ahead of primary %s (LSN %s) — "+
-						"primary may be a stale restore; healing would discard newer data",
-						inst.Pod, inst.Timeline, inst.CheckpointLocation, primaryName, pLSN))
-			}
+	var maVal int64
+	var maLSN string
+	for _, in := range inputs {
+		if in.Pod == mostAdvanced {
+			maVal, maLSN = in.Timeline, formatLSN(in.CheckpointLSN)
 		}
 	}
-
-	// FAIL-CLOSED on an unreadable-but-present instance (mirrors the Galera
-	// unread-seqno gate). An instance whose PVC is Bound — data IS on disk — but
-	// whose pg_controldata could not be read leaves us blind to a node that might
-	// hold the most-advanced, or a divergent, history. Declaring "safe to heal"
-	// while blind is exactly how a stale authority slips through, so treat it as an
-	// undeterminable authority. A genuinely absent instance (no Bound PVC) has no
-	// data to lose and never blocks; --force remains the escape hatch for a known
-	// empty replica.
-	for _, inst := range data.controlData {
-		if inst.Pod == primaryName {
-			continue
-		}
-		if inst.Timeline == "unknown" && data.pvcStates[inst.Pod] == "Bound" {
-			splitBrain = append(splitBrain,
-				fmt.Sprintf("%s has a Bound PVC but its position is UNREAD — authority "+
-					"undeterminable while blind to it (probe it before ANY heal)", inst.Pod))
-		}
-	}
-
-	safe := len(splitBrain) == 0
 	if safe {
-		warnings = append(warnings,
-			fmt.Sprintf("OK: Primary %s has the most recent data (timeline %d, LSN %s)",
-				primaryName, pTL, pLSN))
+		warnings = append(warnings, fmt.Sprintf(
+			"OK: primary %s is the decisive authority (timeline %d, checkpoint %s) — %s",
+			primaryName, maVal, maLSN, decision.LeaderReason))
 	} else {
 		for _, sb := range splitBrain {
 			warnings = append(warnings, "SPLIT-BRAIN RISK: "+sb)
@@ -723,9 +771,10 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 
 	return model.DataComparison{
 		MostAdvanced:       mostAdvanced,
-		MostAdvancedValue:  mostAdvancedTL,
-		CheckpointLocation: mostAdvancedLSN,
+		MostAdvancedValue:  maVal,
+		CheckpointLocation: maLSN,
 		SafeToHeal:         safe,
+		Authority:          outcome,
 		Warnings:           warnings,
 		SplitBrainDetails:  splitBrain,
 	}
@@ -1120,6 +1169,64 @@ const cnpgDiskScript = `echo "===DF==="; df -k /var/lib/postgresql/data 2>/dev/n
 echo "===WAL==="; du -sk /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | tail -1
 echo "===PGDATA==="; du -sk /var/lib/postgresql/data/pgdata 2>/dev/null | tail -1
 echo "===SEGMENTS==="; ls -1 /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | grep -cE '^[0-9A-F]{24}$'`
+
+// cnpgHistoryScript emits the concatenated timeline-history files under a delimiter
+// so the probe's single read carries the fork points authority is decided on.
+const cnpgHistoryScript = `echo "===HISTORY==="; cat /var/lib/postgresql/data/pgdata/pg_wal/*.history 2>/dev/null`
+
+// cnpgPGDataPresentScript reports the data directory's state with POSITIVE proof,
+// three-valued: "yes" (pg_control present → data here), "empty" (the pgdata dir was
+// listed successfully AND is genuinely empty → nothing to lose), or "unknown"
+// (couldn't stat/list — a mount glitch or permission error). Only "empty" may make a
+// node disposable; "unknown" must NEVER be read as empty, or a failed mount would
+// discredit a node that holds data. The `ls` exit code gates the emptiness claim so a
+// permission-denied or absent path degrades to "unknown", not "empty".
+const cnpgPGDataPresentScript = `echo "===PGDATA_PRESENT==="
+if [ -f /var/lib/postgresql/data/pgdata/global/pg_control ]; then echo yes
+else ent=$(ls -A /var/lib/postgresql/data/pgdata 2>/dev/null); rc=$?
+  if [ $rc -eq 0 ] && [ -z "$ent" ]; then echo empty; else echo unknown; fi
+fi`
+
+// extractSection returns the lines following a "===NAME===" marker up to the next
+// "===...===" marker (or end of input).
+func extractSection(raw, marker string) string {
+	var out []string
+	in := false
+	for _, l := range strings.Split(raw, "\n") {
+		t := strings.TrimSpace(l)
+		if t == marker {
+			in = true
+			continue
+		}
+		if in && strings.HasPrefix(t, "===") && strings.HasSuffix(t, "===") {
+			break
+		}
+		if in {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func parseHistorySection(raw string) string {
+	return strings.TrimSpace(extractSection(raw, "===HISTORY==="))
+}
+
+// parsePGDataPresent returns "yes" | "empty" | "unknown" | "" (marker absent). Only
+// "empty" is positive proof the volume holds nothing; "unknown" is treated as Unread.
+func parsePGDataPresent(raw string) string {
+	for _, line := range strings.Split(extractSection(raw, "===PGDATA_PRESENT==="), "\n") {
+		switch strings.TrimSpace(line) {
+		case "yes":
+			return "yes"
+		case "empty":
+			return "empty"
+		case "unknown":
+			return "unknown"
+		}
+	}
+	return ""
+}
 
 // parseDiskStats parses cnpgDiskScript output into a DiskStats. Source records how
 // the data was obtained so an unreadable instance is explicit, never a silent zero.

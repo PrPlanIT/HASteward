@@ -133,10 +133,12 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 		deleteTimeout = common.DefaultDeleteTimeout
 	}
 	acquired := false
+	var lastHelper *corev1.Pod
 	for elapsed := 0; elapsed < deleteTimeout; elapsed++ {
 		hp, hpErr := c.Clientset.CoreV1().Pods(ns).Get(ctx, job.HelperPodName, metav1.GetOptions{})
 		phase := "Pending"
 		if hpErr == nil {
+			lastHelper = hp
 			phase = string(hp.Status.Phase)
 		}
 		if phase == "Running" || phase == "Succeeded" {
@@ -149,6 +151,15 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 			cleanup()
 			return fmt.Errorf("%s pod failed before acquiring PVC", job.Label)
 		}
+		// If the HELPER itself cannot be scheduled (its node is at the pod cap,
+		// cordoned, or NotReady), the PVC is not the blocker — deleting the target
+		// frees nothing and would just churn it. Stop and report the real reason.
+		if k8s.PodUnschedulable(hp) {
+			logHelperOutput(ctx, ns, job.HelperPodName)
+			cleanup()
+			return fmt.Errorf("%s helper pod cannot be scheduled — %s; freeing the PVC will not help, resolve the node condition and retry",
+				job.Label, k8s.DescribePodScheduling(hp))
+		}
 		_ = c.Clientset.CoreV1().Pods(ns).Delete(ctx, job.TargetPod, metav1.DeleteOptions{
 			GracePeriodSeconds: common.Ptr(int64(0)),
 		})
@@ -157,6 +168,9 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	if !acquired {
 		logHelperOutput(ctx, ns, job.HelperPodName)
 		cleanup()
+		if sched := k8s.DescribePodScheduling(lastHelper); sched != "" {
+			return fmt.Errorf("timeout: %s helper never acquired the PVC after %ds — %s", job.Label, deleteTimeout, sched)
+		}
 		return fmt.Errorf("timeout: %s pod never acquired PVC after %ds", job.Label, deleteTimeout)
 	}
 

@@ -75,13 +75,37 @@ type InstanceAssessment struct {
 	Disk *DiskStats `json:"disk,omitempty"`
 }
 
+// AuthorityOutcome is the typed verdict of a cross-instance authority
+// determination — shared by every engine (CNPG, Galera, future). It names WHY a
+// heal is or is not safe so the operator gets failure-mode-specific guidance
+// instead of a generic "not safe". SafeToHeal is exactly (Authority ==
+// AuthorityProvable); the outcome adds the reason a bool cannot carry.
+type AuthorityOutcome string
+
+const (
+	// AuthorityProvable: a single consistent authority is proven and it is the
+	// heal/bootstrap source — safe to proceed.
+	AuthorityProvable AuthorityOutcome = "provable"
+	// AuthorityLeaderNotPrimary: the decisive authority is NOT the current heal
+	// source (e.g. a stale-restore primary on a higher timeline while the real data
+	// is on a replica). Promote the authority; do NOT heal from the primary.
+	AuthorityLeaderNotPrimary AuthorityOutcome = "leader_not_primary"
+	// AuthorityDiverged: committed data exists on more than one lineage past a
+	// shared fork — no safe winner. Escrow all; a human chooses the survivor.
+	AuthorityDiverged AuthorityOutcome = "diverged"
+	// AuthorityUndeterminable: a node that could hold data could not be read, so
+	// authority cannot be decided. Bring it up for inspection before any heal.
+	AuthorityUndeterminable AuthorityOutcome = "undeterminable"
+)
+
 // DataComparison holds the cross-instance data comparison results.
 type DataComparison struct {
-	MostAdvanced      string   `json:"mostAdvanced"`
-	MostAdvancedValue int64    `json:"mostAdvancedValue"`
-	SafeToHeal        bool     `json:"safeToHeal"`
-	Warnings          []string `json:"warnings,omitempty"`
-	SplitBrainDetails []string `json:"splitBrainDetails,omitempty"`
+	MostAdvanced      string           `json:"mostAdvanced"`
+	MostAdvancedValue int64            `json:"mostAdvancedValue"`
+	SafeToHeal        bool             `json:"safeToHeal"`
+	Authority         AuthorityOutcome `json:"authority,omitempty"`
+	Warnings          []string         `json:"warnings,omitempty"`
+	SplitBrainDetails []string         `json:"splitBrainDetails,omitempty"`
 
 	// CNPG-specific
 	CheckpointLocation string `json:"checkpointLocation,omitempty"`

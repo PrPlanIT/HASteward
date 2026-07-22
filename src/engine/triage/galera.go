@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
@@ -14,6 +15,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -58,6 +60,11 @@ type wsrepStatus struct {
 	ClusterStateUUID  string
 	LastCommitted     int64
 	FlowControlPaused string
+	// Unread marks a sentinel produced when the wsrep query FAILED after retries —
+	// as opposed to a real reading. Its blank fields must never be interpreted as a
+	// genuine state (e.g. a blank ClusterStatus read as "non-primary component"): a
+	// transient read failure must not, on its own, drive a destructive heal.
+	Unread bool
 }
 
 // effectiveSeqno holds the best seqno from multiple sources for one instance.
@@ -178,14 +185,14 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 
 	displayNonRunning(data)
 
-	// Check PVCs (storage and galera)
+	// Check PVCs (storage and galera). Only a genuine NotFound proves a PVC is
+	// absent; a transient API error must NEVER be read as "missing" (a connectivity
+	// blip would falsely abort the whole triage, or worse elsewhere treat the node as
+	// having no data). Retry, then fall back to UNKNOWN — which fails closed distinctly.
 	for _, name := range data.expectedNodes {
-		data.pvcStates[name] = map[string]string{"storage": "MISSING", "galera": "MISSING"}
-		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, t.p.DataPVCName(name), metav1.GetOptions{}); err == nil {
-			data.pvcStates[name]["storage"] = "Bound"
-		}
-		if _, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, t.p.GaleraPVCName(name), metav1.GetOptions{}); err == nil {
-			data.pvcStates[name]["galera"] = "Bound"
+		data.pvcStates[name] = map[string]string{
+			"storage": pvcGetState(ctx, ns, t.p.DataPVCName(name)),
+			"galera":  pvcGetState(ctx, ns, t.p.GaleraPVCName(name)),
 		}
 	}
 
@@ -194,12 +201,20 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		output.Printf("%s: storage=%s galera=%s\n", name, state["storage"], state["galera"])
 	}
 
-	// Fail if storage PVCs missing
-	var missingStorage []string
+	// Fail on storage PVCs we could not read separately from ones that are genuinely
+	// gone — the operator's action differs (retry vs. investigate the missing claim).
+	var missingStorage, unknownStorage []string
 	for name, state := range data.pvcStates {
-		if state["storage"] == "MISSING" {
+		switch state["storage"] {
+		case "MISSING":
 			missingStorage = append(missingStorage, name)
+		case "UNKNOWN":
+			unknownStorage = append(unknownStorage, name)
 		}
+	}
+	if len(unknownStorage) > 0 {
+		return nil, fmt.Errorf("ABORTING: could not determine storage PVC state for %s (transient API error, not a NotFound) — retry",
+			strings.Join(unknownStorage, ", "))
 	}
 	if len(missingStorage) > 0 {
 		return nil, fmt.Errorf("ABORTING: Missing storage PVCs: %s. Resolve before proceeding",
@@ -287,11 +302,25 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		if crashloopNames[pod.Name] {
 			continue
 		}
-		m, err := t.p.QueryWsrep(ctx, pod.Name)
-		if err != nil {
-			common.WarnLog("wsrep query failed on %s: %v — wsrep data for this node will be incomplete", pod.Name, err)
-			// LastCommitted -1 = unknown. NEVER let a failed query masquerade as seqno 0.
-			data.wsrepMap[pod.Name] = &wsrepStatus{LastCommitted: -1}
+		// Retry transient transport failures (a blip must not be read as a bad state,
+		// then drive an unnecessary heal). Parsing is deterministic and not retried.
+		var m map[string]string
+		var err error
+		for attempt := 1; attempt <= 3; attempt++ {
+			m, err = t.p.QueryWsrep(ctx, pod.Name)
+			if err == nil && len(m) > 0 {
+				break
+			}
+			if attempt < 3 {
+				common.WarnLog("wsrep query on %s failed (attempt %d/3): %v", pod.Name, attempt, err)
+				common.Sleep(time.Duration(attempt*3) * time.Second)
+			}
+		}
+		if err != nil || len(m) == 0 {
+			common.WarnLog("wsrep query on %s failed after retries — its wsrep state is UNREAD (not assumed bad)", pod.Name)
+			// LastCommitted -1 = unknown; Unread marks this as a failed read, so the
+			// blank fields are never misread as a real "non-primary" state.
+			data.wsrepMap[pod.Name] = &wsrepStatus{LastCommitted: -1, Unread: true}
 			continue
 		}
 		ws := parseWsrepStatus(m)
@@ -474,19 +503,7 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 	for _, w := range comparison.Warnings {
 		output.Println(w)
 	}
-	if !comparison.SafeToHeal {
-		output.Println()
-		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		output.Println("  CRITICAL: NOT SAFE TO HEAL — authority is undeterminable")
-		output.Println("  Triage could not prove a single, consistent most-advanced history.")
-		output.Println("  Reason(s):")
-		for _, sb := range comparison.SplitBrainDetails {
-			output.Printf("    - %s\n", sb)
-		}
-		output.Println("  DO NOT blindly heal - review the data above and decide manually.")
-		output.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		output.Println()
-	}
+	renderAuthorityBanner(comparison)
 
 	assessments := t.buildAssessments(data, &comparison)
 
@@ -631,6 +648,11 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	// and bootstrapping past it silently discards committed transactions. This
 	// is the safety net that turns "no evidence of a problem" into "prove it's
 	// safe" — the default must be closed, not open.
+	// Divergence evidence (multiple UUIDs, non-Primary component, a higher seqno
+	// outside the primary) accumulated above — captured before the unread check so the
+	// shared outcome can distinguish "diverged" from "undeterminable".
+	divergent := len(splitBrain) > 0
+
 	var unread []string
 	for _, gs := range data.grastateData {
 		if es, ok := data.effectiveSeqnos[gs.Pod]; !ok || !es.Known {
@@ -644,6 +666,17 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	}
 
 	safe := len(splitBrain) == 0
+
+	// The shared authority verdict. An unread node dominates (it must be recovered
+	// before anything can be proven); otherwise divergence evidence makes it diverged;
+	// otherwise the authority is provable.
+	outcome := model.AuthorityProvable
+	switch {
+	case len(unread) > 0:
+		outcome = model.AuthorityUndeterminable
+	case divergent:
+		outcome = model.AuthorityDiverged
+	}
 	if safe {
 		if len(data.primaryMembers) > 0 {
 			warnings = append(warnings,
@@ -664,6 +697,7 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 		MostAdvanced:      data.bestSeqnoNode,
 		MostAdvancedValue: data.bestSeqnoValue,
 		SafeToHeal:        safe,
+		Authority:         outcome,
 		Warnings:          warnings,
 		SplitBrainDetails: splitBrain,
 		PrimaryMembers:    data.primaryMembers,
@@ -767,6 +801,14 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 				notes = append(notes, fmt.Sprintf("last known seqno: %d", nodeSeqno))
 			}
 			recommendation = fmt.Sprintf("Node is disconnected from cluster. Needs heal (grastate wipe + SST rejoin).\n\n  %s", healCmd)
+
+		case isRunning && ws != nil && ws.Unread:
+			// The wsrep query FAILED after retries — we are blind to this node's state,
+			// not looking at a real "non-primary" reading. Flag for manual review; do
+			// NOT auto-heal (wipe+SST) on a read we could not make.
+			notes = append(notes, "wsrep status UNREAD (query failed after retries) — cannot classify")
+			recommendation = fmt.Sprintf("Could not read wsrep status after retries — the node may be wedged or the exec transport is failing. "+
+				"Investigate the pod before healing; if it is genuinely wedged, heal.\n\n  %s", healCmd)
 
 		case isRunning && wsClusterStatus != "Primary" && wsClusterStatus != "unknown":
 			needsHeal = true
@@ -1232,6 +1274,26 @@ func (t *galeraTriage) scrapeRecoveredPosition(ctx context.Context, ns, pod stri
 		}
 	}
 	return seqno, uuid
+}
+
+// pvcGetState returns "Bound" (the PVC exists), "MISSING" (a genuine NotFound), or
+// "UNKNOWN" (a transient API error survived retries). Only a NotFound proves absence;
+// a transient failure must never be read as missing (see the CNPG parity fix).
+func pvcGetState(ctx context.Context, ns, name string) string {
+	c := k8s.GetClients()
+	for attempt := 1; attempt <= 3; attempt++ {
+		_, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			return "Bound"
+		}
+		if apierrors.IsNotFound(err) {
+			return "MISSING"
+		}
+		if attempt < 3 {
+			common.Sleep(time.Duration(attempt*2) * time.Second)
+		}
+	}
+	return "UNKNOWN"
 }
 
 // grastateSeqnoFor returns the parsed grastate seqno for a pod, or -1 if
