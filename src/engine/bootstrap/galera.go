@@ -812,7 +812,7 @@ func (b *galeraBootstrap) selectCandidate(
 	}
 
 	if bestPod != originalCandidate {
-		// Find original grastate seqno for logging
+		// Find the original candidate's known triage seqno.
 		origGrastate := int64(0)
 		for _, a := range assessments {
 			if a.Pod == originalCandidate {
@@ -820,6 +820,29 @@ func (b *galeraBootstrap) selectCandidate(
 				break
 			}
 		}
+
+		// FAIL CLOSED against discrediting the leader on a transient read failure.
+		// The original candidate is the node triage proved most-advanced. If it did
+		// NOT itself produce an authoritative wsrep_recover — because its recover pod
+		// failed for ANY reason (a node at its pod cap, cordoned, PVC FailedAttach, an
+		// image pull, the activeDeadline — none of which are diagnosed today, so they
+		// all look like a generic timeout) — then we have no recovered position for it.
+		// Overriding to a node whose RECOVERED seqno is behind the leader's KNOWN
+		// position would bootstrap that lesser node and SST the leader from it, silently
+		// discarding the leader's committed transactions. A transient failure to READ a
+		// node must never override its known-advanced data. Refuse unless the operator
+		// explicitly accepts the loss with --force (e.g. the leader is truly gone).
+		if candidateOverrideDiscardsData(isAuthoritativeRecover(recovered[originalCandidate]), origGrastate, bestSeqno) && !cfg.Force {
+			return "", fmt.Errorf(
+				"ABORT: bootstrap leader %s holds a known position (seqno %d) but its wsrep_recover did not produce an "+
+					"authoritative reading, and the best node that recovered (%s, seqno %d) is BEHIND it. Bootstrapping %s "+
+					"would SST %s and discard its committed transactions %d..%d. Check %s's recover pod (node capacity / "+
+					"cordon / PVC attach) and retry once it can recover; or re-run with --force if %s is unrecoverable and "+
+					"the loss is acceptable",
+				originalCandidate, origGrastate, bestPod, bestSeqno, bestPod, originalCandidate,
+				bestSeqno+1, origGrastate, originalCandidate, originalCandidate)
+		}
+
 		common.WarnLog("wsrep_recover override: switching candidate from %s (grastate seqno %d) to %s (recovered seqno %d, uuid %s)",
 			originalCandidate, origGrastate, bestPod, bestSeqno, bestUUID)
 		result.Decision.WsrepRecoverApplied = true
@@ -844,6 +867,19 @@ func isAuthoritativeRecover(rr wsrepRecoverResult) bool {
 	return rr.Valid &&
 		rr.UUID != zeroUUID && rr.UUID != "" && rr.UUID != "unknown" &&
 		rr.Seqno >= 0 && rr.Seqno <= maxPhantomSeqno
+}
+
+// candidateOverrideDiscardsData reports whether overriding the bootstrap candidate
+// away from the triage-chosen leader would silently discard the leader's committed
+// data. It is true exactly when the leader did NOT produce an authoritative recover
+// (so we cannot confirm its position) AND its known triage seqno is strictly ahead of
+// the best recovered node's seqno — meaning bootstrapping the best-recovered node
+// would SST the leader from a position behind it. A transient failure to READ the
+// leader must never be allowed to override its known-advanced position; the caller
+// fails closed (abort) unless --force. Equal seqnos are safe (no data past the
+// leader's position is lost); only strictly-greater proves loss.
+func candidateOverrideDiscardsData(leaderRecoveredAuthoritatively bool, leaderKnownSeqno, bestRecoveredSeqno int64) bool {
+	return !leaderRecoveredAuthoritatively && leaderKnownSeqno > bestRecoveredSeqno
 }
 
 // buildLineageGroups partitions wsrep_recover results into lineage groups keyed by
