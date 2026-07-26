@@ -515,13 +515,12 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		}
 	}
 
-	// Compute authority status for donor recommendation using Galera facts only.
-	// IsReady (K8s readiness) is deliberately NOT used here — authority is about
-	// history consistency, not operator/probe readiness.
-	authorityStatus := "ambiguous"
+	// Authority status (shared projection); the donor recommendation uses Galera facts
+	// only — IsReady (K8s readiness) is deliberately NOT used here, as authority is
+	// about history consistency, not operator/probe readiness.
+	authorityStatus := deriveAuthorityStatus(comparison.SafeToHeal)
 	recommendedDonor := "none"
 	if comparison.SafeToHeal {
-		authorityStatus = "unambiguous"
 		for _, a := range assessments {
 			if a.WsrepReady == "ON" && a.WsrepConnected == "ON" && a.WsrepStateComment == "Synced" {
 				recommendedDonor = fmt.Sprintf("%d", a.Instance)
@@ -554,7 +553,7 @@ func (t *galeraTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 }
 
 func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.DataComparison {
-	var warnings, splitBrain []string
+	var splitBrain []string
 
 	// UUID divergence check. Only AUTHORITATIVE cluster-identity evidence may
 	// declare a split-brain; stale hints must never drive the verdict.
@@ -665,10 +664,8 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 				" (fence + --wsrep-recover required before ANY bootstrap)")
 	}
 
-	safe := len(splitBrain) == 0
-
-	// The shared authority verdict. An unread node dominates (it must be recovered
-	// before anything can be proven); otherwise divergence evidence makes it diverged;
+	// The authority verdict. An unread node dominates (it must be recovered before
+	// anything can be proven); otherwise divergence evidence makes it diverged;
 	// otherwise the authority is provable.
 	outcome := model.AuthorityProvable
 	switch {
@@ -677,32 +674,19 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	case divergent:
 		outcome = model.AuthorityDiverged
 	}
-	if safe {
-		if len(data.primaryMembers) > 0 {
-			warnings = append(warnings,
-				fmt.Sprintf("OK: Primary component (%s) has the most recent data (best seqno: %d)",
-					strings.Join(data.primaryMembers, ", "), bestPrimarySeqno))
-		} else {
-			warnings = append(warnings,
-				fmt.Sprintf("WARNING: No nodes in Primary component. Most advanced: %s (seqno: %d)",
-					data.bestSeqnoNode, data.bestSeqnoValue))
-		}
-	} else {
-		for _, sb := range splitBrain {
-			warnings = append(warnings, "SPLIT-BRAIN RISK: "+sb)
-		}
+
+	okMsg := fmt.Sprintf("OK: Primary component (%s) has the most recent data (best seqno: %d)",
+		strings.Join(data.primaryMembers, ", "), bestPrimarySeqno)
+	if len(data.primaryMembers) == 0 {
+		okMsg = fmt.Sprintf("WARNING: No nodes in Primary component. Most advanced: %s (seqno: %d)",
+			data.bestSeqnoNode, data.bestSeqnoValue)
 	}
 
-	return model.DataComparison{
-		MostAdvanced:      data.bestSeqnoNode,
-		MostAdvancedValue: data.bestSeqnoValue,
-		SafeToHeal:        safe,
-		Authority:         outcome,
-		Warnings:          warnings,
-		SplitBrainDetails: splitBrain,
-		PrimaryMembers:    data.primaryMembers,
-		BestPrimarySeqno:  bestPrimarySeqno,
-	}
+	// Shared assembly; Galera-specific fields set on top.
+	cmp := newAuthorityComparison(outcome, data.bestSeqnoNode, data.bestSeqnoValue, splitBrain, okMsg)
+	cmp.PrimaryMembers = data.primaryMembers
+	cmp.BestPrimarySeqno = bestPrimarySeqno
+	return cmp
 }
 
 func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *model.DataComparison) []model.InstanceAssessment {
@@ -1249,9 +1233,18 @@ func (t *galeraTriage) scrapeRecoveredPosition(ctx context.Context, ns, pod stri
 	if err != nil || len(logBytes) == 0 {
 		return -1, ""
 	}
+	return parseRecoveredPositionFromLog(string(logBytes))
+}
+
+// parseRecoveredPositionFromLog extracts the highest WSREP position from mariadbd log
+// text: the explicit "Recovered position: <uuid>:<seqno>" (preferred, carries the
+// uuid) and the "found gapless sequence X-Y" GCache upper bound (Y). Returns the max
+// seqno seen across all lines, and (-1, "") when neither appears. Pure, so the parse
+// that un-blinds a wedged node is unit-testable independent of the log fetch.
+func parseRecoveredPositionFromLog(logText string) (int64, string) {
 	seqno := int64(-1)
 	uuid := ""
-	for _, line := range strings.Split(string(logBytes), "\n") {
+	for _, line := range strings.Split(logText, "\n") {
 		if i := strings.Index(line, "Recovered position:"); i >= 0 {
 			rest := strings.TrimSpace(line[i+len("Recovered position:"):])
 			if colon := strings.LastIndex(rest, ":"); colon > 0 {

@@ -631,15 +631,14 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		TotalCount:     int(t.p.Instances()),
 	}
 
-	// CNPG authority status (mirrors the Galera pattern) + recovery projection. Only
-	// a provable authority that IS the primary (SafeToHeal) authorizes the automatic
-	// heal-from-primary path in repair PreAssess; every other outcome fails closed.
-	// The specific reason lives in comparison.Authority + SplitBrainDetails.
+	// CNPG authority status (shared projection) + recovery. Only a provable authority
+	// that IS the primary (SafeToHeal) authorizes the automatic heal-from-primary path
+	// in repair PreAssess; every other outcome fails closed. The specific reason lives
+	// in comparison.Authority + SplitBrainDetails.
+	result.AuthorityStatus = deriveAuthorityStatus(comparison.SafeToHeal)
 	if comparison.SafeToHeal && currentPrimary != "" {
-		result.AuthorityStatus = "unambiguous"
 		result.RecommendedDonor = cnpgOrdinal(currentPrimary)
 	} else {
-		result.AuthorityStatus = "ambiguous"
 		result.RecommendedDonor = "none"
 	}
 	result.Recovery = deriveRecovery(assessments, comparison, currentPrimary, result.ClusterPhase, data.primaryIsRunning)
@@ -749,9 +748,6 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 		outcome = model.AuthorityUndeterminable
 		splitBrain = append(splitBrain, "no instance holds readable data (all provably empty)")
 	}
-	safe := outcome == model.AuthorityProvable
-
-	var warnings []string
 	var maVal int64
 	var maLSN string
 	for _, in := range inputs {
@@ -759,25 +755,14 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 			maVal, maLSN = in.Timeline, formatLSN(in.CheckpointLSN)
 		}
 	}
-	if safe {
-		warnings = append(warnings, fmt.Sprintf(
-			"OK: primary %s is the decisive authority (timeline %d, checkpoint %s) — %s",
-			primaryName, maVal, maLSN, decision.LeaderReason))
-	} else {
-		for _, sb := range splitBrain {
-			warnings = append(warnings, "SPLIT-BRAIN RISK: "+sb)
-		}
-	}
+	okMsg := fmt.Sprintf("OK: primary %s is the decisive authority (timeline %d, checkpoint %s) — %s",
+		primaryName, maVal, maLSN, decision.LeaderReason)
 
-	return model.DataComparison{
-		MostAdvanced:       mostAdvanced,
-		MostAdvancedValue:  maVal,
-		CheckpointLocation: maLSN,
-		SafeToHeal:         safe,
-		Authority:          outcome,
-		Warnings:           warnings,
-		SplitBrainDetails:  splitBrain,
-	}
+	// Shared assembly (SafeToHeal / Authority / Warnings / SplitBrainDetails); the
+	// CNPG-specific CheckpointLocation is set on top.
+	cmp := newAuthorityComparison(outcome, mostAdvanced, maVal, splitBrain, okMsg)
+	cmp.CheckpointLocation = maLSN
+	return cmp
 }
 
 func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.DataComparison,
