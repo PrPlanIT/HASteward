@@ -174,7 +174,7 @@ func readControlDataViaHelper(ctx context.Context, helperPod, ns, instanceName s
 	cd := parseControlData(instanceName, "deep_recover", res.Stdout)
 	cd.Reachable = true
 	if hr, herr := k8s.ExecCommand(ctx, helperPod, ns, "helper",
-		[]string{"sh", "-c", "cat /var/lib/postgresql/data/pgdata/pg_wal/*.history 2>/dev/null"}); herr == nil {
+		[]string{"sh", "-c", cnpgHistoryCmd}); herr == nil {
 		cd.HistoryRaw = strings.TrimSpace(hr.Stdout)
 	}
 	if pg, perr := k8s.ExecCommand(ctx, helperPod, ns, "helper",

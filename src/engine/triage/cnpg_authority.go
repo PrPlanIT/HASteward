@@ -106,6 +106,35 @@ func parseTimelineHistory(raw string) []switchPoint {
 	return sps
 }
 
+// historyForTimeline selects one timeline's history from a raw blob that emits each
+// pg_wal/*.history file under a "###<filename>" marker (see cnpgHistoryCmd). A node on
+// timeline N has its full, clean lineage in 0000000N.history; every OTHER file repeats
+// only the earlier switches, so concatenating them all corrupts the lineage. We take
+// exactly the current timeline's file. Backward/degenerate cases: a blob with NO
+// markers is assumed to already be a single clean lineage and returned as-is (keeps
+// hand-built history working); timeline 0/unknown or a missing file yields "".
+func historyForTimeline(raw string, timeline int64) string {
+	if !strings.Contains(raw, "###") {
+		return raw
+	}
+	if timeline <= 0 {
+		return ""
+	}
+	want := fmt.Sprintf("###%08X.history", timeline)
+	var out []string
+	in := false
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "###") {
+			in = strings.TrimSpace(line) == want
+			continue
+		}
+		if in {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // commonPrefixLen returns how many leading switch points two lineages share exactly.
 func commonPrefixLen(a, b []switchPoint) int {
 	n := len(a)

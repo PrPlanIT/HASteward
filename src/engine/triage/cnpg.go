@@ -256,7 +256,7 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 		// Read the timeline-history files: the fork points authority is decided on.
 		// Best-effort — a timeline-1 instance legitimately has none.
 		if hr, herr := k8s.ExecCommand(ctx, pod.Name, ns, "postgres",
-			[]string{"sh", "-c", "cat /var/lib/postgresql/data/pgdata/pg_wal/*.history 2>/dev/null"}); herr == nil {
+			[]string{"sh", "-c", cnpgHistoryCmd}); herr == nil {
 			cd.HistoryRaw = strings.TrimSpace(hr.Stdout)
 		}
 		healthyControlData = append(healthyControlData, cd)
@@ -666,7 +666,7 @@ func buildAuthorityInputs(data *cnpgTriageData, primaryName string) []authorityI
 			// so treat it as Unread rather than compare it blind.
 			in.Timeline = parseTimelineInt(tl)
 			in.CheckpointLSN = parseLSNValue(strings.TrimSpace(cd.CheckpointLocation))
-			in.Switches = parseTimelineHistory(cd.HistoryRaw)
+			in.Switches = parseTimelineHistory(historyForTimeline(cd.HistoryRaw, in.Timeline))
 			if in.Timeline > 1 && len(in.Switches) == 0 {
 				in.ReadState = ReadStateUnread
 				in.UnreadReason = fmt.Sprintf(
@@ -1155,9 +1155,18 @@ echo "===WAL==="; du -sk /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | ta
 echo "===PGDATA==="; du -sk /var/lib/postgresql/data/pgdata 2>/dev/null | tail -1
 echo "===SEGMENTS==="; ls -1 /var/lib/postgresql/data/pgdata/pg_wal 2>/dev/null | grep -cE '^[0-9A-F]{24}$'`
 
-// cnpgHistoryScript emits the concatenated timeline-history files under a delimiter
-// so the probe's single read carries the fork points authority is decided on.
-const cnpgHistoryScript = `echo "===HISTORY==="; cat /var/lib/postgresql/data/pgdata/pg_wal/*.history 2>/dev/null`
+// cnpgHistoryCmd emits every timeline-history file, EACH under a "###<filename>"
+// marker, so the parser can select the CURRENT timeline's file. A blind
+// `cat *.history` concatenates every file — and each 0000000N.history REPEATS all
+// earlier switch lines — which corrupts the reconstructed lineage: a real
+// multi-restore cluster (many .history files) then looks divergent for the wrong
+// reason (the fork LSN becomes an artifact of the next file's first line). ${f##*/}
+// is a POSIX basename (no coreutils dependency).
+const cnpgHistoryCmd = `for f in /var/lib/postgresql/data/pgdata/pg_wal/*.history; do [ -e "$f" ] || continue; echo "###${f##*/}"; cat "$f"; done`
+
+// cnpgHistoryScript wraps cnpgHistoryCmd under the ===HISTORY=== section delimiter
+// for the probe's single multi-section read.
+const cnpgHistoryScript = `echo "===HISTORY==="; ` + cnpgHistoryCmd
 
 // cnpgPGDataPresentScript reports the data directory's state with POSITIVE proof,
 // three-valued: "yes" (pg_control present → data here), "empty" (the pgdata dir was
