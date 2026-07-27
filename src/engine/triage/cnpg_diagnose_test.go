@@ -17,7 +17,7 @@ func TestDiagnose_LeaderNotPrimary(t *testing.T) {
 		Authority:    model.AuthorityLeaderNotPrimary,
 		MostAdvanced: "pg-2", // the authority replica
 	}
-	ds := tr.diagnose(cmp, nil, "pg-1")
+	ds := tr.diagnose(cmp, nil, "pg-1", &cnpgTriageData{})
 	if len(ds) != 1 {
 		t.Fatalf("want 1 diagnosis, got %d: %+v", len(ds), ds)
 	}
@@ -46,7 +46,7 @@ func TestDiagnose_LeaderNotPrimary_DiskWedged(t *testing.T) {
 	tr := cnpgTriageForTest()
 	cmp := model.DataComparison{SafeToHeal: false, Authority: model.AuthorityLeaderNotPrimary, MostAdvanced: "pg-2"}
 	assess := []model.InstanceAssessment{{Pod: "pg-2", CrashReason: "disk_full"}}
-	d := tr.diagnose(cmp, assess, "pg-1")[0]
+	d := tr.diagnose(cmp, assess, "pg-1", &cnpgTriageData{})[0]
 	if !strings.Contains(d.Remedy, "prune wal") || !strings.Contains(d.Remedy, "--instance 2") {
 		t.Fatalf("wedged authority must be relieved first via prune wal --instance 2, got: %q", d.Remedy)
 	}
@@ -59,7 +59,7 @@ func TestDiagnose_LeaderNotPrimary_DiskWedged(t *testing.T) {
 func TestDiagnose_Diverged(t *testing.T) {
 	tr := cnpgTriageForTest()
 	cmp := model.DataComparison{SafeToHeal: false, Authority: model.AuthorityDiverged}
-	ds := tr.diagnose(cmp, nil, "pg-1")
+	ds := tr.diagnose(cmp, nil, "pg-1", &cnpgTriageData{})
 	if len(ds) != 1 || ds[0].ID != "cnpg-split-brain-diverged" {
 		t.Fatalf("want the diverged diagnosis, got %+v", ds)
 	}
@@ -75,11 +75,45 @@ func TestDiagnose_Diverged(t *testing.T) {
 // guidance is "bring the node up for inspection") produces no recovery diagnosis here.
 func TestDiagnose_SafeAndUndeterminable(t *testing.T) {
 	tr := cnpgTriageForTest()
-	if ds := tr.diagnose(model.DataComparison{SafeToHeal: true, Authority: model.AuthorityProvable}, nil, "pg-1"); ds != nil {
+	if ds := tr.diagnose(model.DataComparison{SafeToHeal: true, Authority: model.AuthorityProvable}, nil, "pg-1", &cnpgTriageData{}); ds != nil {
 		t.Fatalf("safe heal must yield no diagnosis, got %+v", ds)
 	}
-	if ds := tr.diagnose(model.DataComparison{SafeToHeal: false, Authority: model.AuthorityUndeterminable}, nil, "pg-1"); ds != nil {
+	if ds := tr.diagnose(model.DataComparison{SafeToHeal: false, Authority: model.AuthorityUndeterminable}, nil, "pg-1", &cnpgTriageData{}); ds != nil {
 		t.Fatalf("undeterminable is handled by the banner (bring up for inspection), not a rebuild diagnosis, got %+v", ds)
+	}
+}
+
+// TestDiagnoseTimelineRewind is the P3.5 signal: a backwards fork (a restore/PITR to an
+// earlier LSN) must be flagged, while a healthy monotonic history (normal failovers) is
+// silent. Uses the boundary-postgres fork sequence — monotonic until TL9 forks at
+// 2C/99, behind TL8's 8E/EE.
+func TestDiagnoseTimelineRewind(t *testing.T) {
+	rewound := histFiles("11/840000A0", "2C/960013E8", "72/D8007388", "78/59032EF0",
+		"8E/9E0000A0", "8E/E40030C0", "8E/EE029E80", "2C/99000000") // TL9, last fork goes backwards
+	healthy := histFiles("10/00000000", "20/00000000", "30/00000000") // TL4, strictly forward
+
+	// Rewind present on the TL9 instance → flagged, headline names it and both LSNs.
+	data := &cnpgTriageData{controlData: []controlData{
+		{Pod: "boundary-postgres-2", Timeline: "8", HistoryRaw: healthy},
+		{Pod: "boundary-postgres-3", Timeline: "9", HistoryRaw: rewound},
+	}}
+	d := diagnoseTimelineRewind(data, "boundary-postgres", "hookshot")
+	if d == nil {
+		t.Fatal("a backwards fork must be flagged as a rewind")
+	}
+	if d.Target != "boundary-postgres-3" || !strings.Contains(d.Summary, "timeline 9") {
+		t.Fatalf("rewind must headline the TL9 instance, got target=%q summary=%q", d.Target, d.Summary)
+	}
+	if !strings.Contains(d.Summary, "2C/99000000") || !strings.Contains(d.Summary, "8E/EE029E80") {
+		t.Fatalf("summary must show the backwards fork LSN and the earlier fork it undercut: %q", d.Summary)
+	}
+
+	// A cluster with only monotonic histories → no rewind diagnosis.
+	clean := &cnpgTriageData{controlData: []controlData{
+		{Pod: "pg-1", Timeline: "4", HistoryRaw: healthy},
+	}}
+	if d := diagnoseTimelineRewind(clean, "pg", "ns"); d != nil {
+		t.Fatalf("healthy forward-only history must not be flagged, got %+v", d)
 	}
 }
 

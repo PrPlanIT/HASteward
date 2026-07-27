@@ -723,7 +723,7 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		result.RecommendedDonor = "none"
 	}
 	result.Recovery = deriveRecovery(assessments, comparison, currentPrimary, result.ClusterPhase, data.primaryIsRunning)
-	result.Diagnoses = t.diagnose(comparison, assessments, currentPrimary)
+	result.Diagnoses = t.diagnose(comparison, assessments, currentPrimary, data)
 
 	// Display
 	t.triageDisplay(data, result)
@@ -857,20 +857,35 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 	return cmp
 }
 
-// diagnose is CNPG triage's catalog of recognized authority-recovery conditions —
-// the P3.2 counterpart to Galera's diagnose(). It turns the two "the repair engine
-// can't just heal" authority outcomes into a NAMED condition with an ordered,
-// escrow-first recovery plan, so a leader-not-primary / diverged cluster gets a
-// concrete path to recovery instead of only a "refusing to heal" banner. It never
-// mutates and never guesses: it prescribes the safe sequence a human/operator drives,
-// because promoting a divergent authority cannot be done safely by any single CNPG
-// command (booked as P3.2b). Empty when the heal is safe / undeterminable.
-func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []model.InstanceAssessment, primaryName string) []model.Diagnosis {
+// diagnose is CNPG triage's catalog of recognized conditions — the counterpart to
+// Galera's diagnose(). It never mutates and never guesses: each entry is a NAMED
+// condition paired with the safe remedy/plan a human drives. Currently: the two
+// authority-recovery outcomes (leader_not_primary, diverged → an ordered escrow-first
+// rebuild-around-the-authority plan; P3.2) and a pathological timeline rewind (P3.5).
+func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []model.InstanceAssessment, primaryName string, data *cnpgTriageData) []model.Diagnosis {
+	var out []model.Diagnosis
+	if d := t.diagnoseAuthorityRecovery(comparison, assessments, primaryName); d != nil {
+		out = append(out, *d)
+	}
+	// P3.5: pathological timeline history is orthogonal to the authority outcome — a
+	// cluster can be SafeToHeal now yet carry the fingerprint of a backwards restore.
+	// Surface it regardless so a silent restore-loop doesn't go unnoticed.
+	cfg := t.p.Config()
+	if d := diagnoseTimelineRewind(data, cfg.ClusterName, cfg.Namespace); d != nil {
+		out = append(out, *d)
+	}
+	return out
+}
+
+// diagnoseAuthorityRecovery turns the two "the repair engine can't just heal" authority
+// outcomes (leader_not_primary, diverged) into a NAMED condition with an ordered,
+// escrow-first recovery plan. nil when the heal is safe / undeterminable.
+func (t *cnpgTriage) diagnoseAuthorityRecovery(comparison model.DataComparison, assessments []model.InstanceAssessment, primaryName string) *model.Diagnosis {
 	cfg := t.p.Config()
 	switch comparison.Authority {
 	case model.AuthorityLeaderNotPrimary:
 		authority := comparison.MostAdvanced
-		return []model.Diagnosis{{
+		return &model.Diagnosis{
 			ID: "cnpg-authority-not-primary",
 			Summary: fmt.Sprintf("The data authority is %s (a replica), not the primary %s — recovery is to rebuild "+
 				"the cluster AROUND %s, never to heal from the primary", authority, primaryName, authority),
@@ -881,9 +896,9 @@ func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []mod
 				authority, primaryName, authority, cnpgRebuildAroundAuthoritySteps(cfg.ClusterName, cfg.Namespace, authority, assessments)),
 			Remedy: cnpgAuthorityFirstStep(cfg.ClusterName, cfg.Namespace, authority, assessments),
 			Target: authority,
-		}}
+		}
 	case model.AuthorityDiverged:
-		return []model.Diagnosis{{
+		return &model.Diagnosis{
 			ID: "cnpg-split-brain-diverged",
 			Summary: "Committed data exists on more than one lineage past a shared fork — no automatic winner; " +
 				"a human must choose the surviving lineage",
@@ -893,7 +908,7 @@ func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []mod
 				"the cluster AROUND X with the same ordered steps as `cnpg-authority-not-primary` (escrow → relieve → promote " +
 				"X → heal the rest). HASteward will not choose for you: picking the wrong lineage is unrecoverable.",
 			Remedy: fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow ALL before any mutation", cfg.ClusterName, cfg.Namespace),
-		}}
+		}
 	default:
 		return nil
 	}
@@ -947,6 +962,56 @@ func authorityIsDiskConstrained(authority string, assessments []model.InstanceAs
 		}
 	}
 	return false
+}
+
+// diagnoseTimelineRewind (P3.5) flags a REWIND in the timeline history: a timeline that
+// forked at an LSN BEHIND an earlier fork point. WAL only ever moves forward, and a
+// normal failover forks a new timeline at the current (higher) LSN — so a fork that
+// goes backwards is the unambiguous fingerprint of a PITR / restore to an earlier point
+// (the very thing that created boundary-postgres's stale TL9). It is a health SIGNAL,
+// not an error: a restore may have been intentional, but a silent one that discarded
+// committed WAL looks exactly like this, so triage surfaces it instead of coping. It
+// inspects every instance's own-timeline lineage and reports the deepest rewind found.
+func diagnoseTimelineRewind(data *cnpgTriageData, cluster, ns string) *model.Diagnosis {
+	if data == nil {
+		return nil
+	}
+	var worstPod string
+	var worstTL, maxTL, from, to int64
+	for _, cd := range data.controlData {
+		tl := parseTimelineInt(strings.TrimSpace(cd.Timeline))
+		if tl > maxTL {
+			maxTL = tl
+		}
+		sps := parseTimelineHistory(historyForTimeline(cd.HistoryRaw, tl))
+		for i := 1; i < len(sps); i++ {
+			if sps[i].SwitchLSN < sps[i-1].SwitchLSN {
+				// A fork behind the previous fork — a backwards restore. Keep the one on
+				// the highest timeline (the most-restored lineage) as the headline.
+				if tl >= worstTL {
+					worstPod, worstTL = cd.Pod, tl
+					from, to = sps[i-1].SwitchLSN, sps[i].SwitchLSN
+				}
+				break
+			}
+		}
+	}
+	if worstPod == "" {
+		return nil
+	}
+	return &model.Diagnosis{
+		ID: "cnpg-timeline-rewind",
+		Summary: fmt.Sprintf("Timeline history shows a REWIND on %s — timeline %d forked at %s, BEHIND an earlier "+
+			"fork at %s (a restore/PITR to an earlier point); the cluster spans %d timelines",
+			worstPod, worstTL, formatLSN(to), formatLSN(from), maxTL),
+		Detail: "WAL only moves forward and a normal failover forks at the current LSN, so a fork that goes BACKWARDS is " +
+			"the fingerprint of a point-in-time restore. If that restore was intentional this is informational; if it was " +
+			"not, the pre-rewind lineage held committed WAL that the restored timeline discarded — check the authority " +
+			"verdict above, because the instance still on the pre-rewind timeline may be the real data authority.",
+		Remedy: fmt.Sprintf("hasteward triage -e cnpg -c %s -n %s"+
+			"   # review the authority verdict; escrow before acting on any divergence", cluster, ns),
+		Target: worstPod,
+	}
 }
 
 func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.DataComparison,
