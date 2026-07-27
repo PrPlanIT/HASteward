@@ -8,6 +8,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/k8s"
+	"github.com/PrPlanIT/HASteward/src/output/model"
 )
 
 // execRouter routes canned responses to the Go-driven prune's exec calls and records the
@@ -67,7 +68,7 @@ func TestPruneWALOnPVC_AbortsWhenReplicaLags(t *testing.T) {
 	}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"})
+	err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"}, true)
 	if err == nil || !strings.Contains(err.Error(), "lag") {
 		t.Fatalf("prune must abort when a replica lags behind the checkpoint (#23), got: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestPruneWALOnPVC_DeletesOnlyOlderSegmentsWhenCaughtUp(t *testing.T) {
 	}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	if err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"}); err != nil {
+	if err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"}, true); err != nil {
 		t.Fatalf("prune should succeed when the replica is caught up: %v", err)
 	}
 	if !r.rmCalled {
@@ -116,7 +117,7 @@ func TestPruneWALOnPVC_NoReplicasAbortsWithoutForce(t *testing.T) {
 	r := &execRouter{controlData: controlDataREDO5}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", nil)
+	err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", nil, true)
 	if err == nil || !strings.Contains(err.Error(), "no ready replicas") {
 		t.Fatalf("prune must refuse with no replica to verify against (without --force), got: %v", err)
 	}
@@ -134,11 +135,69 @@ func TestPruneWALOnPVC_ForceOverridesLaggingReplica(t *testing.T) {
 	}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	if err := testPruner(true).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"}); err != nil {
+	if err := testPruner(true).pruneWALOnPVC(context.Background(), "pg-prune", "ns", []string{"pg-2"}, true); err != nil {
 		t.Fatalf("--force should override a lagging replica: %v", err)
 	}
 	if !r.rmCalled {
 		t.Fatal("--force should have proceeded to prune")
+	}
+}
+
+// TestPruneWALOnPVC_NonPrimaryReliefSkipsReplicaGate is the P3.4 relief path: a trapped
+// non-primary authority has no downstream streamer, so verifyReplicas=false must skip the
+// replica-caughtup gate entirely (no replay query) and still prune only pre-REDO WAL —
+// with NO ready replica present and NO --force (which the primary path would refuse).
+func TestPruneWALOnPVC_NonPrimaryReliefSkipsReplicaGate(t *testing.T) {
+	r := &execRouter{
+		controlData: controlDataREDO5,
+		segments: []string{
+			walPath("000000010000000000000003"),
+			walPath("000000010000000000000004"),
+			walPath("000000010000000000000005"), // == REDO, keep
+		},
+	}
+	defer k8s.SetExecHookForTest(r.hook())()
+
+	// force=false, no replicas — the primary path would ABORT here; the relief path proceeds.
+	if err := testPruner(false).pruneWALOnPVC(context.Background(), "pg-prune", "ns", nil, false); err != nil {
+		t.Fatalf("non-primary authority relief should proceed without replicas/force: %v", err)
+	}
+	if !r.rmCalled {
+		t.Fatal("relief should have pruned the pre-REDO segments")
+	}
+	if strings.Contains(strings.Join(r.rmArgs, " "), "000000010000000000000005") {
+		t.Fatalf("relief deleted the REDO segment — data loss risk; rm args: %v", r.rmArgs)
+	}
+}
+
+// TestAssertReliefEligible covers the P3.4 authority gate for a NON-primary target: the
+// proven authority (or authoritative classification) is relievable; a divergence needs
+// --force (operator-adjudicated survivor); a plain replica is refused (re-clone instead).
+func TestAssertReliefEligible(t *testing.T) {
+	tr := func(dc model.DataComparison) *model.TriageResult { return &model.TriageResult{DataComparison: dc} }
+	a := func(class model.Classification) *model.InstanceAssessment {
+		return &model.InstanceAssessment{Pod: "pg-2", Classification: class}
+	}
+
+	// Proven authority (MostAdvanced) → allowed.
+	if err := testPruner(false).assertReliefEligible("pg-2", a(""), tr(model.DataComparison{MostAdvanced: "pg-2", Authority: model.AuthorityLeaderNotPrimary})); err != nil {
+		t.Fatalf("proven authority must be relievable, got: %v", err)
+	}
+	// Authoritative classification → allowed even if MostAdvanced is unset.
+	if err := testPruner(false).assertReliefEligible("pg-2", a(model.ClassAuthoritative), tr(model.DataComparison{})); err != nil {
+		t.Fatalf("authoritative classification must be relievable, got: %v", err)
+	}
+	// Diverged + no force → refused (must adjudicate first).
+	if err := testPruner(false).assertReliefEligible("pg-2", a(model.ClassUnknown), tr(model.DataComparison{Authority: model.AuthorityDiverged})); err == nil || !strings.Contains(err.Error(), "DIVERGED") {
+		t.Fatalf("diverged relief must require --force, got: %v", err)
+	}
+	// Diverged + force → allowed (operator-designated survivor).
+	if err := testPruner(true).assertReliefEligible("pg-2", a(model.ClassUnknown), tr(model.DataComparison{Authority: model.AuthorityDiverged})); err != nil {
+		t.Fatalf("diverged relief with --force must proceed, got: %v", err)
+	}
+	// Plain non-authority replica → refused (re-clone, don't prune).
+	if err := testPruner(true).assertReliefEligible("pg-2", a(model.ClassDisposable), tr(model.DataComparison{MostAdvanced: "pg-1"})); err == nil || !strings.Contains(err.Error(), "re-cloned") {
+		t.Fatalf("a disposable non-authority replica must be refused (re-clone, not prune), got: %v", err)
 	}
 }
 

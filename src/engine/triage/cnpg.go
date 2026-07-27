@@ -863,14 +863,19 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 // authority-recovery outcomes (leader_not_primary, diverged → an ordered escrow-first
 // rebuild-around-the-authority plan; P3.2) and a pathological timeline rewind (P3.5).
 func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []model.InstanceAssessment, primaryName string, data *cnpgTriageData) []model.Diagnosis {
+	cfg := t.p.Config()
 	var out []model.Diagnosis
 	if d := t.diagnoseAuthorityRecovery(comparison, assessments, primaryName); d != nil {
+		out = append(out, *d)
+	}
+	// P3.4: a data-bearing authority crash-looping on a FULL disk is the urgent case —
+	// the golden data is at risk while the node cannot even start. Raise it explicitly.
+	if d := diagnoseTrappedAuthority(comparison, assessments, cfg.ClusterName, cfg.Namespace); d != nil {
 		out = append(out, *d)
 	}
 	// P3.5: pathological timeline history is orthogonal to the authority outcome — a
 	// cluster can be SafeToHeal now yet carry the fingerprint of a backwards restore.
 	// Surface it regardless so a silent restore-loop doesn't go unnoticed.
-	cfg := t.p.Config()
 	if d := diagnoseTimelineRewind(data, cfg.ClusterName, cfg.Namespace); d != nil {
 		out = append(out, *d)
 	}
@@ -962,6 +967,35 @@ func authorityIsDiskConstrained(authority string, assessments []model.InstanceAs
 		}
 	}
 	return false
+}
+
+// diagnoseTrappedAuthority (P3.4) raises the urgent alarm: a data-bearing AUTHORITY
+// (authoritative classification, or the proven MostAdvanced) that is not ready because
+// its volume is FULL. Such a node cannot checkpoint or recycle WAL, so it never recovers
+// on its own and the newest data sits at risk — the exact state boundary-postgres-2 was
+// stuck in for days. The remedy is WAL relief, which HASteward can now run even for a
+// non-primary authority (P3.4 in prunewal). Conservative: unknown disk → not flagged.
+func diagnoseTrappedAuthority(comparison model.DataComparison, assessments []model.InstanceAssessment, cluster, ns string) *model.Diagnosis {
+	for _, a := range assessments {
+		isAuthorityNode := a.Classification == model.ClassAuthoritative ||
+			(comparison.MostAdvanced != "" && a.Pod == comparison.MostAdvanced)
+		trapped := !a.IsReady && (a.CrashReason == "disk_full" ||
+			(a.Disk != nil && a.Disk.TotalBytes > 0 && a.Disk.UsedPercent >= 95))
+		if isAuthorityNode && trapped {
+			return &model.Diagnosis{
+				ID: "cnpg-authority-wal-trapped",
+				Summary: fmt.Sprintf("URGENT: the data authority %s is not ready on a FULL disk — the golden "+
+					"data is at risk while the node cannot start", a.Pod),
+				Detail: "A data-bearing authority stuck on a disk-full volume cannot checkpoint or recycle WAL, so it " +
+					"never recovers on its own and the newest data sits at risk. Relieve it by pruning WAL older than its " +
+					"OWN checkpoint REDO — committed data past the checkpoint is kept, so this is safe. HASteward can now " +
+					"run this relief even when the authority is a non-primary replica. Escrow first if the data is irreplaceable.",
+				Remedy: fmt.Sprintf("hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run", cluster, ns, cnpgOrdinal(a.Pod)),
+				Target: a.Pod,
+			}
+		}
+	}
+	return nil
 }
 
 // diagnoseTimelineRewind (P3.5) flags a REWIND in the timeline history: a timeline that

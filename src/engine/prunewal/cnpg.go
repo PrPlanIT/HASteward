@@ -99,30 +99,46 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	// Safety checks
 	output.Section("Phase 2: Safety Checks")
 
-	// Must be the primary (WAL accumulates on primary, not replicas)
 	primary := k8s.GetNestedString(w.p.Cluster(), "status", "currentPrimary")
-	if primary != targetPod {
-		return nil, fmt.Errorf("ABORT: %s is not the primary (primary is %s). WAL pruning only applies to primaries", targetPod, primary)
-	}
+	isPrimary := primary == targetPod
 
-	// Must be disk-full or crash-looping
+	// A ready instance never needs WAL relief — both the primary and the trapped-
+	// authority paths require the target to be crash-looping / disk-full.
 	if targetAssessment.IsReady {
 		return nil, fmt.Errorf("ABORT: %s is running and ready. WAL pruning is for disk-full/crash-looping instances", targetPod)
 	}
 
-	output.Success("Target %s is primary and not ready — proceeding", targetPod)
-
-	// Check that replicas exist and are reasonably caught up
-	// ReadyCount from CNPG status includes the primary, so ready replicas = ReadyCount - (1 if primary is ready, else 0)
-	// Since our primary is NOT ready (checked above), ReadyCount == number of healthy replicas
-	replicaCount := triageResult.ReadyCount
-	if replicaCount == 0 {
-		if !cfg.Force {
-			return nil, fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override")
+	// P3.4: the target need not be the current primary. WAL accumulates on the primary,
+	// but a trapped DATA AUTHORITY on a non-primary — a crash-looping golden replica whose
+	// PVC filled with WAL (boundary-postgres-2) — must be relievable too, or the one node
+	// we most need to bring up for inspection/promotion is the one node the tool refuses
+	// to help. Relief deletes only WAL older than the target's OWN checkpoint REDO (safe
+	// for its recovery; committed data past the checkpoint lives in WAL we KEEP), and
+	// nothing streams from a crash-looping non-primary, so the primary-only replica-
+	// caughtup gate does not apply. Eligibility is authority-gated below.
+	verifyReplicas := isPrimary
+	var readyReplicas []string
+	if isPrimary {
+		output.Success("Target %s is the primary and not ready — proceeding", targetPod)
+		// ReadyCount includes the primary; the primary is NOT ready (checked above), so it
+		// equals the number of healthy replicas we can verify WAL safety against.
+		if triageResult.ReadyCount == 0 {
+			if !cfg.Force {
+				return nil, fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override")
+			}
+			common.WarnLog("force=true — proceeding with WAL prune despite no ready replicas. Data safety cannot be verified by a replica.")
+		} else {
+			output.Success("Found %d ready replica(s)", triageResult.ReadyCount)
 		}
-		common.WarnLog("force=true — proceeding with WAL prune despite no ready replicas. Data safety cannot be verified by a replica.")
-	} else {
-		output.Success("Found %d ready replica(s)", replicaCount)
+		// The ready replicas are the peers we verify against — they must not lag behind the
+		// checkpoint. The primary is the target and is not ready, so it never appears here.
+		for _, a := range triageResult.Assessments {
+			if a.Pod != targetPod && a.IsReady {
+				readyReplicas = append(readyReplicas, a.Pod)
+			}
+		}
+	} else if err := w.assertReliefEligible(targetPod, targetAssessment, triageResult); err != nil {
+		return nil, err
 	}
 
 	// Resolve PVC name for the target instance
@@ -144,16 +160,8 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	// The prune runs as Go-driven exec into a dumb helper pod that just holds the PVC
 	// (see OnPVCAcquired below): all decisions — the checkpoint boundary and the LSN
 	// safety gate — are made in Go, exec'd into the helper, and unit-testable.
-	//
-	// Ready replicas are the peers we verify WAL safety against (must not lag behind the
-	// checkpoint). The primary is the target and is not ready, so it never appears here.
-	var readyReplicas []string
-	for _, a := range triageResult.Assessments {
-		if a.Pod != targetPod && a.IsReady {
-			readyReplicas = append(readyReplicas, a.Pod)
-		}
-	}
-
+	// readyReplicas / verifyReplicas were resolved above per the primary vs trapped-
+	// authority path.
 	uid, gid := parseInt64(postgresUID), parseInt64(postgresGID)
 
 	walPod := &corev1.Pod{
@@ -206,7 +214,7 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 		DeleteTimeoutSec: cfg.DeleteTimeout,
 		// Go-driven: prune runs here while the helper holds the PVC.
 		OnPVCAcquired: func(ctx context.Context) error {
-			return w.pruneWALOnPVC(ctx, walPodName, ns, readyReplicas)
+			return w.pruneWALOnPVC(ctx, walPodName, ns, readyReplicas, verifyReplicas)
 		},
 	}); err != nil {
 		return nil, err
@@ -304,22 +312,60 @@ const (
 // the target's PVC. Every decision — the checkpoint boundary and the replica-LSN safety
 // gate (#23) — is made here in Go and is unit-testable via the exec hook; the helper pod
 // is a dumb `sleep infinity` exec target.
-func (w *cnpgPruner) pruneWALOnPVC(ctx context.Context, helperPod, ns string, readyReplicas []string) error {
-	// 1. Read the checkpoint REDO boundary from pg_controldata on the mounted PVC.
+func (w *cnpgPruner) pruneWALOnPVC(ctx context.Context, helperPod, ns string, readyReplicas []string, verifyReplicas bool) error {
+	// 1. Read the checkpoint REDO boundary from pg_controldata on the mounted PVC. This
+	//    is the TARGET's own boundary, so the deletion is always safe for the target's
+	//    own crash recovery, primary or not.
 	redoWAL, redoLSN, err := w.readCheckpointBoundary(ctx, helperPod, ns)
 	if err != nil {
 		return err
 	}
 	output.Success("Checkpoint REDO WAL file: %s (LSN %s)", redoWAL, redoLSN)
 
-	// 2. Safety gate (#23): no ready replica may lag behind the checkpoint. A replica
-	//    that still needs pre-checkpoint WAL would break if we delete those segments.
-	if err := w.assertReplicasCaughtUp(ctx, ns, readyReplicas, redoLSN); err != nil {
-		return err
+	// 2. Safety gate (#23), primary-target only: no ready replica may lag behind the
+	//    checkpoint — a replica that still needs pre-checkpoint WAL streams FROM the
+	//    primary and would break if those segments vanish. A trapped non-primary
+	//    authority (P3.4) has no downstream streamer (it is crash-looping), so this gate
+	//    is inapplicable and the own-REDO boundary from step 1 is the safety.
+	if verifyReplicas {
+		if err := w.assertReplicasCaughtUp(ctx, ns, readyReplicas, redoLSN); err != nil {
+			return err
+		}
+	} else {
+		output.Success("Non-primary authority relief: skipping the replica-caughtup gate " +
+			"(nothing streams from a crash-looping non-primary); deleting only WAL older than the target's own checkpoint REDO")
 	}
 
 	// 3. Delete WAL segments older than the checkpoint.
 	return w.deleteWALOlderThan(ctx, helperPod, ns, redoWAL)
+}
+
+// assertReliefEligible authorizes WAL relief on a NON-primary target (P3.4). It is only
+// for a trapped DATA AUTHORITY: the proven authority (or, in a divergence the operator
+// has adjudicated, a --force-designated survivor). A non-primary that is neither is a
+// disposable replica — the fix there is to re-clone it (`hasteward repair`), not to
+// prune its WAL — so this refuses, closing the door on pruning a node by mistake.
+func (w *cnpgPruner) assertReliefEligible(targetPod string, a *model.InstanceAssessment, tr *model.TriageResult) error {
+	dc := tr.DataComparison
+	isAuthority := dc.MostAdvanced == targetPod || a.Classification == model.ClassAuthoritative
+	switch {
+	case isAuthority:
+		common.WarnLog("P3.4: %s is a non-primary DATA AUTHORITY and not ready — relieving its OWN pre-checkpoint WAL "+
+			"so it can start for inspection/promotion. Only WAL older than its own checkpoint REDO is deleted; nothing streams from it.", targetPod)
+		return nil
+	case dc.Authority == model.AuthorityDiverged:
+		if !w.p.Config().Force {
+			return fmt.Errorf("ABORT: %s is not the primary and the cluster is DIVERGED (no single proven authority). "+
+				"If you have reviewed the divergence evidence and chosen %s as the surviving lineage, re-run with --force "+
+				"to relieve its WAL; otherwise escrow and inspect first", targetPod, targetPod)
+		}
+		common.WarnLog("force=true — relieving WAL on %s in a DIVERGED cluster (operator-designated survivor)", targetPod)
+		return nil
+	default:
+		return fmt.Errorf("ABORT: %s is not the primary and not the data authority (classification=%q). WAL relief for a "+
+			"non-primary is only for a trapped AUTHORITY — a disposable replica should be re-cloned (hasteward repair), not WAL-pruned",
+			targetPod, a.Classification)
+	}
 }
 
 // readCheckpointBoundary execs pg_controldata and parses the checkpoint REDO WAL file

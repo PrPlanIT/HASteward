@@ -83,6 +83,44 @@ func TestDiagnose_SafeAndUndeterminable(t *testing.T) {
 	}
 }
 
+// TestDiagnoseTrappedAuthority is the P3.4 urgent alarm: a data-bearing authority that
+// is not-ready on a full disk must be flagged with a WAL-relief remedy; a healthy or
+// non-authority node must not be.
+func TestDiagnoseTrappedAuthority(t *testing.T) {
+	cmp := model.DataComparison{MostAdvanced: "pg-2", Authority: model.AuthorityLeaderNotPrimary}
+
+	// Authority pg-2, not ready, disk_full → flagged with prune-wal relief on instance 2.
+	as := []model.InstanceAssessment{
+		{Pod: "pg-1", IsReady: true, Classification: model.ClassRecoverable},
+		{Pod: "pg-2", IsReady: false, Classification: model.ClassAuthoritative, CrashReason: "disk_full"},
+	}
+	d := diagnoseTrappedAuthority(cmp, as, "pg", "ns")
+	if d == nil || d.ID != "cnpg-authority-wal-trapped" || d.Target != "pg-2" {
+		t.Fatalf("trapped authority must be flagged targeting pg-2, got %+v", d)
+	}
+	if !strings.Contains(d.Remedy, "prune wal") || !strings.Contains(d.Remedy, "--instance 2") {
+		t.Fatalf("remedy must be WAL relief on instance 2, got %q", d.Remedy)
+	}
+
+	// ≥95% used counts too, even without a disk_full crash reason.
+	full := []model.InstanceAssessment{{Pod: "pg-2", IsReady: false, Classification: model.ClassAuthoritative,
+		Disk: &model.DiskStats{TotalBytes: 100, UsedPercent: 97}}}
+	if diagnoseTrappedAuthority(cmp, full, "pg", "ns") == nil {
+		t.Fatal("an authority at 97 percent used must be flagged")
+	}
+
+	// Not flagged: a disposable replica on a full disk (re-clone, not relieve), or a
+	// ready authority, or an authority with unknown disk.
+	none := []model.InstanceAssessment{
+		{Pod: "pg-1", IsReady: false, Classification: model.ClassDisposable, CrashReason: "disk_full"},
+		{Pod: "pg-2", IsReady: true, Classification: model.ClassAuthoritative, CrashReason: "disk_full"},
+		{Pod: "pg-3", IsReady: false, Classification: model.ClassAuthoritative}, // unknown disk
+	}
+	if d := diagnoseTrappedAuthority(model.DataComparison{}, none, "pg", "ns"); d != nil {
+		t.Fatalf("must not flag disposable/ready/unknown-disk nodes, got %+v", d)
+	}
+}
+
 // TestDiagnoseTimelineRewind is the P3.5 signal: a backwards fork (a restore/PITR to an
 // earlier LSN) must be flagged, while a healthy monotonic history (normal failovers) is
 // silent. Uses the boundary-postgres fork sequence — monotonic until TL9 forks at
