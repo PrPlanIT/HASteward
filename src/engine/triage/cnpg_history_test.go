@@ -93,6 +93,57 @@ func TestCnpgComparison_MultiRestoreForkLSN(t *testing.T) {
 	if !containsAny(cmp.SplitBrainDetails, "394.2 GB") || !containsAny(cmp.SplitBrainDetails, "8.6 GB") {
 		t.Fatalf("expected the TL8 (394.2 GB) and TL9 (8.6 GB) WAL-past-fork volumes, got %v", cmp.SplitBrainDetails)
 	}
+	// Part B: when a write ledger was sampled from the running primary, it rides along
+	// on the divergence so the churn-vs-real evidence is presented, not hand-gathered.
+	data.writeActivityDB = "boundary"
+	data.writeActivity = []string{
+		"job_run|900000|12|900000|3",
+		"server_controller|4500|4500|0|150",
+		"session|2|1|0|2",
+	}
+	cmp2 := cnpgCrossInstanceComparison(data, "boundary-postgres-3")
+	if !containsAny(cmp2.SplitBrainDetails, "db=boundary") ||
+		!containsAny(cmp2.SplitBrainDetails, "job_run") ||
+		!containsAny(cmp2.SplitBrainDetails, "session") {
+		t.Fatalf("divergence must carry the primary write ledger, got %v", cmp2.SplitBrainDetails)
+	}
+}
+
+func TestFormatWriteLedger(t *testing.T) {
+	// Nothing sampled → no section (caller omits it cleanly).
+	if got := formatWriteLedger(&cnpgTriageData{}); got != nil {
+		t.Fatalf("empty ledger must be nil, got %v", got)
+	}
+	d := &cnpgTriageData{writeActivityDB: "app", writeActivity: []string{
+		"job_run|900000|12|900000|3",
+		"malformed_row_no_pipes",
+	}}
+	got := formatWriteLedger(d)
+	if len(got) != 3 { // header + 2 rows
+		t.Fatalf("want header+2 rows, got %d: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "db=app") {
+		t.Fatalf("header must name the db, got %q", got[0])
+	}
+	if !strings.Contains(got[1], "job_run: ins=900000 upd=12 del=900000, live=3") {
+		t.Fatalf("row formatting wrong: %q", got[1])
+	}
+	if !strings.Contains(got[2], "malformed_row_no_pipes") {
+		t.Fatalf("malformed rows must pass through verbatim, got %q", got[2])
+	}
+}
+
+func TestIsSafeDBIdent(t *testing.T) {
+	for _, ok := range []string{"boundary", "app_1", "my-db", "A0"} {
+		if !isSafeDBIdent(ok) {
+			t.Errorf("%q should be safe", ok)
+		}
+	}
+	for _, bad := range []string{"", "db; DROP", "a b", "quote'd", strings.Repeat("x", 64)} {
+		if isSafeDBIdent(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
 }
 
 func TestFormatWALPastFork(t *testing.T) {

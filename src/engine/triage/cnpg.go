@@ -97,6 +97,8 @@ type cnpgTriageData struct {
 	crashReasons       map[string]string
 	walInfo            string
 	slotInfo           []string
+	writeActivityDB    string   // app DB the write ledger was sampled from
+	writeActivity      []string // top write-activity tables on the running primary
 }
 
 // cnpgProbeTarget identifies an instance whose PVC should be probed.
@@ -374,6 +376,7 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 	// WAL info
 	if data.primaryIsRunning {
 		t.collectWALInfo(ctx, data, currentPrimary, ns)
+		t.collectWriteActivity(ctx, data, currentPrimary, ns)
 	}
 
 	// Disk breakdown on running instances (fast path via exec).
@@ -484,6 +487,84 @@ func (t *cnpgTriage) collectWALInfo(ctx context.Context, data *cnpgTriageData, p
 	output.Section("WAL Info")
 	data.walInfo = strings.TrimSpace(result.Stdout)
 	output.Println(data.walInfo)
+}
+
+// collectWriteActivity samples the running primary's per-table write ledger — the
+// "churn vs real" evidence that turns a raw WAL-past-fork volume (Part A) into a
+// lineage judgement. During the boundary-postgres split-brain the stale branch had
+// GBs of WAL past the fork that was 100% job-scheduler/heartbeat churn (job_run,
+// server_controller, …) with ZERO business writes; that is invisible in the LSN delta
+// but obvious here. Best-effort and READ-ONLY: it queries the largest non-system DB's
+// pg_stat_user_tables and never classifies — surfacing the ledger is triage's job, the
+// operator weighs which tables are "real". Only the primary is queried (a replica's
+// counters just mirror replayed WAL); it is a diagnostic aid, not an authority input.
+func (t *cnpgTriage) collectWriteActivity(ctx context.Context, data *cnpgTriageData, primary, ns string) {
+	dbRes, err := k8s.ExecCommand(ctx, primary, ns, "postgres", []string{
+		"psql", "-U", "postgres", "-d", "postgres", "-t", "-A", "-c",
+		"SELECT datname FROM pg_database WHERE datname NOT IN ('template0','template1','postgres') " +
+			"AND datallowconn ORDER BY pg_database_size(datname) DESC LIMIT 1",
+	})
+	if err != nil {
+		return
+	}
+	db := strings.TrimSpace(dbRes.Stdout)
+	if db == "" || !isSafeDBIdent(db) {
+		return
+	}
+	res, err := k8s.ExecCommand(ctx, primary, ns, "postgres", []string{
+		"psql", "-U", "postgres", "-d", db, "-t", "-A", "-F", "|", "-c",
+		"SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup FROM pg_stat_user_tables " +
+			"WHERE n_tup_ins + n_tup_upd + n_tup_del > 0 " +
+			"ORDER BY n_tup_ins + n_tup_upd + n_tup_del DESC LIMIT 10",
+	})
+	if err != nil {
+		return
+	}
+	data.writeActivityDB = db
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if strings.TrimSpace(line) != "" {
+			data.writeActivity = append(data.writeActivity, strings.TrimSpace(line))
+		}
+	}
+}
+
+// isSafeDBIdent guards the DB name (from pg_database, but interpolated into the exec
+// argv) to a conservative identifier charset — belt-and-suspenders against an oddly
+// named database, never a data check.
+func isSafeDBIdent(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// formatWriteLedger turns the collected pg_stat_user_tables rows into human lines for
+// the divergence guidance. Returns nil when nothing was sampled (primary down /
+// unreadable / no writes) so callers simply omit the section.
+func formatWriteLedger(data *cnpgTriageData) []string {
+	if len(data.writeActivity) == 0 {
+		return nil
+	}
+	out := []string{fmt.Sprintf("Write activity on the running primary (db=%s), top tables by ins+upd+del — "+
+		"weigh CHURN (schedulers/heartbeats/queues) vs REAL business writes when choosing the lineage:", data.writeActivityDB)}
+	for _, row := range data.writeActivity {
+		p := strings.Split(row, "|")
+		if len(p) < 4 {
+			out = append(out, "  "+row)
+			continue
+		}
+		live := ""
+		if len(p) >= 5 {
+			live = ", live=" + p[4]
+		}
+		out = append(out, fmt.Sprintf("  %s: ins=%s upd=%s del=%s%s", p[0], p[1], p[2], p[3], live))
+	}
+	return out
 }
 
 // runPVCProbes creates ephemeral probe pods to read pg_controldata from PVCs
@@ -748,6 +829,16 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 		outcome = model.AuthorityUndeterminable
 		splitBrain = append(splitBrain, "no instance holds readable data (all provably empty)")
 	}
+
+	// On a contested lineage (divergence, or an authority that is NOT the primary) the
+	// operator has to CHOOSE which branch survives. Attach the running primary's
+	// write-activity ledger so the churn-vs-real evidence rides alongside the WAL-volume
+	// numbers instead of having to be gathered by hand. Diagnostic only — best-effort,
+	// omitted when nothing was sampled.
+	if outcome == model.AuthorityDiverged || outcome == model.AuthorityLeaderNotPrimary {
+		splitBrain = append(splitBrain, formatWriteLedger(data)...)
+	}
+
 	var maVal int64
 	var maLSN string
 	for _, in := range inputs {
