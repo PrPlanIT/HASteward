@@ -723,6 +723,7 @@ func (t *cnpgTriage) Analyze(_ context.Context) (*model.TriageResult, error) {
 		result.RecommendedDonor = "none"
 	}
 	result.Recovery = deriveRecovery(assessments, comparison, currentPrimary, result.ClusterPhase, data.primaryIsRunning)
+	result.Diagnoses = t.diagnose(comparison, assessments, currentPrimary)
 
 	// Display
 	t.triageDisplay(data, result)
@@ -854,6 +855,98 @@ func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model
 	cmp := newAuthorityComparison(outcome, mostAdvanced, maVal, splitBrain, okMsg)
 	cmp.CheckpointLocation = maLSN
 	return cmp
+}
+
+// diagnose is CNPG triage's catalog of recognized authority-recovery conditions —
+// the P3.2 counterpart to Galera's diagnose(). It turns the two "the repair engine
+// can't just heal" authority outcomes into a NAMED condition with an ordered,
+// escrow-first recovery plan, so a leader-not-primary / diverged cluster gets a
+// concrete path to recovery instead of only a "refusing to heal" banner. It never
+// mutates and never guesses: it prescribes the safe sequence a human/operator drives,
+// because promoting a divergent authority cannot be done safely by any single CNPG
+// command (booked as P3.2b). Empty when the heal is safe / undeterminable.
+func (t *cnpgTriage) diagnose(comparison model.DataComparison, assessments []model.InstanceAssessment, primaryName string) []model.Diagnosis {
+	cfg := t.p.Config()
+	switch comparison.Authority {
+	case model.AuthorityLeaderNotPrimary:
+		authority := comparison.MostAdvanced
+		return []model.Diagnosis{{
+			ID: "cnpg-authority-not-primary",
+			Summary: fmt.Sprintf("The data authority is %s (a replica), not the primary %s — recovery is to rebuild "+
+				"the cluster AROUND %s, never to heal from the primary", authority, primaryName, authority),
+			Detail: fmt.Sprintf("CNPG's normal heal clones replicas FROM the primary. Here the newest committed data is on "+
+				"%s while the primary %s is an older/stale lineage, so a normal heal — or a --force targeted heal of %s — "+
+				"would rm -rf the authority's pgdata and re-clone the stale data over it, DESTROYING the newest data. "+
+				"Repair now refuses to heal the authority even with --force. Recovery, in order:\n%s",
+				authority, primaryName, authority, cnpgRebuildAroundAuthoritySteps(cfg.ClusterName, cfg.Namespace, authority, assessments)),
+			Remedy: cnpgAuthorityFirstStep(cfg.ClusterName, cfg.Namespace, authority, assessments),
+			Target: authority,
+		}}
+	case model.AuthorityDiverged:
+		return []model.Diagnosis{{
+			ID: "cnpg-split-brain-diverged",
+			Summary: "Committed data exists on more than one lineage past a shared fork — no automatic winner; " +
+				"a human must choose the surviving lineage",
+			Detail: "No instance is a safe authority. Review the divergence evidence in the authority verdict above — " +
+				"the per-branch WAL-past-fork volume and the primary's write-activity ledger (churn vs real business writes) — " +
+				"then ESCROW every instance before touching anything. Once you have chosen the surviving instance X, rebuild " +
+				"the cluster AROUND X with the same ordered steps as `cnpg-authority-not-primary` (escrow → relieve → promote " +
+				"X → heal the rest). HASteward will not choose for you: picking the wrong lineage is unrecoverable.",
+			Remedy: fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow ALL before any mutation", cfg.ClusterName, cfg.Namespace),
+		}}
+	default:
+		return nil
+	}
+}
+
+// cnpgRebuildAroundAuthoritySteps renders the ordered, escrow-first recovery plan for
+// making a non-primary authority the cluster's source of truth. It prescribes only
+// safe HASteward primitives (escrow, prune wal, the standard heal-from-primary once the
+// authority IS primary); the promotion itself is flagged as the manual step HASteward
+// does not yet automate (P3.2b) rather than glossed over.
+func cnpgRebuildAroundAuthoritySteps(cluster, ns, authority string, assessments []model.InstanceAssessment) string {
+	relief := ""
+	if authorityIsDiskConstrained(authority, assessments) {
+		relief = fmt.Sprintf(" (it is disk-full/crash-looping — relieve WAL first: "+
+			"`hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run`)", cluster, ns, cnpgOrdinal(authority))
+	}
+	return fmt.Sprintf(
+		"  1. Escrow every instance (reversible) before touching anything: hasteward backup -e cnpg -c %s -n %s\n"+
+			"  2. Bring the authority %s up Ready and inspect it%s\n"+
+			"  3. Make %s the primary. CNPG has no single safe command to promote a divergent/behind replica; do this "+
+			"deliberately (switchover only if the topology is healthy, otherwise a rebuild-based promotion) — HASteward "+
+			"does not yet automate this step.\n"+
+			"  4. Once %s is the primary, rebuild the stale ex-primary and replicas FROM it: hasteward repair -e cnpg -c %s -n %s",
+		cluster, ns, authority, relief, authority, authority, cluster, ns)
+}
+
+// cnpgAuthorityFirstStep is the single safe command to run first: relieve the authority
+// if it is wedged on disk, otherwise escrow. Kept surgical so the Remedy field is one
+// actionable, --dry-run-able line.
+func cnpgAuthorityFirstStep(cluster, ns, authority string, assessments []model.InstanceAssessment) string {
+	if authorityIsDiskConstrained(authority, assessments) {
+		return fmt.Sprintf("hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run   # relieve the wedged authority first",
+			cluster, ns, cnpgOrdinal(authority))
+	}
+	return fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow the authority before any promotion", cluster, ns)
+}
+
+// authorityIsDiskConstrained reports whether the authority instance is stuck on disk
+// (disk_full crash, or a PVC ≥95% used) — the case that must be relieved before it can
+// be brought up. Conservative: unknown disk → false (do not fabricate a relief step).
+func authorityIsDiskConstrained(authority string, assessments []model.InstanceAssessment) bool {
+	for _, a := range assessments {
+		if a.Pod != authority {
+			continue
+		}
+		if a.CrashReason == "disk_full" {
+			return true
+		}
+		if a.Disk != nil && a.Disk.TotalBytes > 0 && a.Disk.UsedPercent >= 95 {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.DataComparison,
@@ -1168,6 +1261,8 @@ func (t *cnpgTriage) triageDisplay(data *cnpgTriageData, result *model.TriageRes
 	if healCount > 0 {
 		output.SuggestedCommands("cnpg", t.p.Config().ClusterName, t.p.Config().Namespace)
 	}
+
+	renderDiagnoses(result.Diagnoses)
 }
 
 // --- Helpers ---

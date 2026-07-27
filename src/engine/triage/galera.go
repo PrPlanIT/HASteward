@@ -996,20 +996,7 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 		output.SuggestedCommands("galera", t.p.Config().ClusterName, t.p.Config().Namespace)
 	}
 
-	for _, d := range result.Diagnoses {
-		output.Println()
-		output.Section("DIAGNOSIS: " + d.ID)
-		output.Println(d.Summary)
-		if d.Detail != "" {
-			output.Println(d.Detail)
-		}
-		if d.Target != "" {
-			output.Field("Remediation target", d.Target)
-		}
-		if d.Remedy != "" {
-			output.Field("Remedy", d.Remedy)
-		}
-	}
+	renderDiagnoses(result.Diagnoses)
 
 	if data.allNodesDown {
 		output.Println()

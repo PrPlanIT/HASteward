@@ -156,6 +156,24 @@ func (r *cnpgRepair) planTargeted(ctx context.Context, result *model.TriageResul
 		return nil, fmt.Errorf("ABORT: %s is the PRIMARY. Cannot heal primary. Use switchover first", targetPod)
 	}
 
+	// Fail-closed AUTHORITY guard (P3.2). Healing fences the target and rm -rf's its
+	// pgdata, then re-clones from the PRIMARY. When triage names this target the data
+	// AUTHORITY while the heal is unsafe — the winning lineage is on a replica, not the
+	// primary (leader_not_primary), or a contested/undeterminable lineage — cloning the
+	// primary over it paper-shreds the newest data. This is the exact "node nuked while
+	// holding the most valid data" failure the authority determination exists to
+	// prevent, so --force MUST NOT reach it: --force may override "looks healthy enough",
+	// never "destroy the authority". Recovery is to rebuild the cluster AROUND the
+	// authority (see the recovery plan in `hasteward triage`), not to heal it away.
+	if !result.DataComparison.SafeToHeal && result.DataComparison.MostAdvanced != "" &&
+		targetPod == result.DataComparison.MostAdvanced {
+		return nil, fmt.Errorf("REFUSING to heal %s: triage identifies it as the DATA AUTHORITY (authority=%s), "+
+			"not a disposable replica. Healing would rm -rf its pgdata and re-clone from the primary, DESTROYING "+
+			"the newest data — --force cannot override this. To recover, rebuild the cluster AROUND %s "+
+			"(escrow → relieve → promote the authority → heal the rest); run `hasteward triage -e cnpg -c %s -n %s` "+
+			"for the ordered recovery plan", targetPod, result.DataComparison.Authority, targetPod, cfg.ClusterName, cfg.Namespace)
+	}
+
 	// Find target assessment
 	var targetAssessment *model.InstanceAssessment
 	for i := range result.Assessments {
