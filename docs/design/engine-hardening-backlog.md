@@ -92,3 +92,17 @@ Original description:
 | `reconfigure/galera.go:588` runHelperPod | grastate script | ✗ | Succeeded | partial (err-string match) | ok | 150s hard |
 
 `restore/{cnpg,galera}.go` create no pods (delete + let the operator re-clone).
+
+---
+
+## P3 — design gaps exposed by the boundary-postgres recovery (2026-07-26)
+
+A real CNPG split-brain (stale-restore primary on TL9 vs golden crash-looping replica on TL8, forked at `2C/99`). Detection worked (refused correctly); the gaps are in *resolving* and *recovering*.
+
+- **P3.1 — triage detects divergence but doesn't help RESOLVE it.** ⏳ IN PROGRESS. It says "diverged, choose manually" and stops; the evidence that actually made the call (WAL volume past the fork per branch — 423 GB vs 9 GB — and "TL9's writes are 100% job-scheduler + heartbeat churn, no sessions/config") was gathered by hand. Triage should surface it. **Part A (done): per-branch WAL volume past the fork in the divergence message.** Part B (follow-up): for readable/running nodes, a write-activity ledger (top pg_stat_user_tables) so the operator sees churn vs real — needs a SQL collect step + is app-nuanced (surface, don't classify).
+- **P3.2 — recovery assumes primary = authority.** repair/heal/breaker all clone replicas FROM the primary; `--unwedge` clears disposables and keeps the primary. When the authority is a crash-looping REPLICA and the primary is the stale lineage (this case), there is NO clean "promote the replica, rebuild the primary from it" flow. The `leader_not_primary` outcome is DETECTED but the repair engine can't act on it. Highest-value recovery gap.
+- **P3.3 — no restore-regression guard.** A restore/heal that rewinds BEHIND live data (what created `-3`/TL9 from an old `2C/99` point) should refuse/warn — the authority principle applied to restore TARGETS, not just heals.
+- **P3.4 — a stuck authority isn't auto-relieved.** The golden `-2` crash-looped on disk-full WAL for days (data at risk) while `prunewal` (the fix) is manual and oriented at non-authority nodes. Triage/repair should prioritize WAL relief for a data-bearing / candidate-authority node stuck on disk-full.
+- **P3.5 — no pathological-history / restore-loop health signal.** boundary-postgres has 9 timelines with a non-monotonic rewind — a screaming sign of an unhealthy recovery process. Flag it proactively (N timelines + a detected rewind) instead of silently coping.
+
+Causality note: no proof hasteward caused the TL9 rewind (cluster bootstraps `initdb`, no backup configured → CNPG can't auto-restore; the rewind was manual/tool-driven; hasteward's old highest-timeline bug *could* have misguided a prior recovery but unconfirmed). The current shred-pressure on `-2` is CNPG's normal reconcile, not hasteward.

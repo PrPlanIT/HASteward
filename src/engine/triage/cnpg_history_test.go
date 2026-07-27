@@ -85,4 +85,33 @@ func TestCnpgComparison_MultiRestoreForkLSN(t *testing.T) {
 	if containsAny(cmp.SplitBrainDetails, "11/840000A0") {
 		t.Fatalf("11/840000A0 is the concatenation artifact and must NOT be the reported fork: %v", cmp.SplitBrainDetails)
 	}
+	// #1: the per-branch WAL volume past the fork must be surfaced to inform the
+	// manual lineage choice — TL8 (golden, ~394 GiB past fork) vs TL9 (~8.6 GiB).
+	if !containsAny(cmp.SplitBrainDetails, "WAL past fork") {
+		t.Fatalf("divergence must surface per-branch WAL-past-fork volume, got %v", cmp.SplitBrainDetails)
+	}
+	if !containsAny(cmp.SplitBrainDetails, "394.2 GB") || !containsAny(cmp.SplitBrainDetails, "8.6 GB") {
+		t.Fatalf("expected the TL8 (394.2 GB) and TL9 (8.6 GB) WAL-past-fork volumes, got %v", cmp.SplitBrainDetails)
+	}
+}
+
+func TestFormatWALPastFork(t *testing.T) {
+	cases := []struct {
+		ckpt, fork int64
+		want       string
+	}{
+		{2 << 30, 0, "2.0 GB"},
+		{5 << 20, 0, "5.0 MB"},
+		{3 << 10, 0, "3.0 KB"},
+		{512, 0, "512 B"},
+		{100, 100, "0 B"},  // at the fork — dataless branch
+		{50, 100, "0 B"},   // behind the fork — clamp to 0
+		{lsn("8F/25000028"), lsn("2C/99000000"), "394.2 GB"},
+		{lsn("2E/BE000070"), lsn("2C/99000000"), "8.6 GB"},
+	}
+	for _, c := range cases {
+		if got := formatWALPastFork(c.ckpt, c.fork); got != c.want {
+			t.Errorf("formatWALPastFork(%d,%d) = %q, want %q", c.ckpt, c.fork, got, c.want)
+		}
+	}
 }

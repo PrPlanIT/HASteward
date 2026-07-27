@@ -366,11 +366,34 @@ func pickLeader(cands []authorityInput) authorityInput {
 
 func describeDivergence(a, b authorityInput, forkLSN int64) string {
 	return fmt.Sprintf(
-		"%s (timeline %d, checkpoint %s) and %s (timeline %d, checkpoint %s) both hold committed WAL past their shared fork at %s — "+
-			"no instance is a safe authority; escrow BOTH and choose the surviving lineage manually",
-		a.Pod, a.Timeline, formatLSN(a.CheckpointLSN),
-		b.Pod, b.Timeline, formatLSN(b.CheckpointLSN),
+		"%s (timeline %d, checkpoint %s, %s WAL past fork) and %s (timeline %d, checkpoint %s, %s WAL past fork) "+
+			"both hold committed WAL past their shared fork at %s — no instance is a safe authority; escrow BOTH and "+
+			"choose the surviving lineage manually. NOTE: WAL volume is how much each branch WROTE, not how much it "+
+			"matters — a stale restore left idle still accrues WAL (checkpoints, heartbeats), so weigh the CONTENT, "+
+			"not just the size.",
+		a.Pod, a.Timeline, formatLSN(a.CheckpointLSN), formatWALPastFork(a.CheckpointLSN, forkLSN),
+		b.Pod, b.Timeline, formatLSN(b.CheckpointLSN), formatWALPastFork(b.CheckpointLSN, forkLSN),
 		formatLSN(forkLSN))
+}
+
+// formatWALPastFork renders how much WAL an instance wrote past the fork
+// (checkpoint − fork), the quantitative "how far did this branch diverge" signal the
+// operator needs to weigh the lineages. A negative delta (checkpoint at/behind the
+// fork — a dataless branch) renders "0 B".
+func formatWALPastFork(checkpointLSN, forkLSN int64) string {
+	d := checkpointLSN - forkLSN
+	switch {
+	case d <= 0:
+		return "0 B"
+	case d >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(d)/(1<<30))
+	case d >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(d)/(1<<20))
+	case d >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(d)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", d)
+	}
 }
 
 // formatLSN renders a parsed LSN back to PostgreSQL's HEX/HEX form for messages.
