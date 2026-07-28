@@ -245,6 +245,7 @@ Heal unhealthy database instances
 |------|------|---------|-------------|
 | `--donor`, `-d` | `string` | `` | Explicit donor instance ordinal (declares authoritative source for repair) |
 | `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
+| `--promote` | `bool` | `false` | CNPG rebuild-around-authority: escrow the cluster + persist a proof + print the swap runbook to promote --instance N when the authority is not the primary. Use --dry-run first. |
 | `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
 | `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
 
