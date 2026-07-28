@@ -578,13 +578,7 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 		nodes[pod] = true
 	}
 	for pod := range nodes {
-		if rr, ok := data.wsrepRecovered[pod]; ok && rr.Valid {
-			addUUID(rr.UUID)
-		} else if ws := data.wsrepMap[pod]; ws != nil && ws.ClusterStateUUID != "" {
-			addUUID(ws.ClusterStateUUID)
-		} else {
-			addUUID(grastateUUIDFor(data.grastateData, pod))
-		}
+		addUUID(nodeCanonicalUUID(data, pod))
 	}
 	// HINT-only UUID sources — the operator's galeraRecovery snapshot and mariadbd-
 	// log scrapes — go STALE. Observed on osticket while perfectly healthy: the
@@ -641,35 +635,59 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 		}
 	}
 
-	// FAIL-CLOSED: any node whose position could not be determined makes the
-	// authority undeterminable. We must NEVER pick a bootstrap target while
-	// blind to a node — it may hold the most-advanced (or a divergent) history,
-	// and bootstrapping past it silently discards committed transactions. This
-	// is the safety net that turns "no evidence of a problem" into "prove it's
-	// safe" — the default must be closed, not open.
-	// Divergence evidence (multiple UUIDs, non-Primary component, a higher seqno
-	// outside the primary) accumulated above — captured before the unread check so the
-	// shared outcome can distinguish "diverged" from "undeterminable".
+	// FAIL-CLOSED: a node whose position could not be read normally makes the authority
+	// undeterminable — blind to it, it MIGHT hold the most-advanced (or a divergent)
+	// history, and bootstrapping past it would silently discard committed transactions.
+	// Divergence evidence (multiple UUIDs, non-Primary component, a higher seqno outside
+	// the primary) accumulated above — captured before the unread check so the shared
+	// outcome can distinguish "diverged" from "undeterminable".
 	divergent := len(splitBrain) > 0
 
-	var unread []string
-	for _, gs := range data.grastateData {
-		if es, ok := data.effectiveSeqnos[gs.Pod]; !ok || !es.Known {
-			unread = append(unread, gs.Pod)
+	// The one case where an unread node is NOT a blocker: a live Synced Primary quorum
+	// exists and the unread node is on the SAME cluster lineage (its canonical UUID
+	// equals the quorum's). Galera guarantees a majority Primary component holds the
+	// authoritative, most-advanced state, and a node that has been DOWN cannot have
+	// committed past that majority (a minority cannot certify a write) — so a same-lineage
+	// unread node is provably BEHIND the quorum: recoverable by SST, not an authority
+	// blocker. We still fail closed on a node we cannot place on the quorum's lineage: no
+	// live quorum at all, or an unknown/foreign UUID.
+	quorumUUID := ""
+	for _, pm := range data.primaryMembers {
+		if u := nodeCanonicalUUID(data, pm); u != "" && u != "unknown" && u != provider.ZeroUUID {
+			quorumUUID = u
+			break
 		}
 	}
-	if len(unread) > 0 {
+
+	// Reclassify unread → recoverable ONLY in a CLEAN quorum (no divergence evidence): a
+	// live Primary majority, one lineage, with no node ahead of it. If any divergence is
+	// already suspected the quorum is not safely authoritative, so an unread node must
+	// still block — unread dominates divergence, exactly as before.
+	cleanQuorum := !divergent && quorumUUID != ""
+	var unreadBlocking, recoverable []string
+	for _, gs := range data.grastateData {
+		if es, ok := data.effectiveSeqnos[gs.Pod]; ok && es.Known {
+			continue // position was read — not unread
+		}
+		if cleanQuorum && nodeCanonicalUUID(data, gs.Pod) == quorumUUID {
+			recoverable = append(recoverable, gs.Pod)
+		} else {
+			unreadBlocking = append(unreadBlocking, gs.Pod)
+		}
+	}
+	if len(unreadBlocking) > 0 {
 		splitBrain = append(splitBrain,
-			"UNREAD SEQNO — authority undeterminable for: "+strings.Join(unread, ", ")+
+			"UNREAD SEQNO — authority undeterminable for: "+strings.Join(unreadBlocking, ", ")+
 				" (fence + --wsrep-recover required before ANY bootstrap)")
 	}
 
-	// The authority verdict. An unread node dominates (it must be recovered before
-	// anything can be proven); otherwise divergence evidence makes it diverged;
-	// otherwise the authority is provable.
+	// The authority verdict. A node we cannot place on the quorum's lineage dominates (it
+	// must be recovered before anything can be proven); otherwise divergence evidence
+	// makes it diverged; otherwise the authority is provable — including when the only
+	// unread nodes are same-lineage laggards behind a live Primary quorum.
 	outcome := model.AuthorityProvable
 	switch {
-	case len(unread) > 0:
+	case len(unreadBlocking) > 0:
 		outcome = model.AuthorityUndeterminable
 	case divergent:
 		outcome = model.AuthorityDiverged
@@ -686,7 +704,27 @@ func (t *galeraTriage) crossInstanceComparison(data *galeraTriageData) model.Dat
 	cmp := newAuthorityComparison(outcome, data.bestSeqnoNode, data.bestSeqnoValue, splitBrain, okMsg)
 	cmp.PrimaryMembers = data.primaryMembers
 	cmp.BestPrimarySeqno = bestPrimarySeqno
+	if len(recoverable) > 0 {
+		cmp.Warnings = append(cmp.Warnings, fmt.Sprintf(
+			"%s behind the Primary quorum on the same lineage (uuid %s) — recoverable by SST, not an authority blocker",
+			strings.Join(recoverable, ", "), quorumUUID))
+	}
 	return cmp
+}
+
+// nodeCanonicalUUID returns a node's single most-authoritative cluster UUID, by the same
+// precedence the divergence check uses: a fresh fenced wsrep_recover, then the live
+// wsrep_cluster_state_uuid, then on-disk grastate.dat. Empty / "unknown" when none is
+// known. Using the LIVE cluster_state_uuid for a running (primary) member avoids a
+// zeroed/stale grastate on disk contradicting the node's real lineage.
+func nodeCanonicalUUID(data *galeraTriageData, pod string) string {
+	if rr, ok := data.wsrepRecovered[pod]; ok && rr.Valid {
+		return rr.UUID
+	}
+	if ws := data.wsrepMap[pod]; ws != nil && ws.ClusterStateUUID != "" {
+		return ws.ClusterStateUUID
+	}
+	return grastateUUIDFor(data.grastateData, pod)
 }
 
 func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *model.DataComparison) []model.InstanceAssessment {
@@ -749,8 +787,15 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 				notes = append(notes, fmt.Sprintf("AHEAD OF PRIMARY COMPONENT (seqno %d > %d)", nodeSeqno, bestPrimarySeqno))
 				recommendation = "MANUAL REVIEW REQUIRED. This node has data ahead of the primary component. Do NOT heal without understanding the data state."
 			} else if !hasData {
-				notes = append(notes, "NO DATA - cannot assess during split-brain")
-				recommendation = "MANUAL REVIEW REQUIRED. Cannot determine this node state. Resolve split-brain first."
+				notes = append(notes, "NO DATA - cannot assess while authority is unresolved")
+				recommendation = "MANUAL REVIEW REQUIRED. Cannot determine this node state. Resolve the authority first."
+			} else if comparison.Authority == model.AuthorityUndeterminable {
+				// Undeterminable ≠ split-brain: a node's position is unread (and it is not a
+				// same-lineage laggard behind a live quorum), so authority cannot be proven —
+				// but no divergence has been established. Say exactly that.
+				notes = append(notes, "authority undeterminable — a node's position is unread")
+				recommendation = fmt.Sprintf("MANUAL REVIEW REQUIRED. A node's position could not be read, so authority is "+
+					"undeterminable. Bring every node up for inspection (fence + --wsrep-recover) before healing.\n\n  %s --force", healCmd)
 			} else {
 				notes = append(notes, "split-brain detected in cluster")
 				recommendation = fmt.Sprintf("MANUAL REVIEW REQUIRED. Split-brain detected. Resolve before healing.\n\n  %s --force", healCmd)

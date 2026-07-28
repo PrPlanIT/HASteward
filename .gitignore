@@ -8,3 +8,6 @@ hasteward
 .stagefreight/*
 !.stagefreight/badges/
 site/
+
+# locally-built binary (never commit)
+hasteward-bin
