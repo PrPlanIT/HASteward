@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/engine"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
+	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
@@ -87,6 +89,15 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 		return nil, fmt.Errorf("primary pod %s is not running and ready", primary)
 	}
 
+	// P3.3 restore-regression guard — the authority principle applied to restore TARGETS.
+	// A dump restore OVERWRITES the live primary and then re-clones replicas from it, so
+	// it can silently discard newer/committed data (the class of event that rewound
+	// boundary-postgres onto a stale lineage). Refuse or require explicit intent BEFORE
+	// any destructive step.
+	if err := r.guardRestoreRegression(ctx, primary, snapshotID); err != nil {
+		return nil, err
+	}
+
 	// Get replica instance names (non-primary)
 	var replicas []string
 	if names := k8s.GetNestedSlice(r.p.Cluster(), "status", "instanceNames"); names != nil {
@@ -160,6 +171,67 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 		SnapshotID: snapshotID,
 		Duration:   time.Since(start),
 	}, nil
+}
+
+// guardRestoreRegression runs triage and applies the restore-regression decision. It
+// runs before any destructive step so a refusal changes nothing. Triage failing is
+// itself fatal here: restoring blind is exactly what the guard exists to prevent.
+func (r *cnpgRestore) guardRestoreRegression(ctx context.Context, primary, snapshotID string) error {
+	t, err := triage.Get(r.p)
+	if err != nil {
+		return fmt.Errorf("restore-regression guard: triage init failed: %w", err)
+	}
+	tr, err := triage.Run(ctx, t, engine.NopSink{})
+	if err != nil {
+		return fmt.Errorf("restore-regression guard: triage failed — refusing to restore blind: %w", err)
+	}
+	return restoreRegressionDecision(tr, primary, snapshotID, r.p.Config())
+}
+
+// restoreRegressionDecision is the pure guard: given the current triage verdict, decide
+// whether overwriting `primary` with `snapshotID` is safe. It mirrors the repair
+// authority guard so restore cannot do what repair refuses to:
+//   - leader_not_primary → HARD REFUSE (the newest data is on a replica; restoring into
+//     the primary would re-clone it away). --force cannot override.
+//   - diverged → refuse unless --force (the operator must have adjudicated the survivor).
+//   - otherwise (provable primary / undeterminable) → still a REWIND of live committed
+//     data; require --force and warn.
+func restoreRegressionDecision(tr *model.TriageResult, primary, snapshotID string, cfg *common.Config) error {
+	dc := tr.DataComparison
+	force := cfg.Force
+	var pTL int64
+	pLSN := "unknown"
+	for _, a := range tr.Assessments {
+		if a.Pod == primary {
+			pTL, pLSN = a.Timeline, a.LSN
+			break
+		}
+	}
+
+	switch dc.Authority {
+	case model.AuthorityLeaderNotPrimary:
+		return fmt.Errorf("REFUSING to restore into %s: triage proves the newest committed data is on %s, NOT the "+
+			"primary (authority=leader_not_primary). A dump restore into the primary would then re-clone that data away, "+
+			"DESTROYING the real authority — --force cannot override this. Rebuild the cluster AROUND the authority instead "+
+			"(run `hasteward triage -e cnpg -c %s -n %s` for the plan)", primary, dc.MostAdvanced, cfg.ClusterName, cfg.Namespace)
+	case model.AuthorityDiverged:
+		if !force {
+			return fmt.Errorf("REFUSING to restore into %s: the cluster is DIVERGED — committed data exists on more than "+
+				"one lineage. Restoring blindly picks one lineage and discards the others. Escrow every instance and choose the "+
+				"survivor first; then re-run with --force if you intend to overwrite %s with snapshot %s",
+				primary, primary, snapshotID)
+		}
+		common.WarnLog("force=true — restoring into a DIVERGED cluster; overwriting %s with snapshot %s (other lineages will be lost)", primary, snapshotID)
+	default:
+		if !force {
+			return fmt.Errorf("ABORT: restore OVERWRITES the live data on %s (timeline %d, LSN %s) with snapshot %s — this "+
+				"is a REWIND and any newer committed data is discarded. Back up the current data first "+
+				"(hasteward backup -e cnpg -c %s -n %s), then re-run with --force to proceed",
+				primary, pTL, pLSN, snapshotID, cfg.ClusterName, cfg.Namespace)
+		}
+		common.WarnLog("force=true — restore overwriting live data on %s (timeline %d, LSN %s) with snapshot %s (a rewind)", primary, pTL, pLSN, snapshotID)
+	}
+	return nil
 }
 
 func (r *cnpgRestore) unfenceAll(ctx context.Context, ns string) {
