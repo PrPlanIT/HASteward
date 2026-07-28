@@ -153,6 +153,12 @@ func ResolveDonor(cmd *cobra.Command) error {
 func PreRun(cmd *cobra.Command, mode string) (provider.EngineProvider, error) {
 	Cfg.Mode = mode
 
+	// Populate --dry-run ONCE, here, for every command that goes through PreRun — so no
+	// individual command can forget to wire it (the trap that let prune-wal ignore
+	// --dry-run and silently mutate). Each mutating engine is responsible for honoring
+	// Cfg.DryRun by stopping before its first mutation.
+	Cfg.DryRun = IsDryRun()
+
 	debug, _ := cmd.Flags().GetBool("debug")
 	if Cfg.Verbose || debug {
 		os.Setenv(common.EnvPrefix+"LOG_LEVEL", "debug")

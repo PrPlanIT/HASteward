@@ -46,7 +46,6 @@ func runPruneWAL(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	Cfg.DryRun = IsDryRun()
 
 	prov, err := PreRun(cmd, "prune-wal")
 	if err != nil {

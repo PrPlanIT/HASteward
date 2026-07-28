@@ -73,6 +73,13 @@ func (r *galeraRestore) restoreDump(ctx context.Context) (*model.RestoreResult, 
 	output.Field("Target", target)
 	output.Field("Repository", cfg.BackupsPath)
 
+	if cfg.DryRun {
+		output.Info("DRY RUN: would stream snapshot %s into %s via `mysql -u root` (OVERWRITING its data); "+
+			"Galera then propagates it to the other nodes. No changes made.", snapshotID, target)
+		return &model.RestoreResult{Engine: r.p.Name(), Cluster: model.ObjectRef{Namespace: ns, Name: cfg.ClusterName},
+			SnapshotID: snapshotID, Duration: time.Since(start)}, nil
+	}
+
 	// Set up pipe: restic dump -> pipe -> mysql stdin
 	pr, pw := io.Pipe()
 

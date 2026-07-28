@@ -67,6 +67,11 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	dir := filepath.Dir(self)
 
+	if IsDryRun() {
+		fmt.Fprintf(os.Stdout, "DRY RUN: would pull %s and atomically replace %s with the binary inside it. No changes made.\n", ref, self)
+		return nil
+	}
+
 	// The staged binary must land in the SAME directory (atomic rename needs the same
 	// filesystem), and being able to create it there proves we can replace the target.
 	staged := filepath.Join(dir, ".hasteward.update")

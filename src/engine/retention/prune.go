@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 	"github.com/PrPlanIT/HASteward/src/restic"
 )
@@ -30,6 +31,12 @@ func runPrune(ctx context.Context, cfg *common.Config, engine string, opts Prune
 
 	common.InfoLog("Applying retention policy (type=%s): keep-last=%d keep-daily=%d keep-weekly=%d keep-monthly=%d",
 		opts.Type, policy.KeepLast, policy.KeepDaily, policy.KeepWeekly, policy.KeepMonthly)
+
+	if cfg.DryRun {
+		output.Info("DRY RUN: would apply the retention policy above (type=%s) to %s and FORGET snapshots beyond it. "+
+			"No snapshots removed.", opts.Type, cfg.BackupsPath)
+		return &model.PruneResult{}, nil
+	}
 
 	totalKeep := 0
 	totalRemove := 0

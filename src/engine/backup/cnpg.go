@@ -80,6 +80,13 @@ func (b *cnpgBackup) BackupDump(ctx context.Context, backupType, donor, stdinFil
 		return nil, fmt.Errorf("donor pod %s is not running and ready", donor)
 	}
 
+	if cfg.DryRun {
+		output.Info("DRY RUN: would dump %s from %s and write a %q snapshot to %s. No changes made.",
+			stdinFilename, donor, backupType, cfg.BackupsPath)
+		return &model.BackupResult{Engine: b.Name(), Cluster: model.ObjectRef{Namespace: ns, Name: cfg.ClusterName},
+			Repository: cfg.BackupsPath, Duration: time.Since(start)}, nil
+	}
+
 	// Initialize restic repo (idempotent)
 	rc := b.newResticClient()
 	if err := rc.Init(ctx); err != nil {
@@ -150,6 +157,13 @@ func (b *cnpgBackup) backupNative(ctx context.Context) (*model.BackupResult, err
 	output.Field("Backup CR", backupName)
 	output.Field("Cluster", cfg.ClusterName)
 	output.Field("Method", "barmanObjectStore")
+
+	if cfg.DryRun {
+		output.Info("DRY RUN: would create Backup CR %s (method barmanObjectStore) for cluster %s. No changes made.",
+			backupName, cfg.ClusterName)
+		return &model.BackupResult{Engine: b.Name(), Cluster: model.ObjectRef{Namespace: cfg.Namespace, Name: cfg.ClusterName},
+			Duration: time.Since(start)}, nil
+	}
 
 	// Create Backup CRD
 	c := k8s.GetClients()

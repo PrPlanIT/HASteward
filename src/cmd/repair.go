@@ -20,7 +20,6 @@ var repairCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		Cfg.DryRun = IsDryRun()
 
 		// The deadlock breaker's verified escrow IS the rollback that authorizes a
 		// destructive datadir clear, so it can never be skipped.

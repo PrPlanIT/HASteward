@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 	"github.com/PrPlanIT/HASteward/src/output/printer"
 	"github.com/PrPlanIT/HASteward/src/restic"
@@ -84,6 +85,15 @@ Examples:
 			"engine":    Cfg.Engine,
 			"cluster":   Cfg.ClusterName,
 			"namespace": Cfg.Namespace,
+		}
+
+		if IsDryRun() {
+			snap := Cfg.Snapshot
+			if snap == "" {
+				snap = "latest"
+			}
+			output.Info("DRY RUN: would export snapshot %s (%s) to %s. No file written.", snap, snapshotPath, exportFile)
+			return nil
 		}
 
 		f, err := os.Create(exportFile)

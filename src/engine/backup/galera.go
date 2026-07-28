@@ -86,6 +86,13 @@ func (b *galeraBackup) BackupDump(ctx context.Context, backupType, donor, stdinF
 		return nil, fmt.Errorf("donor pod %s is not Running (phase: %s)", donor, pod.Status.Phase)
 	}
 
+	if cfg.DryRun {
+		output.Info("DRY RUN: would dump %s from %s and write a %q snapshot to %s. No changes made.",
+			stdinFilename, donor, backupType, cfg.BackupsPath)
+		return &model.BackupResult{Engine: b.Name(), Cluster: model.ObjectRef{Namespace: ns, Name: cfg.ClusterName},
+			Repository: cfg.BackupsPath, Duration: time.Since(start)}, nil
+	}
+
 	// Initialize restic repo (idempotent)
 	rc := b.newResticClient()
 	if err := rc.Init(ctx); err != nil {

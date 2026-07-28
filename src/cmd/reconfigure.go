@@ -72,6 +72,11 @@ Requires --force, --instance, and at least one action flag (--fix-bootstrap).`,
 		// Phase 3: Print plan with warning + blast radius
 		reconf.PrintPlan(ctx, result)
 
+		if Cfg.DryRun {
+			output.Info("DRY RUN: plan above — stopping before any mutation (no CR suspend, scale-to-0, grastate reset, or pod delete). No changes made.")
+			return nil
+		}
+
 		// Phase 4: Execute
 		start := time.Now()
 		if err := reconf.Execute(ctx, result); err != nil {
