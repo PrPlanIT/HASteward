@@ -50,6 +50,44 @@ func cnpgAssess(t *testing.T, replica controlData, streaming, crashloop []string
 	return a
 }
 
+// TestCnpgBuildAssessments_RunningReadyFlags guards the fix for the cosmetic bug where
+// CNPG never populated IsRunning/IsReady (always false — a Running 1/1 primary read as
+// not-running). A Running-phase pod is running; ready only when its postgres container is
+// (crashloop = running-but-not-ready); a stranded instance with no pod is neither.
+func TestCnpgBuildAssessments_RunningReadyFlags(t *testing.T) {
+	tr := cnpgTriageForTest()
+	data := &cnpgTriageData{
+		controlData: []controlData{
+			{Pod: "pg-1", Timeline: "9", CheckpointLocation: "50/00000000", Source: "exec"},
+			{Pod: "pg-2", Timeline: "9", CheckpointLocation: "40/00000000", Source: "exec"},
+			{Pod: "pg-3", Timeline: "9", CheckpointLocation: "40/00000000", Source: "pvc_probe"},
+		},
+		primaryTimeline: "9",
+		runningPods: []corev1.Pod{
+			{ObjectMeta: metav1.ObjectMeta{Name: "pg-1"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "pg-2"}}, // Running phase, but crash-looping
+		},
+		crashloopPods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "pg-2"}}},
+	}
+	data.primaryControlData = &data.controlData[0]
+	as := tr.buildAssessments(data, &model.DataComparison{SafeToHeal: true, MostAdvanced: "pg-1"}, "pg-1")
+
+	want := map[string][2]bool{ // pod -> {IsRunning, IsReady}
+		"pg-1": {true, true},   // running + ready primary (previously reported false/false)
+		"pg-2": {true, false},  // running but crash-looping → not ready
+		"pg-3": {false, false}, // stranded, no pod
+	}
+	for pod, w := range want {
+		a := findAssessment(as, pod)
+		if a == nil {
+			t.Fatalf("no assessment for %s", pod)
+		}
+		if a.IsRunning != w[0] || a.IsReady != w[1] {
+			t.Errorf("%s: IsRunning=%v IsReady=%v, want %v/%v", pod, a.IsRunning, a.IsReady, w[0], w[1])
+		}
+	}
+}
+
 func TestCnpgBuildAssessments_PrimaryNeverHeals(t *testing.T) {
 	tr := cnpgTriageForTest()
 	data, cmp := buildCNPGData(controlData{Pod: "pg-2", Timeline: "9", CheckpointLocation: "50/00000000", Source: "exec"}, nil, nil)

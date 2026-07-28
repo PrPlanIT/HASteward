@@ -1061,6 +1061,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 	missingSet := setFromSlice(data.missingInstances)
 	crashloopSet := podNameSet(data.crashloopPods)
 	streamingSet := setFromSlice(data.streamingReplicas)
+	runningSet := podNameSet(data.runningPods)
 
 	var assessments []model.InstanceAssessment
 
@@ -1068,6 +1069,12 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		isPrimary := inst.Pod == primaryName
 		isMissing := missingSet[inst.Pod]
 		isCrashloop := crashloopSet[inst.Pod]
+		// A pod in the Running phase is "running"; it is "ready" only when its postgres
+		// container is Ready (crashloopSet is exactly the running-but-not-Ready pods). A
+		// stranded/missing instance (no pod) is neither. These fields were previously left
+		// unset (always false) for CNPG — so a Running 1/1 primary read as not-running.
+		isRunning := runningSet[inst.Pod]
+		isReady := isRunning && !isCrashloop
 		isStreaming := streamingSet[inst.Pod]
 		diskFull := inst.CrashReason == "disk_full"
 		// Prefer the universal PVC-probe breakdown (real even for down instances)
@@ -1206,6 +1213,8 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 
 		assessments = append(assessments, model.InstanceAssessment{
 			Pod:            inst.Pod,
+			IsRunning:      isRunning,
+			IsReady:        isReady,
 			IsPrimary:      isPrimary,
 			Timeline:       parseTimelineInt(instTL),
 			LSN:            instLSN,
