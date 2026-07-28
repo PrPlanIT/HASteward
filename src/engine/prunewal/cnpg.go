@@ -147,6 +147,21 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 		return nil, fmt.Errorf("failed to resolve PVC for %s: %w", targetPod, err)
 	}
 
+	// DRY RUN stops HERE — after triage and every safety gate (target eligibility,
+	// not-ready, replica-caughtup / authority relief), but BEFORE the first mutation
+	// (fence → clear pg_wal). Previously --dry-run was silently ignored and prune-wal
+	// fenced + deleted WAL regardless; this makes the preview real.
+	if cfg.DryRun {
+		gate := "primary"
+		if !isPrimary {
+			gate = "trapped non-primary authority"
+		}
+		output.Info("DRY RUN: %s passed all safety gates (%s). Would fence it, mount PVC %s, delete WAL segments "+
+			"OLDER than its own checkpoint REDO (committed data past the checkpoint is KEPT; .history preserved), then "+
+			"unfence. No changes made.", targetPod, gate, targetPVC)
+		return result, nil
+	}
+
 	// Discover postgres image and UID/GID from a healthy replica
 	imageName, postgresUID, postgresGID, err := w.discoverPostgresInfo(ctx, triageResult)
 	if err != nil {

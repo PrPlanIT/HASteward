@@ -30,9 +30,9 @@ var repairCmd = &cobra.Command{
 		if Cfg.Promote && Cfg.NoEscrow {
 			return fmt.Errorf("--promote cannot be combined with --no-escrow: the verified escrow is the rollback that makes the promotion reversible")
 		}
-		if Cfg.Promote && Cfg.InstanceNumber == nil {
-			return fmt.Errorf("--promote requires --instance <N> naming the authority to promote")
-		}
+		// NOTE: --instance is parsed into Cfg.InstanceNumber later, inside PreRun
+		// (ResolveInstance) — so it cannot be validated here. promotePrepare enforces
+		// "--promote requires --instance" after parsing.
 
 		if !Cfg.NoEscrow {
 			if Cfg.BackupsPath == "" {
