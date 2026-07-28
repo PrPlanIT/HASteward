@@ -27,6 +27,12 @@ var repairCmd = &cobra.Command{
 		if Cfg.Unwedge && Cfg.NoEscrow {
 			return fmt.Errorf("--unwedge cannot be combined with --no-escrow: the verified escrow is the rollback that authorizes clearing a datadir")
 		}
+		if Cfg.Promote && Cfg.NoEscrow {
+			return fmt.Errorf("--promote cannot be combined with --no-escrow: the verified escrow is the rollback that makes the promotion reversible")
+		}
+		if Cfg.Promote && Cfg.InstanceNumber == nil {
+			return fmt.Errorf("--promote requires --instance <N> naming the authority to promote")
+		}
 
 		if !Cfg.NoEscrow {
 			if Cfg.BackupsPath == "" {

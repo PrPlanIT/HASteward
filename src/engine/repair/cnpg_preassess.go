@@ -43,6 +43,11 @@ var errDryRunPreview = errors.New("unwedge dry-run: preview complete, no changes
 // Returns nil when inert; otherwise the post-break triage.
 func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {
 	cfg := r.p.Config()
+	if cfg.Promote {
+		// P3.2b: promote a chosen authority (escrow-first, proof-gated). Runs instead of
+		// the normal heal and stops before the manual swap (errPromotePrepared).
+		return r.promotePrepare(ctx)
+	}
 	if !cfg.Unwedge {
 		return nil, nil // inert — normal repair (which aborts on "no primary") proceeds unchanged
 	}

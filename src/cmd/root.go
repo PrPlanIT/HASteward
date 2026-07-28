@@ -60,6 +60,7 @@ func init() {
 	// Command-specific flags (demoted from persistent — #31: flag scope = "which cluster"
 	// stays global, "how this algorithm behaves" belongs on the owning command).
 	env.Bool(repairCmd.Flags(), &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
+	env.Bool(repairCmd.Flags(), &Cfg.Promote, "promote", "", "PROMOTE", false, "CNPG rebuild-around-authority: escrow the cluster + persist a proof + print the swap runbook to promote --instance N when the authority is not the primary. Use --dry-run first.")
 	env.Bool(repairCmd.Flags(), &Cfg.WipeDatadir, "wipe-datadir", "", "WIPE_DATADIR", false,
 		"Wipe entire datadir on target instance (not just grastate). Forces full SST\n"+
 			"reseed from donor. Use when local data is irrecoverably corrupted. Requires\n"+
