@@ -44,6 +44,14 @@ type OfflinePVCJob struct {
 	// nil, Run keeps the historical behavior: the HelperPod runs its own command to
 	// completion and Run waits for it to Succeed.
 	OnPVCAcquired func(ctx context.Context) error
+	// KeepFenced, when true, SKIPS the final unfence: on success the instance is left
+	// FENCED (frozen, its datadir untouched) instead of being handed back to the operator.
+	// Reconciliation is still re-enabled, so the rest of the cluster is managed normally —
+	// but a fenced instance is not reconciled, so a DIVERGED / non-primary AUTHORITY is
+	// protected from a pg_rewind onto the stale primary's lineage (which would destroy the
+	// very data the job just preserved). The caller MUST unfence it deliberately, as part
+	// of a controlled promotion.
+	KeepFenced bool
 }
 
 // Run runs a helper pod that must take over a fenced instance's RWO PVC.
@@ -243,6 +251,20 @@ func Run(ctx context.Context, job OfflinePVCJob) error {
 	// STEP 7: Unfence — hand the instance to the now-live operator, which recreates and
 	// starts it on its preserved (now-prepared) PVC. No stale instance pod to clean up —
 	// reconciliation was off during the handoff, so none was ever made.
+	//
+	// UNLESS the caller asked to keep it isolated: handing a DIVERGED / non-primary
+	// AUTHORITY back to a live operator whose target primary is a different lineage would
+	// let CNPG pg_rewind it onto that stale lineage, destroying the very data we just
+	// relieved it to preserve. KeepFenced leaves it fenced (frozen, data intact) for a
+	// controlled, operator-driven promotion; reconcile is already back ON (STEP 6), so the
+	// rest of the cluster is unaffected. fenceApplied stays true, but cleanup() runs only
+	// on error paths, so no false "left fenced on failure" warning fires here.
+	if job.KeepFenced {
+		common.WarnLog("STEP 6: keeping %s FENCED (isolated) — its data is now protected from operator reconcile/pg_rewind. "+
+			"Unfence it ONLY as part of a controlled promotion: kubectl annotate cluster %s -n %s cnpg.io/fencedInstances-",
+			job.TargetPod, job.ClusterName, ns)
+		return nil
+	}
 	common.InfoLog("STEP 6: Removing fence for %s", job.TargetPod)
 	if err := Unfence(ctx, ns, job.ClusterName, job.TargetPod); err != nil {
 		// The instance is still fenced — CNPG will NOT manage it, so it has NOT

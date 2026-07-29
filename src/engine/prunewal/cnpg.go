@@ -151,14 +151,22 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	// not-ready, replica-caughtup / authority relief), but BEFORE the first mutation
 	// (fence → clear pg_wal). Previously --dry-run was silently ignored and prune-wal
 	// fenced + deleted WAL regardless; this makes the preview real.
+	// A trapped non-primary AUTHORITY must NOT be unfenced back to the operator after
+	// relief: its target primary is a divergent/stale lineage, so CNPG would pg_rewind the
+	// freed authority onto that lineage and destroy the golden data. Keep it fenced
+	// (isolated) for a controlled promotion. A disk-full PRIMARY is handed back normally.
+	keepFenced := !isPrimary
+
 	if cfg.DryRun {
-		gate := "primary"
+		gate, tail := "primary", "then unfence and hand it back to the operator"
 		if !isPrimary {
 			gate = "trapped non-primary authority"
+			tail = "then KEEP IT FENCED (isolated from operator reconcile so it is NOT pg_rewound onto the stale " +
+				"primary's lineage) for a controlled promotion"
 		}
 		output.Info("DRY RUN: %s passed all safety gates (%s). Would fence it, mount PVC %s, delete WAL segments "+
-			"OLDER than its own checkpoint REDO (committed data past the checkpoint is KEPT; .history preserved), then "+
-			"unfence. No changes made.", targetPod, gate, targetPVC)
+			"OLDER than its own checkpoint REDO (committed data past the checkpoint is KEPT; .history preserved), %s. "+
+			"No changes made.", targetPod, gate, targetPVC, tail)
 		return result, nil
 	}
 
@@ -227,12 +235,24 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 		HelperPodName:    walPodName,
 		Label:            "wal-prune",
 		DeleteTimeoutSec: cfg.DeleteTimeout,
+		KeepFenced:       keepFenced,
 		// Go-driven: prune runs here while the helper holds the PVC.
 		OnPVCAcquired: func(ctx context.Context) error {
 			return w.pruneWALOnPVC(ctx, walPodName, ns, readyReplicas, verifyReplicas)
 		},
 	}); err != nil {
 		return nil, err
+	}
+
+	// A kept-fenced authority will NOT come back online (that is the point — it is isolated
+	// from the operator until a controlled promotion). Report the safe end state and stop;
+	// do not wait for a readiness that cannot happen by design.
+	if keepFenced {
+		output.Success("WAL relieved on %s — its disk is freed, but it was KEPT FENCED so CNPG will not start or "+
+			"pg_rewind it onto the stale primary's lineage. Bring it up for inspection and promote it deliberately; "+
+			"unfence ONLY as part of that promotion (kubectl annotate cluster %s -n %s cnpg.io/fencedInstances-).",
+			targetPod, cfg.ClusterName, ns)
+		return result, nil
 	}
 
 	// Wait for the operator to recreate + restart the instance on its PVC.

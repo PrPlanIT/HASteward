@@ -125,3 +125,63 @@ func TestRun_ReturnsErrorWhenUnfenceFails(t *testing.T) {
 		t.Fatalf("Run must fail when the unfence fails — a still-fenced instance is unmanaged, not healed (#21); got: %v", err)
 	}
 }
+
+// TestRun_KeepFencedSkipsUnfenceButRestoresReconcile guards the diverged-authority relief:
+// with KeepFenced, Run must STILL re-enable reconciliation (the cluster invariant) but must
+// NOT unfence the target — leaving the authority frozen so CNPG cannot pg_rewind it onto
+// the stale primary's lineage. Success, reconcile re-enabled, no unfence.
+func TestRun_KeepFencedSkipsUnfenceButRestoresReconcile(t *testing.T) {
+	defer common.DisableSleepForTest()()
+
+	cluster := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata":   map[string]interface{}{"name": "pg", "namespace": "ns"},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{k8s.CNPGClusterGVR: "ClusterList"},
+		cluster,
+	)
+	var reconcileReEnabled, unfenceIssued bool
+	dyn.PrependReactor("patch", "clusters", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		body := string(a.(clienttesting.PatchAction).GetPatch())
+		switch {
+		case strings.Contains(body, "reconciliationLoop") && strings.Contains(body, "null"):
+			reconcileReEnabled = true
+		case strings.Contains(body, "fencedInstances") && strings.Contains(body, "null"):
+			unfenceIssued = true
+		}
+		return false, nil, nil
+	})
+
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "pods", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if pod, ok := a.(clienttesting.CreateAction).GetObject().(*corev1.Pod); ok {
+			pod.Status.Phase = corev1.PodSucceeded
+		}
+		return false, nil, nil
+	})
+
+	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs, Dynamic: dyn})()
+
+	job := OfflinePVCJob{
+		Namespace:     "ns",
+		ClusterName:   "pg",
+		TargetPod:     "pg-2",
+		TargetPVC:     "pg-2",
+		HelperPodName: "pg-2-wal-prune",
+		Label:         "wal-prune",
+		KeepFenced:    true,
+		HelperPod:     &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pg-2-wal-prune", Namespace: "ns"}},
+	}
+	if err := Run(context.Background(), job); err != nil {
+		t.Fatalf("KeepFenced success path must not error: %v", err)
+	}
+	if !reconcileReEnabled {
+		t.Fatal("KeepFenced must STILL re-enable reconciliation — leaving the whole cluster unreconciled is the worst outcome")
+	}
+	if unfenceIssued {
+		t.Fatal("KeepFenced must NOT unfence — the diverged authority must be left fenced to protect it from pg_rewind")
+	}
+}

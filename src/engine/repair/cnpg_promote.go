@@ -200,15 +200,16 @@ func cnpgPromotionRunbook(cluster, ns string, plan *promotionPlan) string {
 	return fmt.Sprintf(
 		"Promotion of %s prepared. Escrow captured + proof persisted; the recovery set is reversible.\n"+
 			"Remaining steps (the in-place swap is not yet automated — P3.2c):\n"+
-			"  1. Confirm %s is up and consistent: `hasteward triage -e cnpg -c %s -n %s` (relieve it first with "+
-			"`hasteward prune wal -e cnpg -c %s -n %s --instance %s` if it is disk-wedged).\n"+
+			"  1. Relieve + inspect %s: `hasteward prune wal -e cnpg -c %s -n %s --instance %s` frees its disk and "+
+			"KEEPS IT FENCED (isolated from operator reconcile, so it is NOT pg_rewound onto the stale primary); then "+
+			"`hasteward triage -e cnpg -c %s -n %s` reads it read-only. Confirm it holds the expected data.\n"+
 			"  2. Fence the instances to rebuild (%v) and clear their datadirs so they cannot win a race.\n"+
 			"  3. Make %s the primary — the manual step: a clean CNPG switchover only if the topology is healthy, "+
 			"otherwise a rebuild-based promotion. Verify %s serves as primary before continuing.\n"+
 			"  4. Re-clone the rebuilt instances FROM %s: `hasteward repair -e cnpg -c %s -n %s`.\n"+
 			"  Escrow is RETAINED until you confirm the cluster is healthy — it is your rollback.",
 		plan.Authority,
-		plan.Authority, cluster, ns, cluster, ns, ordinalOf(plan.Authority),
+		plan.Authority, cluster, ns, ordinalOf(plan.Authority), cluster, ns,
 		plan.Rebuild,
 		plan.Authority, plan.Authority,
 		plan.Authority, cluster, ns)
