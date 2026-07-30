@@ -32,6 +32,8 @@ type Config struct {
 	NoEscrow       bool
 	Unwedge        bool // --unwedge: enable the CNPG disk-full deadlock breaker (escrow-gated offline datadir clear)
 	Promote        bool // --promote: prepare a rebuild-around-authority promotion of --instance N (escrow + proof + runbook; P3.2b)
+	DeadlockRecover bool   // --deadlock-recover: replay+recycle WAL in place for a disk-full-DEADLOCKED CNPG instance (P3.6)
+	SnapshotClass   string // --snapshot-class: VolumeSnapshotClass for the deadlock-recover escrow (auto-discovered if empty)
 	BackupMethod   string
 	Snapshot       string // Restic snapshot ID or "latest" (for restore)
 	ResticPassword string // Restic repository encryption password

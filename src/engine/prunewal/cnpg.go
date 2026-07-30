@@ -147,6 +147,18 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 		return nil, fmt.Errorf("failed to resolve PVC for %s: %w", targetPod, err)
 	}
 
+	// P3.6 — deadlock-recover: replay + recycle WAL IN PLACE for an instance that is
+	// disk-full DEADLOCKED (too full to start → can't checkpoint → can't recycle WAL).
+	// DISTINCT from the delete-only path below (which removes PRE-checkpoint deadweight
+	// while the instance stays down): this one starts postgres single-user to REPLAY the
+	// committed WAL (no data loss), checkpoints, then archivecleans the recycled segments.
+	// It is the fix when plain prune-wal finds nothing to trim because all WAL is
+	// post-checkpoint recyclable (the boundary-postgres-2 case). Same eligibility gates
+	// (not-ready + authority-gated for non-primary) already passed above.
+	if cfg.DeadlockRecover {
+		return w.deadlockRecover(ctx, targetPod, targetPVC, isPrimary, triageResult, result)
+	}
+
 	// DRY RUN stops HERE — after triage and every safety gate (target eligibility,
 	// not-ready, replica-caughtup / authority relief), but BEFORE the first mutation
 	// (fence → clear pg_wal). Previously --dry-run was silently ignored and prune-wal
@@ -502,6 +514,9 @@ func (w *cnpgPruner) deleteWALOlderThan(ctx context.Context, helperPod, ns, redo
 	}
 	if len(toDelete) == 0 {
 		output.Success("No WAL segments older than %s — nothing to prune (kept %d)", redoWAL, kept)
+		output.Info("Nothing was pre-checkpoint deadweight. If this instance is disk-full and cannot start, its WAL is all "+
+			"POST-checkpoint (needed for crash recovery, NOT deletable) — that is a disk-full DEADLOCK. Use " +
+			"`prune-wal --deadlock-recover` to replay + recycle it in place.")
 	} else {
 		if _, err := k8s.ExecCommand(ctx, helperPod, ns, "wal-prune", append([]string{"rm", "-f"}, toDelete...)); err != nil {
 			return fmt.Errorf("deleting %d WAL segment(s) failed: %w", len(toDelete), err)

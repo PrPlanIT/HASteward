@@ -22,6 +22,12 @@ deletes anything.
 
 Flow: triage -> safety check -> fence -> mount PVC -> clear pg_wal -> unfence
 
+--deadlock-recover: for a disk-full DEADLOCK — an instance too full to start, so it can
+never checkpoint to recycle its own (post-checkpoint) WAL. Instead of deleting WAL, it
+escrows the PVC (VolumeSnapshot), relocates pg_wal to scratch, replays it single-user +
+checkpoints (NO data loss), archivecleans the recycled segments, and moves the small WAL
+back — de-bloating the datadir in place on the same volume. Use --dry-run first.
+
 Examples:
   hasteward prune-wal -e cnpg -c nextcloud-postgres -n temple-of-time -i 2
   hasteward prune-wal -e cnpg -c grafana-postgres -n gossip-stone -i 1`
