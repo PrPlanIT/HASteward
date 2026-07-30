@@ -16,6 +16,8 @@ unprefixed ones (e.g. `KUBECONFIG`) are standard tools' variables it honors.
 | `HASTEWARD_NO_ESCROW` | `--no-escrow` | `bool` | `false` | Skip pre-repair escrow backup |
 | `HASTEWARD_UNWEDGE` | `--unwedge` | `bool` | `false` | CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first. |
 | `HASTEWARD_PROMOTE` | `--promote` | `bool` | `false` | CNPG rebuild-around-authority: escrow the cluster + persist a proof + print the swap runbook to promote --instance N when the authority is not the primary. Use --dry-run first. |
+| `HASTEWARD_DEADLOCK_RECOVER` | `--deadlock-recover` | `bool` | `false` | CNPG disk-full DEADLOCK recovery: replay + recycle WAL IN PLACE for an instance too full to start (escrow-snapshot → single-user replay → archivecleanup). For when plain prune-wal finds nothing to trim. Use --dry-run first. |
+| `HASTEWARD_SNAPSHOT_CLASS` | `--snapshot-class` | `string` | `—` | VolumeSnapshotClass for the deadlock-recover escrow (auto-discovered from the PVC provisioner if empty) |
 | `HASTEWARD_WIPE_DATADIR` | `--wipe-datadir` | `bool` | `false` | Wipe entire datadir on target instance (not just grastate). Forces full SST reseed from donor. Use when local data is irrecoverably corrupted. Requires --force and --instance. |
 | `HASTEWARD_FIX_BOOTSTRAP` | `--fix-bootstrap` | `bool` | `false` | reset-authority: clear grastate and remove bootstrap config on target instance. Prevents stale local bootstrap behavior during cluster restart. |
 | `HASTEWARD_SNAPSHOT` | `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
