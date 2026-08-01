@@ -264,10 +264,7 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 		RunAsUID: &uid, RunAsGID: &uid, FSGroup: &uid,
 		Labels:                map[string]string{"hasteward": "heal-helper"},
 		ActiveDeadlineSeconds: 150,
-		Command: []string{"sh", "-c", fmt.Sprintf(
-			"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
-				"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
-				"--log-error-verbosity=3 2>&1; exit 0", galeraProviderSO)},
+		Command: []string{"sh", "-c", wsrepRecoverCommand(galeraProviderSO)},
 	})
 
 	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
@@ -314,6 +311,24 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 // helperPodOutput fetches a helper pod's logs.
 func (p *GaleraProvider) helperPodOutput(ctx context.Context, podName string) string {
 	return k8s.PodLogs(ctx, p.Config().Namespace, podName)
+}
+
+// wsrepRecoverCommand builds the shell command that runs mariadbd --wsrep-recover to
+// read a node's authoritative committed position.
+//
+// --binlog-format=ROW is REQUIRED: with --wsrep-on=ON, mariadbd refuses to start (and
+// never prints "Recovered position") if binlog_format is anything but ROW — and modern
+// MariaDB (11.x) defaults to MIXED. Without it, wsrep_recover aborts on EVERY node with
+// "Only binlog_format='ROW' is currently supported", the position parse fails, the
+// candidate comes back empty, and a belly-up bootstrap dies with "candidate pod not
+// found". Galera only ever runs ROW, so forcing it here is always correct. (Found live on
+// a MariaDB 11.8.8 cluster where the operator itself had missed the true most-advanced
+// node — seqno 54784 vs the 50522 it reported — for exactly this reason.)
+func wsrepRecoverCommand(providerSO string) string {
+	return fmt.Sprintf(
+		"mariadbd --wsrep-recover --datadir=/var/lib/mysql "+
+			"--wsrep-on=ON --wsrep-provider=%s --wsrep-cluster-address=gcomm:// "+
+			"--binlog-format=ROW --log-error-verbosity=3 2>&1; exit 0", providerSO)
 }
 
 // ParseWsrepRecoverOutput extracts UUID, seqno, and lastCommitted from mariadbd

@@ -1,8 +1,39 @@
 package provider
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const recoverUUID = "57a2c75c-6dea-11f1-b59b-266ed2cb955a"
+
+// TestWsrepRecoverCommand_ForcesRowBinlog guards the live-found bug: without
+// --binlog-format=ROW, mariadbd --wsrep-recover aborts on modern MariaDB (default MIXED)
+// with "Only binlog_format='ROW' is currently supported" and never prints a position, so
+// every node's recovery parse fails and a belly-up bootstrap dies with "candidate pod not
+// found". This flag must always be present.
+func TestWsrepRecoverCommand_ForcesRowBinlog(t *testing.T) {
+	cmd := wsrepRecoverCommand("/usr/lib/galera/libgalera_smm.so")
+	if !strings.Contains(cmd, "--binlog-format=ROW") {
+		t.Fatalf("wsrep_recover command MUST force --binlog-format=ROW, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "--wsrep-recover") || !strings.Contains(cmd, "libgalera_smm.so") {
+		t.Fatalf("wsrep_recover command malformed: %s", cmd)
+	}
+}
+
+// TestParseWsrepRecoverOutput_MariaDB118 parses the REAL MariaDB 11.8.8 recovery line
+// (the format captured live) so the parser can't regress against it.
+func TestParseWsrepRecoverOutput_MariaDB118(t *testing.T) {
+	out := "2026-08-01  0:57:29 0 [Note] WSREP: Recovered position: 87eed17c-80e4-11f1-9ce5-3e85072fd6e9:54784\n"
+	rr, err := ParseWsrepRecoverOutput(out)
+	if err != nil {
+		t.Fatalf("must parse MariaDB 11.8.8 output: %v", err)
+	}
+	if !rr.Valid || rr.UUID != "87eed17c-80e4-11f1-9ce5-3e85072fd6e9" || rr.Seqno != 54784 {
+		t.Fatalf("bad parse of 11.8.8 output: %+v", rr)
+	}
+}
 
 func TestParseWsrepRecoverOutput(t *testing.T) {
 	t.Run("valid with last-committed", func(t *testing.T) {
