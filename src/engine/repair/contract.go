@@ -40,4 +40,9 @@ type HealTarget struct {
 	Pod         string
 	InstanceNum int
 	Reason      string
+	// Remediation is the action this target calls for:
+	//   "restart" — non-destructive: delete the pod, CNPG recreates it against
+	//               the same PVC and it streams back (data intact, WAL retained).
+	//   "reseed" / "" — the destructive fence → clear → basebackup → unfence.
+	Remediation string
 }

@@ -1107,6 +1107,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		var notes []string
 		var recommendation string
 		needsHeal := false
+		remediation := "none" // "none" | "restart" | "reseed"; set where a fix is identified
 
 		// Extract instance number for heal command
 		parts := strings.Split(inst.Pod, "-")
@@ -1173,31 +1174,56 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 				notes = append(notes, "disk full (WAL accumulation from being stuck)")
 				recommendation = fmt.Sprintf("Needs heal. Same timeline but disk full prevents catch-up.\n\n  %s", healCmd)
 			case isMissing:
+				remediation = "restart"
 				notes = append(notes, "no pod running")
 				recommendation = "Pod missing but data is on correct timeline. " +
-					"CNPG should recreate the pod. If it does not, check cluster phase. " +
-					"May catch up via streaming if WAL is still available."
+					"CNPG should recreate the pod (a restart, not a re-clone). If it does not, check cluster phase. " +
+					"Catches up via streaming while WAL is retained."
 			case isCrashloop:
-				needsHeal = true
-				notes = append(notes, "crash-looping, not streaming")
-				recommendation = fmt.Sprintf("Same timeline but crash-looping and not streaming — the WAL needed to "+
-					"catch up has most likely been recycled, so it cannot rejoin by replication. Check pod logs to "+
-					"confirm the root cause, then heal (re-clone from primary).\n\n  %s", healCmd)
+				// Data is intact and on the primary's timeline; the only
+				// question is whether the WAL to catch up still exists. The
+				// replication slot's restart_lsn is that trustworthy signal —
+				// don't PRESUME it was recycled. Slot retained → restart (it
+				// streams back, no wipe); slot gone → reseed.
+				if lsn, retained := slotRetainsWAL(data.slotInfo, inst.Pod); retained {
+					remediation = "restart"
+					notes = append(notes, "crash-looping but data intact; WAL retained (slot restart_lsn "+lsn+")")
+					recommendation = "Data is intact and on the primary's timeline, and the WAL to catch up is still " +
+						"retained (its replication slot has a restart_lsn). RESTART the pod (delete it; CNPG recreates " +
+						"against the same PVC) — it resumes streaming and catches up. Do NOT re-clone; the data is fine. " +
+						"Check pod logs for the crash root cause."
+				} else {
+					needsHeal = true
+					remediation = "reseed"
+					notes = append(notes, "crash-looping, not streaming, WAL discarded (no slot restart_lsn)")
+					recommendation = fmt.Sprintf("Same timeline but crash-looping and the WAL needed to catch up is gone "+
+						"(no replication slot / no restart_lsn), so it cannot rejoin by replication. Heal (re-clone from "+
+						"primary).\n\n  %s", healCmd)
+				}
 			default:
-				needsHeal = true
-				recommendation = fmt.Sprintf("Not streaming. May catch up if WAL is still available. "+
-					"Check replication slots above - if the slot has no restart_lsn, "+
-					"WAL has been discarded and a heal is needed.\n\n  %s", healCmd)
+				if lsn, retained := slotRetainsWAL(data.slotInfo, inst.Pod); retained {
+					remediation = "restart"
+					notes = append(notes, "not streaming but WAL retained (slot restart_lsn "+lsn+")")
+					recommendation = "Not streaming, but data is on the primary's timeline and the WAL is still retained " +
+						"(replication slot has a restart_lsn). RESTART the pod to resume streaming — no re-clone needed."
+				} else {
+					needsHeal = true
+					remediation = "reseed"
+					recommendation = fmt.Sprintf("Not streaming and the WAL has been discarded (no replication slot / no "+
+						"restart_lsn) — it cannot catch up. Heal (re-clone from primary).\n\n  %s", healCmd)
+				}
 			}
 
 		case sameTL && !behindLSN:
 			switch {
 			case isMissing:
+				remediation = "restart"
 				notes = append(notes, "data current but no pod")
-				recommendation = "Data is current. CNPG should recreate the pod. If it does not, check cluster phase."
+				recommendation = "Data is current. CNPG should recreate the pod (a restart, not a re-clone). If it does not, check cluster phase."
 			case isCrashloop:
+				remediation = "restart"
 				notes = append(notes, "data current but crash-looping")
-				recommendation = "Data is current but pod is crash-looping. Check pod logs for root cause."
+				recommendation = "Data is current — a RESTART, not a re-clone. Delete the pod so CNPG recreates it against the same PVC, and check pod logs for the crash root cause."
 			case diskPct >= 90:
 				notes = append(notes, fmt.Sprintf("healthy but disk low (%d%%)", diskPct))
 				recommendation = "Healthy but disk usage is high. Consider expanding PVC storage."
@@ -1211,6 +1237,18 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			recommendation = "Could not determine timeline. Check instance manually."
 		}
 
+		// Reconcile classification with the WAL-slot verdict. classifyInstance
+		// runs before the slot check and may call an intact-but-not-streaming
+		// replica "disposable"; the slot proves it recoverable (WAL retained →
+		// streams back, never a wipe), so restart-viable IS recoverable.
+		if remediation == "restart" {
+			classification = model.ClassRecoverable
+		} else if remediation == "none" && needsHeal {
+			// Any remaining heal target not shown restart-viable is a reseed
+			// (data diverged / WAL gone / disk-full stuck).
+			remediation = "reseed"
+		}
+
 		assessments = append(assessments, model.InstanceAssessment{
 			Pod:            inst.Pod,
 			IsRunning:      isRunning,
@@ -1222,11 +1260,40 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			Notes:          notes,
 			Recommendation: recommendation,
 			NeedsHeal:      needsHeal,
+			Remediation:    remediation,
 			Disk:           data.diskStats[inst.Pod],
 		})
 	}
 
 	return assessments
+}
+
+// slotRetainsWAL reports whether the primary still retains the WAL a given
+// instance needs to catch up by streaming — the trustworthy restart-vs-reseed
+// signal. It matches the instance's CNPG replication slot (named after the
+// instance, dashes → underscores, e.g. _cnpg_<inst>) in the collected slot rows
+// (slot_name|slot_type|active|restart_lsn|confirmed_flush_lsn|bytes_behind) and
+// returns its restart_lsn when present. A non-empty restart_lsn means the WAL
+// from that position forward is held for this replica: a restart resumes
+// streaming, no re-clone. No slot / empty restart_lsn → the WAL was discarded.
+func slotRetainsWAL(slotInfo []string, instPod string) (restartLSN string, retained bool) {
+	key := strings.ReplaceAll(instPod, "-", "_")
+	for _, line := range slotInfo {
+		f := strings.Split(line, "|")
+		if len(f) < 4 {
+			continue
+		}
+		name := strings.TrimSpace(f[0])
+		if !strings.Contains(name, key) {
+			continue
+		}
+		lsn := strings.TrimSpace(f[3])
+		if lsn == "" {
+			return "", false // slot exists but WAL position dropped
+		}
+		return lsn, true
+	}
+	return "", false
 }
 
 // --- Display ---
@@ -1333,6 +1400,9 @@ func (t *cnpgTriage) triageDisplay(data *cnpgTriageData, result *model.TriageRes
 			output.Printf("  Disk: %s/%s (%d%%) — wal %s, data %s, %d segs [%s]\n",
 				output.FormatBytes(d.UsedBytes), output.FormatBytes(d.TotalBytes), d.UsedPercent,
 				output.FormatBytes(d.WALBytes), output.FormatBytes(d.DataBytes), d.WALSegments, d.Source)
+		}
+		if a.Remediation == "restart" || a.Remediation == "reseed" {
+			output.Printf("  remediation: %s\n", a.Remediation)
 		}
 		output.Printf("  >> %s\n", a.Recommendation)
 	}

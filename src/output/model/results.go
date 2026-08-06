@@ -49,6 +49,19 @@ type InstanceAssessment struct {
 	Notes          []string `json:"notes"`
 	Recommendation string   `json:"recommendation"`
 
+	// Remediation is the LEAST-destructive action that recovers this instance,
+	// so triage never overstates the fix:
+	//   "none"    — healthy / nothing to do
+	//   "restart" — down or crash-looping but data is INTACT and on the
+	//               primary's lineage, and the WAL it needs is still retained
+	//               (its replication slot has a restart_lsn) — a pod restart
+	//               resumes streaming; NO re-clone. Non-destructive.
+	//   "reseed"  — data diverged/missing, or the WAL was discarded (no slot /
+	//               null restart_lsn) — pg_basebackup re-clone is the only path.
+	// Distinct from NeedsHeal (which means "reseed"): a restart-remediable
+	// instance is down but must NOT be wiped.
+	Remediation string `json:"remediation,omitempty"`
+
 	// CNPG-specific
 	IsPrimary      bool           `json:"isPrimary,omitempty"`
 	Timeline       int64          `json:"timeline,omitempty"`

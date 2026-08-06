@@ -25,12 +25,23 @@ func buildUntargetedPlan(result *model.TriageResult, noun string) ([]HealTarget,
 
 	var targets []HealTarget
 	for _, a := range result.Assessments {
+		// Restart-viable instances (data intact, WAL retained) get the
+		// non-destructive pod restart — NOT a re-clone. They carry
+		// NeedsHeal=false, so they must be matched on Remediation explicitly.
+		if a.Remediation == "restart" {
+			reason := "restart (data intact, WAL retained)"
+			if len(a.Notes) > 0 {
+				reason = strings.Join(a.Notes, ", ")
+			}
+			targets = append(targets, HealTarget{Pod: a.Pod, InstanceNum: a.Instance, Reason: reason, Remediation: "restart"})
+			continue
+		}
 		if a.NeedsHeal {
 			reason := "needs heal"
 			if len(a.Notes) > 0 {
 				reason = strings.Join(a.Notes, ", ")
 			}
-			targets = append(targets, HealTarget{Pod: a.Pod, InstanceNum: a.Instance, Reason: reason})
+			targets = append(targets, HealTarget{Pod: a.Pod, InstanceNum: a.Instance, Reason: reason, Remediation: "reseed"})
 		}
 	}
 

@@ -135,3 +135,22 @@ func equalStrs(a, b []string) bool {
 	}
 	return true
 }
+
+// TestSlotRetainsWAL pins the restart-vs-reseed signal: a matching slot with a
+// non-empty restart_lsn means the WAL is retained (restart streams it back); a
+// missing slot or empty restart_lsn means it was discarded (reseed).
+func TestSlotRetainsWAL(t *testing.T) {
+	slots := []string{
+		"_cnpg_zitadel_postgres_1|physical|t|0/3000000|0/3000000|0",
+		"_cnpg_zitadel_postgres_2||f|||", // slot present but restart_lsn empty
+	}
+	if lsn, ok := slotRetainsWAL(slots, "zitadel-postgres-1"); !ok || lsn != "0/3000000" {
+		t.Errorf("retained slot: got (%q,%v), want (0/3000000,true)", lsn, ok)
+	}
+	if _, ok := slotRetainsWAL(slots, "zitadel-postgres-2"); ok {
+		t.Error("empty restart_lsn must read as NOT retained")
+	}
+	if _, ok := slotRetainsWAL(slots, "zitadel-postgres-9"); ok {
+		t.Error("no matching slot must read as NOT retained")
+	}
+}

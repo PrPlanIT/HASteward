@@ -11,3 +11,4 @@ site/
 
 # locally-built binary (never commit)
 hasteward-bin
+hasteward-local

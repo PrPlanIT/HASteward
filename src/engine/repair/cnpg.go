@@ -18,6 +18,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -186,6 +187,19 @@ func (r *cnpgRepair) planTargeted(ctx context.Context, result *model.TriageResul
 		return nil, fmt.Errorf("ABORT: %s not found in instance assessments. Check cluster_name and instance_number", targetPod)
 	}
 
+	// Restart-viable target: data is intact and the WAL is retained, so the fix
+	// is a non-destructive pod restart (CNPG recreates against the same PVC and
+	// it streams back) — NOT a re-clone. It bypasses the reseed safety gates
+	// below, which exist to guard the rm-rf/basebackup that restart never does.
+	// --force opts INTO the destructive reseed instead (operator override).
+	if targetAssessment.Remediation == "restart" && !cfg.Force {
+		reason := "restart (data intact, WAL retained)"
+		if len(targetAssessment.Notes) > 0 {
+			reason = strings.Join(targetAssessment.Notes, ", ")
+		}
+		return []HealTarget{{Pod: targetPod, InstanceNum: *cfg.InstanceNumber, Reason: reason, Remediation: "restart"}}, nil
+	}
+
 	// Safety gate: split-brain -> fail unless force
 	if !result.DataComparison.SafeToHeal && !cfg.Force {
 		return nil, fmt.Errorf("ABORT: Split-brain detected. Healing %s may cause DATA LOSS. Re-run with --force to override", targetPod)
@@ -218,6 +232,7 @@ func (r *cnpgRepair) planTargeted(ctx context.Context, result *model.TriageResul
 		Pod:         targetPod,
 		InstanceNum: *cfg.InstanceNumber,
 		Reason:      reason,
+		Remediation: "reseed",
 	}}, nil
 }
 
@@ -225,10 +240,37 @@ func (r *cnpgRepair) planUntargeted(ctx context.Context, result *model.TriageRes
 	return buildUntargetedPlan(result, "replicas")
 }
 
-// Heal heals a single CNPG replica via fence/clear/basebackup/unfence.
+// Heal applies a target's remediation: a non-destructive restart when the data
+// is intact and the WAL retained, otherwise the fence/clear/basebackup/unfence
+// re-clone.
 func (r *cnpgRepair) Heal(ctx context.Context, target HealTarget) error {
+	if target.Remediation == "restart" {
+		return r.restartInstance(ctx, target.Pod)
+	}
 	pvc := target.Pod // CNPG PVC name = pod name
 	return r.healInstance(ctx, target.Pod, pvc, r.hcfg)
+}
+
+// restartInstance is the non-destructive remediation: delete the pod and let
+// CNPG recreate it against its EXISTING PVC. No fence, no rm-rf, no basebackup —
+// the instance streams back from the WAL the primary still retains. The
+// least-destructive fix, chosen when triage proves the data intact.
+func (r *cnpgRepair) restartInstance(ctx context.Context, pod string) error {
+	cfg := r.p.Config()
+	output.Section("Restart " + pod + " — data intact, no re-clone")
+	output.Bullet(0, "Delete pod; CNPG recreates it against the same PVC")
+	output.Bullet(0, "Instance resumes streaming from the primary's retained WAL")
+	if r.DryRun() {
+		output.Info("[dry-run] would delete pod %s and wait for the cluster to become Ready", pod)
+		return nil
+	}
+	c := k8s.GetClients()
+	if err := c.Clientset.CoreV1().Pods(cfg.Namespace).Delete(ctx, pod, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting pod %s for restart: %w", pod, err)
+	}
+	common.InfoLog("Deleted %s; waiting for the cluster to become Ready", pod)
+	r.waitForAllReady(ctx)
+	return nil
 }
 
 // Stabilize waits for the operator to reconcile and all pods to become ready.
@@ -335,6 +377,15 @@ echo "=== pg_basebackup complete! ==="`, primaryIP)
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      healPodName,
 			Namespace: ns,
+			// cnpg.io/cluster admits the pod through CNPG replication
+			// network contracts — policy-gated fleets allow 5432 only
+			// between pods carrying the cluster label, and pg_basebackup
+			// must reach the primary. The operator never reconciles this
+			// pod: the reconcile loop is disabled for its whole lifetime.
+			Labels: map[string]string{
+				"cnpg.io/cluster": cfg.ClusterName,
+				"hasteward":       "heal-helper",
+			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:      corev1.RestartPolicyNever,
