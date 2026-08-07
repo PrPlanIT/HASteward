@@ -233,6 +233,8 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 		logText := string(logBytes)
 		if strings.Contains(logText, "low-disk space condition") || strings.Contains(logText, "low disk space") {
 			data.crashReasons[pod.Name] = "disk_full"
+		} else if logShowsPgdataCorruption(logText) {
+			data.crashReasons[pod.Name] = "pgdata_corruption"
 		}
 	}
 
@@ -1237,11 +1239,22 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			recommendation = "Could not determine timeline. Check instance manually."
 		}
 
-		// Reconcile classification with the WAL-slot verdict. classifyInstance
-		// runs before the slot check and may call an intact-but-not-streaming
-		// replica "disposable"; the slot proves it recoverable (WAL retained →
-		// streams back, never a wipe), so restart-viable IS recoverable.
-		if remediation == "restart" {
+		// Corruption override (highest priority): local pgdata/WAL damage means
+		// a restart just re-panics, no matter what the timeline/slot say — the
+		// reseed is mandatory. This is the gap a same-timeline, WAL-retained
+		// replica with a truncated checkpoint falls through otherwise.
+		if inst.CrashReason == "pgdata_corruption" {
+			needsHeal = true
+			remediation = "reseed"
+			classification = model.ClassDisposable
+			notes = append(notes, "pgdata corruption (invalid checkpoint) — restart cannot recover")
+			recommendation = fmt.Sprintf("Local pgdata/WAL is corrupt (invalid checkpoint record) — a restart "+
+				"re-panics. Reseed (re-clone from the primary).\n\n  %s", healCmd)
+		} else if remediation == "restart" {
+			// Reconcile classification with the WAL-slot verdict. classifyInstance
+			// runs before the slot check and may call an intact-but-not-streaming
+			// replica "disposable"; the slot proves it recoverable (WAL retained →
+			// streams back, never a wipe), so restart-viable IS recoverable.
 			classification = model.ClassRecoverable
 		} else if remediation == "none" && needsHeal {
 			// Any remaining heal target not shown restart-viable is a reseed
@@ -1266,6 +1279,31 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 	}
 
 	return assessments
+}
+
+// logShowsPgdataCorruption reports whether a crash log carries a signature of
+// LOCAL pgdata/WAL damage — the state where a restart just re-panics and a
+// reseed (re-clone from the primary) is the only path home. Conservative: only
+// unambiguous "the on-disk data is unusable" messages, never transient or
+// connectivity errors. Load-bearing: a replica can be same-timeline with its
+// WAL slot retained (which reads as restart-viable) yet have a truncated
+// checkpoint from an ungraceful kill — restart cannot fix that.
+func logShowsPgdataCorruption(log string) bool {
+	for _, sig := range []string{
+		"could not locate a valid checkpoint record",
+		"invalid checkpoint record",
+		"invalid primary checkpoint record",
+		"invalid secondary checkpoint record",
+		"invalid record length",
+		"incorrect resource manager data checksum",
+		"could not read from log segment",
+		"database files are incompatible",
+	} {
+		if strings.Contains(log, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // slotRetainsWAL reports whether the primary still retains the WAL a given

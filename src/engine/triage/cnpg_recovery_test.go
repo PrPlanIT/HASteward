@@ -154,3 +154,28 @@ func TestSlotRetainsWAL(t *testing.T) {
 		t.Error("no matching slot must read as NOT retained")
 	}
 }
+
+// TestLogShowsPgdataCorruption pins the reseed-override signal: unambiguous
+// on-disk-damage messages trip it; transient/connectivity errors do not.
+func TestLogShowsPgdataCorruption(t *testing.T) {
+	corrupt := []string{
+		"PANIC:  could not locate a valid checkpoint record at 1/64000028",
+		"invalid primary checkpoint record",
+		"could not read from log segment 000000...",
+	}
+	for _, l := range corrupt {
+		if !logShowsPgdataCorruption(l) {
+			t.Errorf("should flag corruption: %q", l)
+		}
+	}
+	benign := []string{
+		"connection reset by peer",
+		"FATAL: the database system is starting up",
+		"could not connect to the primary",
+	}
+	for _, l := range benign {
+		if logShowsPgdataCorruption(l) {
+			t.Errorf("must NOT flag benign/transient: %q", l)
+		}
+	}
+}
