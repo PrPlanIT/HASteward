@@ -371,7 +371,19 @@ pg_basebackup -h %s -p 5432 -U streaming_replica \
   --checkpoint=fast \
   -d "sslmode=verify-ca sslcert=/tmp/certs/tls.crt sslkey=/tmp/certs/tls.key sslrootcert=/tmp/certs/ca.crt"
 
-echo "=== pg_basebackup complete! ==="`, primaryIP)
+echo "=== pg_basebackup complete! ==="
+
+echo "=== Finalizing: yield primary_conninfo to CNPG ==="
+# pg_basebackup -R baked a primary_conninfo into postgresql.auto.conf pointing at THIS
+# heal job's throwaway /tmp/certs paths. postgresql.auto.conf is read LAST, so it
+# shadows CNPG's override.conf (which uses the durable /controller/certificates paths).
+# Once this pod exits, /tmp/certs is gone and the reseeded replica's walreceiver loops
+# FATAL on a missing CA — a replica that can never stream. Strip it; CNPG owns the
+# conninfo. standby.signal (also written by -R) is retained so it starts as a standby.
+if [ -f /var/lib/postgresql/data/pgdata/postgresql.auto.conf ]; then
+  sed -i -E '/^[[:space:]]*primary_conninfo[[:space:]]*=/d' /var/lib/postgresql/data/pgdata/postgresql.auto.conf
+  echo "primary_conninfo yielded to CNPG (standby.signal retained)."
+fi`, primaryIP)
 
 	healPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

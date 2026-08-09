@@ -170,4 +170,13 @@ func TestCNPGHealInstance_UsesLivePrimaryIP(t *testing.T) {
 	if strings.Contains(healerCmd, "10.0.0.1") {
 		t.Fatalf("basebackup targeted the STALE captured IP 10.0.0.1 instead of the live one (#24); command: %s", healerCmd)
 	}
+	// Regression guard: pg_basebackup -R bakes a primary_conninfo pointing at this heal
+	// job's throwaway /tmp/certs into postgresql.auto.conf, which shadows CNPG's
+	// override.conf and leaves the reseeded replica unable to stream (walreceiver FATAL:
+	// /tmp/certs/ca.crt missing). The script MUST strip it so CNPG owns the conninfo.
+	if !strings.Contains(healerCmd, "postgresql.auto.conf") ||
+		!strings.Contains(healerCmd, "primary_conninfo") ||
+		!strings.Contains(healerCmd, "sed -i") {
+		t.Fatalf("reseed must strip -R's /tmp/certs primary_conninfo from postgresql.auto.conf so CNPG's override.conf governs; command: %s", healerCmd)
+	}
 }
