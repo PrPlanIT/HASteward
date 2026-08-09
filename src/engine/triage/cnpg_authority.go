@@ -71,6 +71,7 @@ type authorityDecision struct {
 	Diverged     bool     // determinable, but committed data on >1 lineage past a shared fork → no safe winner
 	Blockers     []string // per-instance reasons authority is undeterminable (the unread nodes)
 	Divergences  []string // human-readable divergence findings (fork LSN + what each side holds)
+	ContentNotes []string // WAL-divergences resolved by the content witness (churn-only), for operator visibility
 }
 
 // relation is the provable data-extent relationship between two readable instances.
@@ -82,6 +83,33 @@ const (
 	relADominatesB                 // a is a safe authority over b: b re-clones from a and loses nothing
 	relBDominatesA
 )
+
+// contentRelation is the provable BUSINESS-CONTENT relationship between two
+// instances. It exists to RESOLVE a WAL-lineage divergence: WAL divergence means
+// each branch wrote SOME WAL past a shared fork, but WAL volume includes churn a
+// stale/crash-looping instance accrues with zero business writes (checkpoints,
+// restart recovery, repeatable migrations). When a witness proves one branch's
+// committed business rows contain the other's, the "divergence" is churn-only and
+// there is a safe winner; only when each branch holds business rows the other lacks
+// is it a true divergence. Content is compared instance-to-instance (not against the
+// WAL fork LSN) because a witness's ordering column is a business position, not a WAL LSN.
+type contentRelation int
+
+const (
+	// contentUnknown: no witness configured, or an instance was not content-readable.
+	// Cannot refine — the WAL verdict stands (fail closed, legacy behavior).
+	contentUnknown contentRelation = iota
+	contentEqual                      // identical business extent
+	contentAContainsB                 // a holds every business row b holds (and maybe more)
+	contentBContainsA
+	contentCrossed // each holds committed business rows the other lacks — a TRUE divergence
+)
+
+// contentComparator answers the business-content relationship between two readable
+// instances. It performs the witness I/O (queries, fenced reads); determineAuthority
+// stays pure by receiving it as a dependency. A nil comparator means "no content
+// refinement" — WAL lineage alone decides, exactly as before this feature existed.
+type contentComparator func(a, b authorityInput) contentRelation
 
 // parseTimelineHistory parses a PostgreSQL <n>.history file into ordered switch
 // points. Each meaningful line is "<parentTimeline>\t<switchLSN>\t<reason>"; blank
@@ -254,7 +282,7 @@ func lastSwitchLSN(sw []switchPoint, upto int) int64 {
 
 // determineAuthority is the whole verdict. It never does I/O and never guesses:
 // unread instances block, lineage decides recency, and true divergence refuses.
-func determineAuthority(insts []authorityInput) authorityDecision {
+func determineAuthority(insts []authorityInput, content contentComparator) authorityDecision {
 	var d authorityDecision
 
 	// 1) Legibility gate. Any instance that could hold data but wasn't read blocks
@@ -300,6 +328,27 @@ func determineAuthority(insts []authorityInput) authorityDecision {
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			rel, forkLSN := relate(readable[i], readable[j])
+			// A WAL divergence is not the final word: it only proves each branch wrote
+			// SOME WAL past the fork. If a content witness proves one branch's committed
+			// business rows contain the other's, the divergence is churn-only and has a
+			// safe winner. Content can only ever RESOLVE a divergence to a clean
+			// relationship; it never manufactures one where WAL saw none.
+			if rel == relDiverge && content != nil {
+				switch content(readable[i], readable[j]) {
+				case contentAContainsB:
+					rel = relADominatesB
+					d.ContentNotes = append(d.ContentNotes, contentResolvedNote(readable[i], readable[j], forkLSN))
+				case contentBContainsA:
+					rel = relBDominatesA
+					d.ContentNotes = append(d.ContentNotes, contentResolvedNote(readable[j], readable[i], forkLSN))
+				case contentEqual:
+					rel = relEqual
+					d.ContentNotes = append(d.ContentNotes, contentEqualNote(readable[i], readable[j], forkLSN))
+				case contentCrossed, contentUnknown:
+					// The witness could not clear the WAL divergence (genuine business
+					// divergence, or an instance was not content-readable) — it stands.
+				}
+			}
 			switch rel {
 			case relDiverge:
 				d.Divergences = append(d.Divergences, describeDivergence(readable[i], readable[j], forkLSN))
@@ -362,6 +411,26 @@ func pickLeader(cands []authorityInput) authorityInput {
 		return cands[i].Pod < cands[j].Pod
 	})
 	return cands[0]
+}
+
+// contentResolvedNote records a WAL divergence that the content witness cleared:
+// winner's committed business rows contain loser's, so the divergent WAL on loser's
+// branch is churn (checkpoints, restart recovery, repeatable migrations), not data.
+func contentResolvedNote(winner, loser authorityInput, forkLSN int64) string {
+	return fmt.Sprintf(
+		"%s and %s diverged in WAL past the fork at %s, but the content witness proves %s's committed "+
+			"business rows contain %s's — %s wrote no business data past the fork (its extra WAL is churn). "+
+			"Resolved: %s is a safe authority over %s.",
+		winner.Pod, loser.Pod, formatLSN(forkLSN), winner.Pod, loser.Pod, loser.Pod, winner.Pod, loser.Pod)
+}
+
+// contentEqualNote records a WAL divergence where the witness proves identical
+// business extent on both branches — either is a safe authority.
+func contentEqualNote(a, b authorityInput, forkLSN int64) string {
+	return fmt.Sprintf(
+		"%s and %s diverged in WAL past the fork at %s, but the content witness proves identical business "+
+			"extent on both — the divergence is churn-only; either is a safe authority.",
+		a.Pod, b.Pod, formatLSN(forkLSN))
 }
 
 func describeDivergence(a, b authorityInput, forkLSN int64) string {

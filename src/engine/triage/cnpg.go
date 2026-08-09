@@ -77,6 +77,10 @@ type replicaInfo struct {
 
 // cnpgTriageData holds all data collected during the triage collection phase.
 type cnpgTriageData struct {
+	// contentComparator resolves a WAL divergence by business content (the witness).
+	// nil → WAL-lineage-only authority (legacy). Populated by the collection phase
+	// when a witness is configured and instances are content-readable.
+	contentComparator  contentComparator
 	expectedInstances  []string
 	runningPods        []corev1.Pod
 	nonRunningPods     []corev1.Pod
@@ -411,6 +415,43 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 		} else {
 			data.diskStats[name] = &model.DiskStats{Source: "none"}
 		}
+	}
+
+	// Content witness: when the Cluster CR declares one, fingerprint the business
+	// content of every content-readable instance so a WAL divergence can be resolved
+	// by containment instead of refused. No witness → nil comparator → WAL-only
+	// authority (unchanged). Down instances yield no base and stay contentUnknown
+	// until a fenced read-only start closes that gap.
+	defaultDB := k8s.GetNestedString(t.p.Cluster(), "spec", "bootstrap", "initdb", "database")
+	if defaultDB == "" {
+		defaultDB = "app" // CNPG's own initdb default
+	}
+	if spec, ok := readWitnessSpec(t.p.Cluster(), defaultDB); ok {
+		readable := make([]string, 0, len(data.runningPods))
+		for _, pod := range data.runningPods {
+			readable = append(readable, pod.Name)
+		}
+		// Lazy: collection runs only if determineAuthority hits a divergence and calls
+		// the comparator — a healthy cluster pays nothing. The fenced content read for
+		// DOWN diverging instances (increment 3) merges its bases inside this closure.
+		data.contentComparator = lazyContentComparator(spec, func() map[string]witnessBase {
+			bases := collectLiveBases(ctx, ns, spec, readable)
+			// A down/crash-looping instance yields no live base; read its content from a
+			// standalone read-only copy (increment 3). Precompute cuts for the live
+			// instances' max positions, since a down instance can't be re-queried later.
+			var peerMaxes []string
+			for _, b := range bases {
+				if b.ok && b.maxPos != "" {
+					peerMaxes = append(peerMaxes, b.maxPos)
+				}
+			}
+			for _, pod := range readable {
+				if !bases[pod].ok {
+					bases[pod] = deepContentBase(ctx, ns, pod, spec, peerMaxes)
+				}
+			}
+			return bases
+		})
 	}
 
 	return data, nil
@@ -796,7 +837,10 @@ func buildAuthorityInputs(data *cnpgTriageData, primaryName string) []authorityI
 // downstream assessments, AuthorityStatus, and Classify verdict are engine-agnostic.
 func cnpgCrossInstanceComparison(data *cnpgTriageData, primaryName string) model.DataComparison {
 	inputs := buildAuthorityInputs(data, primaryName)
-	decision := determineAuthority(inputs)
+	// TODO(content-witness): pass the witness-backed contentComparator here once the
+	// collection phase populates it, so a churn-only WAL divergence resolves to its
+	// content authority instead of refusing. nil = WAL-lineage-only (legacy).
+	decision := determineAuthority(inputs, data.contentComparator)
 
 	// MostAdvanced carries the decisive authority when there is one — the primary in
 	// the normal case, or a lower-timeline replica in a decisive stale-restore
