@@ -330,10 +330,13 @@ stencils:
   release:        { label: release,    message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/releases" }
   updated:        { label: updated,    message: "{env:BUILD_DATE}", color: "#236144", font: dejavu-sans, font_size: 11 }
   pulls:          { label: pulls,      message: "{registry.dockerhub.pulls}", color: "#1d63ed", link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
-  release-latest: { label: latest,     message: "v{base}", color: "#74ecbe", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest" }
-  dev-latest:     { label: latest-dev, message: "dev-{sha:8}", color: "#3b82f6", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev" }
-  dev-updated:    { label: updated,    message: "{registry.dockerhub.tag.latest-dev.updated}", color: "#236144" }
-  dev-size:       { label: size,       message: "{registry.dockerhub.tag.latest-dev.size}", color: "#555", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev" }
+  # ── image version row (ghcr-sourced: size/updated read from GHCR's manifest, not Docker Hub) ──
+  release-latest:  { label: latest,     message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
+  release-updated: { label: updated,    message: "{registry.ghcr.tag.v{base}.updated}", color: "#236144", font: dejavu-sans, font_size: 11 }
+  release-size:    { label: size,       message: "{registry.ghcr.tag.v{base}.size}", color: "#555", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
+  dev-latest:      { label: latest-dev, message: "dev-{sha:8}", color: "#3b82f6", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
+  dev-updated:     { label: updated,    message: "{registry.ghcr.tag.latest-dev.updated}", color: "#236144", font: dejavu-sans, font_size: 11 }
+  dev-size:        { label: size,       message: "{registry.ghcr.tag.latest-dev.size}", color: "#555", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
 
   # ── inline shields ──
   donate:  { render: shield, message: donate,  color: "#FF5E5B", logo: ko-fi,          logo_color: white, link: "https://ko-fi.com/T6T41IT163" }
@@ -341,9 +344,11 @@ stencils:
   github:  { render: shield, label: GitHub, message: source, color: "#181717", logo: github, link: "https://github.com/{var:github_org}/{var:github_repo}" }
   gitlab:  { render: shield, label: GitLab, message: source, color: "#FC6D26", logo: gitlab, link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}" }
   docker:  { render: shield, label: Docker, message: "{var:org}/{var:repo}", color: "#2496ED", logo: docker, logo_color: white, link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
+  ghcr:    { render: shield, label: GHCR,   message: "{var:org}/{var:repo}", color: "#181717", logo: github, logo_color: white, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
+  harbor:  { render: shield, label: Harbor, message: "{var:org}/{var:repo}", color: "#60b932", link: "https://cr.pcfae.com/harbor/projects" }
 
   # ── named producers (repo resolves from repos: publish-origin) ──
-  go-report:    { type: goreportcard }
+  go-version:   { type: go-version }
   last-commit:  { type: github-last-commit }
   issues-open:  { type: github-issues-open }
   contributors: { type: github-contributors }
@@ -361,12 +366,12 @@ scribe:
       file: "README.md"
       between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
       inline: true
-      items: [github, gitlab, go-report, last-commit, issues-open, contributors]
+      items: [github, gitlab, go-version, last-commit, issues-open, contributors]
 
     readme.image:
       file: "README.md"
       between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-      items: [docker, pulls]
+      items: [ghcr, docker, pulls, harbor, br, release-latest, release-updated, release-size, dev-latest, dev-updated, dev-size]
 
   commit:
     type: docs
