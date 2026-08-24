@@ -328,7 +328,7 @@ stencils:
   build:          { label: build,      message: "{env:BUILD_STATUS}", color: auto, font: monofur, link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}/-/pipelines" }
   license:        { label: license,    message: "AGPL-3.0-only", color: "#310937", font: monofur, link: LICENSE }
   release:        { label: release,    message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/releases" }
-  updated:        { label: updated,    message: "{env:BUILD_DATE}", color: "#236144", font: dejavu-sans, font_size: 11 }
+  updated:        { label: updated,    message: "{commit.date}", color: "#236144", font: dejavu-sans, font_size: 11 }
   pulls:          { label: pulls,      message: "{registry.dockerhub.pulls}", color: "#1d63ed", link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
   # ── image version row (ghcr-sourced: size/updated read from GHCR's manifest, not Docker Hub) ──
   release-latest:  { label: latest,     message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/pkgs/container/{var:repo}" }
