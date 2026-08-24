@@ -255,6 +255,8 @@ commit:
 dependency:
   enabled: true
   output: ".stagefreight/deps"
+  max_update: patch          # auto-apply patch bumps only; hold minor/major (security fixes bypass via the remediation floor)
+  min_release_age: 7d        # supply-chain cooldown: never adopt a release younger than 7 days
   scope:
     go_modules: true
     dockerfile_env: true
