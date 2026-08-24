@@ -327,11 +327,11 @@ stencils:
   license:        { label: license,    message: "AGPL-3.0-only", color: "#310937", font: monofur, link: LICENSE }
   release:        { label: release,    message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/releases" }
   updated:        { label: updated,    message: "{env:BUILD_DATE}", color: "#236144", font: dejavu-sans, font_size: 11 }
-  pulls:          { label: pulls,      message: "{docker.pulls}", color: "#1d63ed", link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
+  pulls:          { label: pulls,      message: "{registry.dockerhub.pulls}", color: "#1d63ed", link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
   release-latest: { label: latest,     message: "v{base}", color: "#74ecbe", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest" }
   dev-latest:     { label: latest-dev, message: "dev-{sha:8}", color: "#3b82f6", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev" }
-  dev-updated:    { label: updated,    message: "{docker.tag.latest-dev.updated}", color: "#236144" }
-  dev-size:       { label: size,       message: "{docker.tag.latest-dev.size}", color: "#555", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev" }
+  dev-updated:    { label: updated,    message: "{registry.dockerhub.tag.latest-dev.updated}", color: "#236144" }
+  dev-size:       { label: size,       message: "{registry.dockerhub.tag.latest-dev.size}", color: "#555", link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev" }
 
   # ── inline shields ──
   donate:  { render: shield, message: donate,  color: "#FF5E5B", logo: ko-fi,          logo_color: white, link: "https://ko-fi.com/T6T41IT163" }
