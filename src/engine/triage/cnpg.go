@@ -1094,6 +1094,35 @@ func diagnoseTimelineRewind(data *cnpgTriageData, cluster, ns string) *model.Dia
 	}
 }
 
+const (
+	// walBloatMinShare: WAL must occupy at least this fraction of the *volume* before the
+	// in-place "drain WAL" hint applies. This guards against sus-ing the WAL when a disk is
+	// full of real data with only a sliver of WAL (e.g. 95% full, 5% WAL) — clearing that
+	// sliver frees nothing meaningful, so expansion is the honest answer there.
+	walBloatMinShare = 0.25
+	// walBloatDrainedCeiling: and once the WAL is recycled, the remaining non-WAL footprint
+	// (real data + fs overhead) must sit at/below this fraction of the volume for "drain WAL,
+	// don't expand" to be the honest call. The cap is deliberately conservative: a DB volume
+	// needs real headroom above the data for healthy WAL (max_wal_size + archiving-lag buffer),
+	// temp/sort spills, VACUUM, and growth — so ~30% must stay free. If data alone already sits
+	// above this, the volume is genuinely undersized and expansion is warranted regardless of WAL.
+	walBloatDrainedCeiling = 0.70
+)
+
+// walDominant reports whether a full/near-full CNPG disk is full because of un-recycled WAL
+// rather than real data — WAL is a meaningful share of the volume AND draining it would bring
+// usage comfortably below full. In that state the PVC is NOT undersized; growing it only burns
+// finite cluster capacity while WAL keeps accumulating. The reasonable fix is to drain/clear
+// the WAL in place (repair re-clones onto the same PVC from an escrow/donor), never expansion.
+func walDominant(ds *model.DiskStats) bool {
+	if ds == nil || ds.TotalBytes <= 0 || ds.UsedBytes <= 0 {
+		return false
+	}
+	walShare := float64(ds.WALBytes) / float64(ds.TotalBytes)
+	drainedShare := float64(ds.UsedBytes-ds.WALBytes) / float64(ds.TotalBytes)
+	return walShare >= walBloatMinShare && drainedShare <= walBloatDrainedCeiling
+}
+
 func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.DataComparison,
 	primaryName string) []model.InstanceAssessment {
 
@@ -1164,8 +1193,21 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 		switch {
 		case isPrimary:
 			if diskFull || diskPct >= 90 {
-				notes = append(notes, "PRIMARY - disk full/low")
-				recommendation = "Primary disk is full. Expand PVC storage in the Cluster spec."
+				ds := data.diskStats[inst.Pod]
+				if walDominant(ds) {
+					notes = append(notes, fmt.Sprintf("PRIMARY - disk full from un-recycled WAL, not data (WAL %s vs data %s)",
+						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes)))
+					recommendation = fmt.Sprintf(
+						"Disk is full but %s of it is un-recycled WAL against only %s of real data — the volume is NOT "+
+							"undersized, the WAL just is not draining (continuous archiving has likely stalled; check the "+
+							"barmanObjectStore credentials/endpoint). Do NOT expand the PVC — that only burns finite cluster "+
+							"capacity while WAL keeps growing. Fix in place: escrow the authority, clear the WAL-bloated pgdata "+
+							"on the existing PVC, then pg_basebackup re-clone:\n\n  %s",
+						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes), healCmd)
+				} else {
+					notes = append(notes, "PRIMARY - disk full/low (usage is real data)")
+					recommendation = "Primary disk is full and the usage is actual data, not WAL. Expand the PVC storage in the Cluster spec, or prune data."
+				}
 			} else {
 				notes = append(notes, "PRIMARY - healthy")
 				recommendation = "No action needed."
@@ -1207,7 +1249,12 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 			notes = append(notes, "healthy (streaming, checkpoint LSN slightly behind - normal)")
 			if diskPct >= 90 {
 				notes = append(notes, fmt.Sprintf("disk low (%d%%)", diskPct))
-				recommendation = "Streaming OK but disk usage is high. Consider expanding PVC storage."
+				if ds := data.diskStats[inst.Pod]; walDominant(ds) {
+					recommendation = fmt.Sprintf("Streaming OK but the disk is filling with un-recycled WAL (%s WAL vs %s data) — check continuous archiving; do not expand the PVC for WAL bloat.",
+						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes))
+				} else {
+					recommendation = "Streaming OK but disk usage is high (real data). Consider expanding PVC storage."
+				}
 			} else {
 				recommendation = "No action needed."
 			}
@@ -1272,7 +1319,12 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 				recommendation = "Data is current — a RESTART, not a re-clone. Delete the pod so CNPG recreates it against the same PVC, and check pod logs for the crash root cause."
 			case diskPct >= 90:
 				notes = append(notes, fmt.Sprintf("healthy but disk low (%d%%)", diskPct))
-				recommendation = "Healthy but disk usage is high. Consider expanding PVC storage."
+				if ds := data.diskStats[inst.Pod]; walDominant(ds) {
+					recommendation = fmt.Sprintf("Healthy but the disk is filling with un-recycled WAL (%s WAL vs %s data) — check continuous archiving; do not expand the PVC for WAL bloat.",
+						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes))
+				} else {
+					recommendation = "Healthy but disk usage is high (real data). Consider expanding PVC storage."
+				}
 			default:
 				notes = append(notes, "healthy")
 				recommendation = "No action needed."
