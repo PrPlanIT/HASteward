@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const scratchWALDir = "/scratch/wal"
@@ -46,7 +47,7 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 	output.Section("Phase 3: Disk-full deadlock recovery (replay + recycle in place)")
 
 	if cfg.DryRun {
-		tail := "then unfence and hand it back to the operator"
+		tail := "then unfence, hand it back to the operator, and SETTLE it — verify the primary actually returns and cancel any stuck failover the disk-full crashloop left open (operator-quiesced targetPrimary realign)"
 		if keepFenced {
 			tail = "then KEEP IT FENCED (isolated from operator reconcile so it is NOT pg_rewound onto the stale primary)"
 		}
@@ -146,9 +147,181 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 			targetPod, cfg.ClusterName, ns)
 		return result, nil
 	}
-	output.Success("Deadlock cleared on %s: WAL replayed + recycled in place; the operator will restart it on its "+
-		"(same, now de-bloated) PVC.", targetPod)
+	output.Success("Deadlock cleared on %s: WAL replayed + recycled in place on its (same, now de-bloated) PVC.", targetPod)
+
+	// Own the outcome. Handing a recovered PRIMARY back to the operator is not the end: if
+	// CNPG opened a failover while this instance was crashlooping disk-full, the operator is
+	// now wedged — it cannot complete the failover (it cannot demote the old primary whose
+	// pod we deleted) and will not recreate the primary while a failover is open. Verify the
+	// primary actually returns; cancel a stuck failover if it does not.
+	if err := w.settlePrimary(ctx, targetPod); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// settleAction classifies why a recovered PRIMARY has not yet settled, from the two CNPG
+// status fields that describe an in-progress failover.
+type settleAction int
+
+const (
+	settleWait               settleAction = iota // aligned or transient — keep watching
+	settleCancel                                 // a failover is open against the authority — cancel it
+	settleCompletedElsewhere                     // the failover completed to another instance — escalate to promotion
+)
+
+// classifyPrimarySettle decides, from the recovered authority pod and the cluster's live
+// currentPrimary/targetPrimary, what settlePrimary should do. Pure so the branch logic is
+// unit-tested without a cluster. An empty currentPrimary is treated as transient (the
+// operator has not re-reported yet), NOT as a completed failover.
+func classifyPrimarySettle(authority, currentPrimary, targetPrimary string) settleAction {
+	if currentPrimary == "" {
+		return settleWait
+	}
+	if currentPrimary != authority {
+		return settleCompletedElsewhere
+	}
+	if targetPrimary != "" && targetPrimary != authority {
+		return settleCancel
+	}
+	return settleWait
+}
+
+// settlePrimary owns the outcome after a PRIMARY deadlock-recovery hands the instance back.
+// It watches for the recovered authority to return as a Ready primary; if the operator is
+// wedged in the failover it opened while the instance was crashlooping (currentPrimary is
+// still the authority but targetPrimary points elsewhere, so it will not recreate the
+// primary), it CANCELS that failover the only way that holds and re-watches. Bounded
+// attempts; on exhaustion it FAILS LOUD with the live state and the manual escalation — a
+// wedged cluster is never reported as settled. The WAL recovery is already durable, so a
+// failure here is a settle failure, not data loss, and the message says so.
+func (w *cnpgPruner) settlePrimary(ctx context.Context, authority string) error {
+	cfg := w.p.Config()
+	ns := cfg.Namespace
+	c := k8s.GetClients()
+
+	output.Section("Phase 4: Settling the recovered primary")
+	output.Bullet(0, "Ensuring %s returns as the primary (and cancelling any stuck failover the disk-full crashloop opened)", authority)
+
+	const (
+		maxAttempts      = 3
+		watchAttempts    = 12 // ×10s ≈ 2 min per watch
+		watchIntervalSec = 10
+	)
+
+	lastState := "no status read yet"
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cl, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err != nil {
+			common.WarnLog("could not read %s to classify settle state (will still watch): %v", cfg.ClusterName, err)
+		} else {
+			cur := k8s.GetNestedString(cl, "status", "currentPrimary")
+			tgt := k8s.GetNestedString(cl, "status", "targetPrimary")
+			switch classifyPrimarySettle(authority, cur, tgt) {
+			case settleCompletedElsewhere:
+				return fmt.Errorf("the failover completed to %s before it could be cancelled — the recovered authority %s is no longer the "+
+					"primary (do NOT expand anything). Promote the authority deliberately: hasteward repair -e cnpg -c %s -n %s "+
+					"--instance <ordinal-of-%s> --promote", cur, authority, cfg.ClusterName, ns, authority)
+			case settleCancel:
+				output.Bullet(0, "Stuck failover open (currentPrimary=%s targetPrimary=%s) — cancelling it (attempt %d/%d)", cur, tgt, attempt+1, maxAttempts)
+				if cerr := w.cancelStuckFailover(ctx, cfg.ClusterName, authority); cerr != nil {
+					return fmt.Errorf("cancelling the stuck failover for %s: %w", authority, cerr)
+				}
+			case settleWait:
+				output.Bullet(0, "No failover open; waiting for %s to be recreated and Ready (attempt %d/%d)", authority, attempt+1, maxAttempts)
+			}
+		}
+		healthy, state := w.waitPrimaryHealthy(ctx, authority, watchAttempts, watchIntervalSec)
+		lastState = state
+		if healthy {
+			output.Success("Primary %s is back and Ready (%s) — cluster settled, no data loss, no PVC growth.", authority, state)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("deadlock-recover freed the disk and preserved all data on %s (no loss, no PVC growth), but it has not returned as the "+
+		"primary after %d attempts: %s. The operator is not recreating it. Operator-quiesced manual reset: "+
+		"kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop=disabled && "+
+		"kubectl -n %s patch cluster %s --subresource status --type merge -p '{\"status\":{\"targetPrimary\":\"%s\"}}' && "+
+		"kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop- ; then re-triage.",
+		authority, maxAttempts, lastState, cfg.ClusterName, ns, ns, cfg.ClusterName, authority, cfg.ClusterName, ns)
+}
+
+// waitPrimaryHealthy polls until the recovered authority is the current primary, no failover
+// is in progress (targetPrimary == currentPrimary == authority), and its postgres container
+// is Running + Ready — the "this primary is serving again" signal. Returns the last observed
+// status line either way, for the caller's log/error.
+func (w *cnpgPruner) waitPrimaryHealthy(ctx context.Context, authority string, attempts, intervalSec int) (bool, string) {
+	cfg := w.p.Config()
+	ns := cfg.Namespace
+	c := k8s.GetClients()
+	last := "unknown"
+	for i := 0; i < attempts; i++ {
+		cl, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err == nil {
+			cur := k8s.GetNestedString(cl, "status", "currentPrimary")
+			tgt := k8s.GetNestedString(cl, "status", "targetPrimary")
+			phase := k8s.GetNestedString(cl, "status", "phase")
+			ready := k8s.GetNestedInt64(cl, "status", "readyInstances")
+			last = fmt.Sprintf("phase=%q currentPrimary=%s targetPrimary=%s readyInstances=%d", phase, cur, tgt, ready)
+			if cur == authority && tgt == authority {
+				if pod, perr := c.Clientset.CoreV1().Pods(ns).Get(ctx, authority, metav1.GetOptions{}); perr == nil && k8s.PodReady(*pod, "postgres") {
+					return true, last
+				}
+			}
+		}
+		common.Sleep(time.Duration(intervalSec) * time.Second)
+	}
+	return false, last
+}
+
+// cancelStuckFailover cancels an in-progress CNPG failover that can never complete (the old
+// primary's pod is gone, so the operator cannot demote it) by realigning targetPrimary back
+// to the recovered authority. A LIVE targetPrimary patch is re-decided within one reconcile
+// (proven on the fleet), so the operator is first quiesced (reconciliationLoop=disabled) —
+// the patch then holds, and on re-enable the operator sees currentPrimary == targetPrimary
+// (no failover) and recreates the missing primary pod as a restart. Reconciliation is
+// re-enabled on every path via a detached-context safety net, mirroring the offline-PVC
+// primitive: a cluster left unreconciled is the worst possible outcome.
+func (w *cnpgPruner) cancelStuckFailover(ctx context.Context, cluster, authority string) error {
+	cfg := w.p.Config()
+	ns := cfg.Namespace
+	c := k8s.GetClients()
+
+	if err := cnpgjob.SetReconciliationLoop(ctx, ns, cluster, true /* disabled */); err != nil {
+		return fmt.Errorf("could not quiesce the operator to cancel the failover: %w", err)
+	}
+	reEnabled := false
+	defer func() {
+		if reEnabled {
+			return
+		}
+		for i := 0; i < 5; i++ {
+			dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := cnpgjob.SetReconciliationLoop(dctx, ns, cluster, false /* re-enabled */)
+			cancel()
+			if err == nil {
+				return
+			}
+			common.Sleep(3 * time.Second)
+		}
+		common.WarnLog("CRITICAL: could not re-enable reconciliation on %s — clear it manually: kubectl annotate cluster %s -n %s cnpg.io/reconciliationLoop-", cluster, cluster, ns)
+	}()
+
+	common.Sleep(2 * time.Second) // let the operator observe the disable before we patch
+
+	patch := fmt.Sprintf(`{"status":{"targetPrimary":%q}}`, authority)
+	if _, err := c.Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Patch(
+		ctx, cluster, types.MergePatchType, []byte(patch), metav1.PatchOptions{}, "status"); err != nil {
+		return fmt.Errorf("realigning targetPrimary to %s failed: %w", authority, err)
+	}
+	output.Bullet(1, "targetPrimary realigned to %s; re-enabling reconciliation so CNPG recreates it as a restart", authority)
+
+	if err := cnpgjob.SetReconciliationLoop(ctx, ns, cluster, false /* re-enabled */); err != nil {
+		return fmt.Errorf("realigned targetPrimary but failed to re-enable reconciliation (the deferred safety net will retry): %w", err)
+	}
+	reEnabled = true
+	return nil
 }
 
 // deadlockRecoverOnPVC runs the replay+recycle sequence via Go-driven exec into the helper
