@@ -23,6 +23,7 @@ unprefixed ones (e.g. `KUBECONFIG`) are standard tools' variables it honors.
 | `HASTEWARD_SNAPSHOT` | `--snapshot` | `string` | `latest` | Restic snapshot ID or 'latest' (for restore) |
 | `HASTEWARD_HEAL_TIMEOUT` | `--heal-timeout` | `int` | `600` | Heal wait timeout in seconds |
 | `HASTEWARD_DELETE_TIMEOUT` | `--delete-timeout` | `int` | `300` | Delete wait timeout in seconds |
+| `HASTEWARD_EXPAND_TARGET_PCT` | `--expand-target-pct` | `int` | `60` | When triage recommends expanding a genuinely data-full PVC, size the suggestion so post-expansion data lands at ~this percent of the volume (leaving headroom for WAL/temp/growth). Set HASTEWARD_EXPAND_TARGET_PCT once to avoid repeating the flag. |
 | `KUBECONFIG` | `--kubeconfig` | `string` | `—` | Path to kubeconfig file |
 | `HASTEWARD_VERBOSE` | `--verbose`, `-v` | `bool` | `false` | Verbose output (debug logging) |
 | `HASTEWARD_OUTPUT` | `--output` | `string` | `auto` | Output format: auto, human, json, jsonl |

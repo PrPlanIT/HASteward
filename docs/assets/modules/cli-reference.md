@@ -16,6 +16,7 @@ encryption, and compression.
 | `--delete-timeout` | `int` | `300` | Delete wait timeout in seconds |
 | `--dry-run` | `bool` | `false` | Show planned actions without executing (destructive commands) |
 | `--engine`, `-e` | `string` | `` | Database engine: cnpg or galera |
+| `--expand-target-pct` | `int` | `60` | When triage recommends expanding a genuinely data-full PVC, size the suggestion so post-expansion data lands at ~this percent of the volume (leaving headroom for WAL/temp/growth). Set HASTEWARD_EXPAND_TARGET_PCT once to avoid repeating the flag. |
 | `--force`, `-f` | `bool` | `false` | Override automatic safety refusal for targeted repair. In ambiguous Galera recovery states (divergent UUIDs, split-brain, no clear primary), --donor is required to declare the authoritative source node. |
 | `--instance`, `-i` | `string` | `` | Target specific instance number |
 | `--kubeconfig` | `string` | `` | Path to kubeconfig file |
