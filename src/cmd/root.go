@@ -81,6 +81,10 @@ func init() {
 	addHealTimeoutFlag(repairCmd.Flags())
 	addHealTimeoutFlag(reconfigureCmd.Flags())
 	env.Int(pf, &Cfg.DeleteTimeout, "delete-timeout", "", "DELETE_TIMEOUT", 300, "Delete wait timeout in seconds")
+	env.Int(pf, &Cfg.ExpandTargetPct, "expand-target-pct", "", "EXPAND_TARGET_PCT", 60,
+		"When triage recommends expanding a genuinely data-full PVC, size the suggestion so\n"+
+			"post-expansion data lands at ~this percent of the volume (leaving headroom for\n"+
+			"WAL/temp/growth). Set HASTEWARD_EXPAND_TARGET_PCT once to avoid repeating the flag.")
 	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
 	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")
 	pf.BoolVar(&dryRun, "dry-run", false, "Show planned actions without executing (destructive commands)")

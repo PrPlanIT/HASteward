@@ -1123,6 +1123,32 @@ func walDominant(ds *model.DiskStats) bool {
 	return walShare >= walBloatMinShare && drainedShare <= walBloatDrainedCeiling
 }
 
+// suggestExpansion sizes a PVC expansion so post-expansion data lands at ~targetPct of the
+// volume, rounded up to a whole GiB, and returns the new size plus the growth factor over the
+// current volume. Returns (0,0) when it cannot compute (no data breakdown, or a nonsense target).
+func suggestExpansion(ds *model.DiskStats, targetPct int) (newBytes int64, factor float64) {
+	if ds == nil || ds.DataBytes <= 0 || ds.TotalBytes <= 0 || targetPct <= 0 || targetPct >= 100 {
+		return 0, 0
+	}
+	const gib = int64(1) << 30
+	raw := float64(ds.DataBytes) / (float64(targetPct) / 100.0)
+	newBytes = ((int64(raw) + gib - 1) / gib) * gib // round up to a whole GiB
+	if newBytes <= ds.TotalBytes {                  // must actually grow the volume
+		newBytes = ((ds.TotalBytes / gib) + 1) * gib
+	}
+	return newBytes, float64(newBytes) / float64(ds.TotalBytes)
+}
+
+// expandRec builds the "expand the PVC" recommendation with a concrete, user-tunable size
+// suggestion (sized to Config().ExpandTargetPct) when the disk breakdown allows one.
+func (t *cnpgTriage) expandRec(ds *model.DiskStats, lead string) string {
+	if nb, factor := suggestExpansion(ds, t.p.Config().ExpandTargetPct); nb > 0 {
+		return fmt.Sprintf("%s expand the PVC ~%s -> ~%s so data sits at ~%d%% (~%.1fx); tune with --expand-target-pct / HASTEWARD_EXPAND_TARGET_PCT.",
+			lead, output.FormatBytes(ds.TotalBytes), output.FormatBytes(nb), t.p.Config().ExpandTargetPct, factor)
+	}
+	return lead + " expand the PVC storage in the Cluster spec (or prune data)."
+}
+
 func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.DataComparison,
 	primaryName string) []model.InstanceAssessment {
 
@@ -1206,7 +1232,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes), healCmd)
 				} else {
 					notes = append(notes, "PRIMARY - disk full/low (usage is real data)")
-					recommendation = "Primary disk is full and the usage is actual data, not WAL. Expand the PVC storage in the Cluster spec, or prune data."
+					recommendation = t.expandRec(ds, "Primary disk is full of real data, not WAL —")
 				}
 			} else {
 				notes = append(notes, "PRIMARY - healthy")
@@ -1253,7 +1279,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 					recommendation = fmt.Sprintf("Streaming OK but the disk is filling with un-recycled WAL (%s WAL vs %s data) — check continuous archiving; do not expand the PVC for WAL bloat.",
 						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes))
 				} else {
-					recommendation = "Streaming OK but disk usage is high (real data). Consider expanding PVC storage."
+					recommendation = t.expandRec(ds, "Streaming OK but disk usage is high (real data) —")
 				}
 			} else {
 				recommendation = "No action needed."
@@ -1323,7 +1349,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 					recommendation = fmt.Sprintf("Healthy but the disk is filling with un-recycled WAL (%s WAL vs %s data) — check continuous archiving; do not expand the PVC for WAL bloat.",
 						output.FormatBytes(ds.WALBytes), output.FormatBytes(ds.DataBytes))
 				} else {
-					recommendation = "Healthy but disk usage is high (real data). Consider expanding PVC storage."
+					recommendation = t.expandRec(ds, "Healthy but disk usage is high (real data) —")
 				}
 			default:
 				notes = append(notes, "healthy")

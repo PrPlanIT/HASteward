@@ -62,3 +62,44 @@ func TestWalDominant(t *testing.T) {
 		}
 	}
 }
+
+// TestSuggestExpansion pins the expansion sizer: it lands data at ~targetPct, rounds up to a
+// whole GiB, always grows, and reports the growth factor — and declines nonsense inputs.
+func TestSuggestExpansion(t *testing.T) {
+	const gib = int64(1) << 30
+	cases := []struct {
+		name       string
+		ds         *model.DiskStats
+		target     int
+		wantGiB    int64 // expected new size in GiB; 0 => expect no suggestion
+		wantFactor float64
+	}{
+		{ // 7Gi data on 8Gi, target 60% -> 7/0.6 = 11.67 -> round up 12Gi (1.5x)
+			name: "data7_target60", ds: &model.DiskStats{TotalBytes: 8 * gib, DataBytes: 7 * gib},
+			target: 60, wantGiB: 12, wantFactor: 1.5,
+		},
+		{ // 6Gi data (75% full) target 60% -> exactly 10Gi (1.25x)
+			name: "data6_target60", ds: &model.DiskStats{TotalBytes: 8 * gib, DataBytes: 6 * gib},
+			target: 60, wantGiB: 10, wantFactor: 1.25,
+		},
+		{name: "nil", ds: nil, target: 60, wantGiB: 0},
+		{name: "no_data_breakdown", ds: &model.DiskStats{TotalBytes: 8 * gib}, target: 60, wantGiB: 0},
+		{name: "target_zero", ds: &model.DiskStats{TotalBytes: 8 * gib, DataBytes: 6 * gib}, target: 0, wantGiB: 0},
+		{name: "target_100", ds: &model.DiskStats{TotalBytes: 8 * gib, DataBytes: 6 * gib}, target: 100, wantGiB: 0},
+	}
+	for _, c := range cases {
+		nb, factor := suggestExpansion(c.ds, c.target)
+		if c.wantGiB == 0 {
+			if nb != 0 {
+				t.Errorf("%s: expected no suggestion, got %d bytes", c.name, nb)
+			}
+			continue
+		}
+		if nb != c.wantGiB*gib {
+			t.Errorf("%s: newBytes = %dGiB, want %dGiB", c.name, nb/gib, c.wantGiB)
+		}
+		if factor < c.wantFactor-0.01 || factor > c.wantFactor+0.01 {
+			t.Errorf("%s: factor = %.3f, want ~%.2f", c.name, factor, c.wantFactor)
+		}
+	}
+}

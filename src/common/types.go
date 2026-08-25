@@ -42,4 +42,5 @@ type Config struct {
 	Kubeconfig     string
 	Verbose        bool
 	DryRun         bool // preview destructive actions without executing (set from --dry-run)
+	ExpandTargetPct int // when triage recommends expanding a genuinely data-full PVC, size the suggestion so post-expansion data lands at ~this % of the volume (flag --expand-target-pct / env HASTEWARD_EXPAND_TARGET_PCT; default 60)
 }
