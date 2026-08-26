@@ -59,7 +59,7 @@ func TestDeadlockRecoverOnPVC_HappyPath(t *testing.T) {
 	r := &dlRouter{controldata: dlShutDown, replayOut: "redo done at 8F/27; checkpoint complete"}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	if err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns"); err != nil {
+	if _, _, err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns"); err != nil {
 		t.Fatalf("happy path must succeed: %v", err)
 	}
 	if !r.relocated || !r.replayed || !r.archiveCalled || !r.movedback {
@@ -78,7 +78,7 @@ func TestDeadlockRecoverOnPVC_RefusesTrimIfNotShutDown(t *testing.T) {
 	r := &dlRouter{controldata: notClean, replayOut: "redo in progress"}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns")
+	_, _, err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns")
 	if err == nil || !strings.Contains(err.Error(), "shut down") {
 		t.Fatalf("must refuse when not cleanly shut down, got: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestDeadlockRecoverOnPVC_AbortsOnReplayPanic(t *testing.T) {
 	r := &dlRouter{controldata: dlShutDown, replayOut: "PANIC: could not write to file: No space left on device"}
 	defer k8s.SetExecHookForTest(r.hook())()
 
-	err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns")
+	_, _, err := testPruner(false).deadlockRecoverOnPVC(context.Background(), "pod", "ns")
 	if err == nil || !strings.Contains(err.Error(), "PANIC") {
 		t.Fatalf("must abort on replay PANIC, got: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestDeadlockRecoverOnPVC_AbortsOnReplayPanic(t *testing.T) {
 }
 
 func TestParseControlState(t *testing.T) {
-	state, redo := parseControlState(dlShutDown)
+	state, redo, _, _ := parseControlState(dlShutDown)
 	if state != "shut down" {
 		t.Fatalf("state=%q, want \"shut down\"", state)
 	}
