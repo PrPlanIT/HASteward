@@ -170,7 +170,9 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 	// authority a behind replica must NOT be promoted over: KEEP IT FENCED.
 	output.Success("Deadlock cleared on %s: WAL replayed + recycled in place on its (same, now de-bloated) PVC (timeline %d, redo done at %s).",
 		targetPod, recovered.timeline, formatLSNU(recovered.lsn))
+	common.InfoLog("Authority: %s recovered to timeline %d, redo done at %s", targetPod, recovered.timeline, formatLSNU(recovered.lsn))
 	safe := safeToReleaseRecoveredPrimary(recovered, replicas)
+	common.InfoLog("Release gate: %d readable replica(s), safe-to-release=%v", len(replicas), safe)
 	output.Bullet(0, "Authority check: %d readable replica(s), safe-to-release=%v", len(replicas), safe)
 	if !safe {
 		output.Info("No replica is provably caught up with %s — it holds committed data the replicas lack. KEEPING IT FENCED so CNPG cannot "+
@@ -192,7 +194,8 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 
 // instancePos is one instance's data position for the release/guard decision: its timeline
 // and its LSN (the recovered instance's recovery "redo done at" endpoint; a running replica's
-// REPLAY LSN — both are "how far its committed data goes", on the same timeline and units).
+// RECEIVED-to LSN — both are "how far its committed data goes / can go", on the same timeline
+// and units, so a replica that received everything the recovered instance flushed is caught up).
 type instancePos struct {
 	pod      string
 	timeline int64
@@ -224,10 +227,14 @@ func safeToReleaseRecoveredPrimary(recovered instancePos, replicas []instancePos
 func formatLSNU(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, lsn&0xFFFFFFFF) }
 
 // readReplicaPositions queries every RUNNING instance except excludePod for its timeline and
-// data LSN (replay LSN on a standby, current WAL LSN on a primary) — the "how far its data
-// goes" that safeToReleaseRecoveredPrimary compares against the recovered instance. Called
-// while reconcile is DISABLED (peers stable, no failover in flight). Unreadable/not-ready
-// instances are skipped: their absence makes the release check fail closed to GUARD.
+// the furthest WAL position it can promote to: pg_last_wal_receive_lsn — WAL RECEIVED and
+// synced to disk — not pg_last_wal_replay_lsn. On promotion CNPG finishes applying received
+// WAL, so a standby that durably received all of the recovered instance's WAL is caught up
+// even when its APPLY momentarily lags (the walreceiver runs ahead of the startup replayer).
+// Comparing replay would falsely guard a replica that is one un-applied record behind. GREATEST
+// takes receive-or-replay (a promoted peer has no receiver); COALESCE falls back to a primary's
+// current LSN. Called while reconcile is DISABLED (peers stable, no failover in flight).
+// Unreadable/not-ready instances are skipped: their absence makes the release check GUARD.
 func (w *cnpgPruner) readReplicaPositions(ctx context.Context, ns, excludePod string) []instancePos {
 	c := k8s.GetClients()
 	pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: w.p.PodSelector()})
@@ -236,7 +243,7 @@ func (w *cnpgPruner) readReplicaPositions(ctx context.Context, ns, excludePod st
 		return nil
 	}
 	const q = "SELECT (SELECT timeline_id FROM pg_control_checkpoint())::text || ' ' || " +
-		"COALESCE(pg_last_wal_replay_lsn(), pg_current_wal_lsn())::text;"
+		"COALESCE(GREATEST(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()), pg_current_wal_lsn())::text;"
 	var out []instancePos
 	for i := range pods.Items {
 		pod := pods.Items[i]
@@ -257,6 +264,7 @@ func (w *cnpgPruner) readReplicaPositions(ctx context.Context, ns, excludePod st
 		if tErr != nil || lErr != nil {
 			continue
 		}
+		common.InfoLog("release check: %s timeline=%d received-to %s", pod.Name, tl, formatLSNU(lsn))
 		out = append(out, instancePos{pod: pod.Name, timeline: tl, lsn: lsn})
 	}
 	return out
