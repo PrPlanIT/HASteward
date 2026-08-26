@@ -102,11 +102,37 @@ func TestDeadlockRecoverOnPVC_AbortsOnReplayPanic(t *testing.T) {
 }
 
 func TestParseControlState(t *testing.T) {
-	state, redo, _, _ := parseControlState(dlShutDown)
+	state, redo, tl := parseControlState(dlShutDown)
 	if state != "shut down" {
 		t.Fatalf("state=%q, want \"shut down\"", state)
 	}
 	if redo != "000000080000008F00000027" {
 		t.Fatalf("redoWAL=%q, want 000000080000008F00000027", redo)
+	}
+	if tl != 8 {
+		t.Fatalf("timeline=%d, want 8", tl)
+	}
+}
+
+// parseRedoDoneLSN pins the authority-LSN source: the recovery "redo done at X/Y" endpoint,
+// NOT the end-of-recovery checkpoint (which sits past every replica and would never release).
+func TestParseRedoDoneLSN(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want uint64
+		ok   bool
+	}{
+		// PG 16+ appends " system usage: ..." after the LSN.
+		{"pg16_with_usage", "LOG:  redo done at 8F/27000028 system usage: CPU: user 0.00 s", 0x8F27000028, true},
+		{"bare", "redo done at 8F/27; checkpoint complete", 0x8F00000027, true},
+		{"absent", "redo is not required", 0, false},
+		{"garbage_lsn", "redo done at not-an-lsn", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseRedoDoneLSN(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("%s: parseRedoDoneLSN = (%X, %v), want (%X, %v)", c.name, got, ok, c.want, c.ok)
+		}
 	}
 }

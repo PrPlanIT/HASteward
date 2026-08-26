@@ -168,7 +168,7 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 	// outcome the operator can reach loses data (it promotes an equal-or-newer peer, or
 	// restarts the recovered instance as primary). Otherwise the recovered instance is the
 	// authority a behind replica must NOT be promoted over: KEEP IT FENCED.
-	output.Success("Deadlock cleared on %s: WAL replayed + recycled in place on its (same, now de-bloated) PVC (timeline %d, checkpoint %s).",
+	output.Success("Deadlock cleared on %s: WAL replayed + recycled in place on its (same, now de-bloated) PVC (timeline %d, redo done at %s).",
 		targetPod, recovered.timeline, formatLSNU(recovered.lsn))
 	safe := safeToReleaseRecoveredPrimary(recovered, replicas)
 	output.Bullet(0, "Authority check: %d readable replica(s), safe-to-release=%v", len(replicas), safe)
@@ -191,8 +191,8 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 }
 
 // instancePos is one instance's data position for the release/guard decision: its timeline
-// and its LSN (the recovered instance's post-replay CHECKPOINT LSN; a running replica's
-// REPLAY LSN — both are "how far its data goes").
+// and its LSN (the recovered instance's recovery "redo done at" endpoint; a running replica's
+// REPLAY LSN — both are "how far its committed data goes", on the same timeline and units).
 type instancePos struct {
 	pod      string
 	timeline int64
@@ -203,8 +203,8 @@ type instancePos struct {
 // back to the operator WITHOUT risking data loss. The operator, seeing the recovered
 // instance fenced, may promote the most-advanced healthy replica — so releasing is safe
 // ONLY when some replica is provably not behind the recovered instance: same timeline AND
-// replayed at least as far as the recovered instance's checkpoint. Then whichever replica
-// CNPG promotes holds everything the recovered instance holds — no loss.
+// replayed at least as far as the recovered instance's "redo done at" endpoint. Then whichever
+// replica CNPG promotes holds everything the recovered instance holds — no loss.
 //
 // Fail-safe to GUARD (false): a replica on a DIFFERENT timeline is a divergence (a failover
 // already forked away — comparing LSNs across the fork is not "caught up"); a replica behind
@@ -348,13 +348,27 @@ df -Pm %[1]s | tail -1`, pgDataDir, scratchWALDir)
 		return 0, 0, fmt.Errorf("single-user replay reported PANIC/FATAL — refusing to trim WAL: %s", strings.TrimSpace(res.Stderr))
 	}
 
+	// The authority position is where crash recovery finished replaying committed WAL
+	// ("redo done at X"), NOT the end-of-recovery checkpoint postgres writes just past it. That
+	// checkpoint record sits one record beyond every replica's streamed position, so comparing
+	// it would judge even a fully-caught-up replica "behind" and the release gate would never
+	// fire. "redo done at" is on the same timeline and in the same units as a standby's
+	// pg_last_wal_replay_lsn, so the two are directly comparable.
+	authorityLSN, ok := parseRedoDoneLSN(res.Stdout + res.Stderr)
+	if !ok {
+		// Recovery reported no redo endpoint (nothing to replay) — the authority position
+		// cannot be bounded, so fail safe: a max LSN makes the release gate GUARD.
+		common.WarnLog("deadlock-recover: no \"redo done at\" in the replay output — cannot prove the authority position; the release gate will GUARD")
+		authorityLSN = ^uint64(0)
+	}
+
 	// 3. Confirm the instance is now cleanly shut down, and read the new checkpoint REDO WAL
 	//    file — the exact cutoff for archivecleanup (everything older is deadweight).
 	cd, err := k8s.ExecCommand(ctx, helper, ns, c, []string{"pg_controldata", pgDataDir})
 	if err != nil {
 		return 0, 0, fmt.Errorf("post-replay pg_controldata failed: %w", err)
 	}
-	state, redoWAL, timeline, checkpointLSN := parseControlState(cd.Stdout)
+	state, redoWAL, timeline := parseControlState(cd.Stdout)
 	if state != "shut down" {
 		return 0, 0, fmt.Errorf("post-replay state is %q, not \"shut down\" — refusing to trim WAL (datadir left fenced)", state)
 	}
@@ -376,13 +390,14 @@ df -Pm %[1]s | tail -1`, pgDataDir, scratchWALDir)
 	if _, err := k8s.ExecCommand(ctx, helper, ns, c, []string{"sh", "-c", moveback}); err != nil {
 		return 0, 0, fmt.Errorf("moving recycled WAL back onto the PVC failed: %w", err)
 	}
-	return timeline, checkpointLSN, nil
+	return timeline, authorityLSN, nil
 }
 
 // parseControlState extracts, from pg_controldata output, the cluster state, the checkpoint
-// REDO WAL file (the archivecleanup cutoff), and the recovered instance's TimeLineID +
-// checkpoint LSN (the authority position the release/guard decision compares against).
-func parseControlState(out string) (state, redoWAL string, timeline int64, checkpointLSN uint64) {
+// REDO WAL file (the archivecleanup cutoff), and the recovered instance's TimeLineID (the
+// authority TIMELINE the release/guard decision compares against — the authority LSN comes
+// from the recovery "redo done at" endpoint, not the control file's checkpoint location).
+func parseControlState(out string) (state, redoWAL string, timeline int64) {
 	for _, line := range strings.Split(out, "\n") {
 		t := strings.TrimSpace(line)
 		switch {
@@ -392,13 +407,30 @@ func parseControlState(out string) (state, redoWAL string, timeline int64, check
 			redoWAL = lastField(t)
 		case strings.HasPrefix(t, "Latest checkpoint's TimeLineID:"):
 			timeline, _ = strconv.ParseInt(strings.TrimSpace(strings.SplitN(t, ":", 2)[1]), 10, 64)
-		case strings.HasPrefix(t, "Latest checkpoint location:"):
-			if v, err := parseLSN(strings.TrimSpace(strings.SplitN(t, ":", 2)[1])); err == nil {
-				checkpointLSN = v
-			}
 		}
 	}
-	return state, redoWAL, timeline, checkpointLSN
+	return state, redoWAL, timeline
+}
+
+// parseRedoDoneLSN pulls the "redo done at X/Y" LSN from single-user crash-recovery output —
+// the end of the committed WAL the instance replayed, which is what a caught-up standby's
+// pg_last_wal_replay_lsn must reach. Absent when recovery replayed nothing ("redo is not
+// required"); the caller fails safe to GUARD in that case.
+func parseRedoDoneLSN(out string) (uint64, bool) {
+	const marker = "redo done at "
+	i := strings.Index(out, marker)
+	if i < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(out[i+len(marker):])
+	if len(fields) == 0 {
+		return 0, false
+	}
+	lsn, err := parseLSN(strings.TrimRight(fields[0], ",;"))
+	if err != nil {
+		return 0, false
+	}
+	return lsn, true
 }
 
 // scratchSizeForPVC sizes the ephemeral scratch volume to the target PVC's capacity plus
