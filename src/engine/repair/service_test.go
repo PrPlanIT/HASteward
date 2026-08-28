@@ -2,6 +2,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -12,8 +13,9 @@ import (
 // recordingRepairer implements Repairer and records which phases the service invokes,
 // so we can prove a dry-run never reaches a mutating phase.
 type recordingRepairer struct {
-	dryRun bool
-	calls  []string
+	dryRun    bool
+	calls     []string
+	verifyErr error // when set, VerifyRecovery returns it (simulates a Ready-but-not-replicating heal)
 }
 
 func (f *recordingRepairer) note(s string) { f.calls = append(f.calls, s) }
@@ -52,6 +54,10 @@ func (f *recordingRepairer) Reassess(ctx context.Context) (*model.TriageResult, 
 	f.note("reassess")
 	return nil, nil
 }
+func (f *recordingRepairer) VerifyRecovery(ctx context.Context, healed []string) error {
+	f.note("verify")
+	return f.verifyErr
+}
 func (f *recordingRepairer) Cleanup(ctx context.Context) { f.note("cleanup") }
 
 // TestRepairRun_DryRunStopsBeforeMutation guards #28: a --dry-run must stop after the
@@ -86,4 +92,25 @@ func TestRepairRun_RealRunReachesHeal(t *testing.T) {
 			t.Fatalf("a real run must reach %q; calls=%v", phase, f.calls)
 		}
 	}
+	// A real run must also reach the post-repair recovery verification.
+	if !slices.Contains(f.calls, "verify") {
+		t.Fatalf("a real run must reach %q (post-repair streaming/Synced gate); calls=%v", "verify", f.calls)
+	}
 }
+
+// TestRepairRun_VerifyFailureFailsRun guards the "N/N Ready masks broken replication"
+// trap: when the heal leaves an instance Ready-but-not-replicating, VerifyRecovery
+// returns an error and the whole run must fail loud (non-nil error) rather than
+// reporting a false green — even though every earlier phase "succeeded".
+func TestRepairRun_VerifyFailureFailsRun(t *testing.T) {
+	f := &recordingRepairer{dryRun: false, verifyErr: errFakeNotStreaming}
+	_, err := Run(context.Background(), f, engine.NopSink{})
+	if err == nil {
+		t.Fatalf("a heal that verifies un-recovered must fail the run; got nil error; calls=%v", f.calls)
+	}
+	if !slices.Contains(f.calls, "verify") {
+		t.Fatalf("verify phase should have run; calls=%v", f.calls)
+	}
+}
+
+var errFakeNotStreaming = errors.New("instance c-0 Ready but NOT streaming from primary")

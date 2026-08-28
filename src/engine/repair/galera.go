@@ -238,6 +238,31 @@ func (g *galeraRepair) Reassess(ctx context.Context) (*model.TriageResult, error
 	return triage.Run(ctx, g.triager, engine.NopSink{})
 }
 
+// VerifyRecovery re-confirms each healed node reached Galera membership
+// (wsrep_ready=ON, connected, Synced), promoting healNode's inline "did not reach
+// Synced" WARNING into a loud post-repair failure — the same gate class as CNPG's
+// streaming check. A node that is K8s-Ready but not in the primary component (SST
+// still running, or a failed join) must not be recorded as a successful heal.
+func (g *galeraRepair) VerifyRecovery(ctx context.Context, healed []string) error {
+	var notSynced []string
+	for _, pod := range healed {
+		probe := g.probeWsrep(ctx, pod)
+		synced := probe.ExecOK &&
+			probe.WsrepReady != nil && *probe.WsrepReady &&
+			probe.WsrepConnected != nil && *probe.WsrepConnected &&
+			probe.StateComment == "Synced"
+		if !synced {
+			notSynced = append(notSynced, pod)
+		}
+	}
+	if len(notSynced) > 0 {
+		return fmt.Errorf("healed node(s) Ready but not in the Galera primary component (not Synced): %s — "+
+			"an SST may still be running or the node failed to join; re-triage before trusting the cluster",
+			strings.Join(notSynced, ", "))
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Private heal methods (from galera/heal.go)
 // ---------------------------------------------------------------------------

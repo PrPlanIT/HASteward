@@ -258,12 +258,22 @@ func (r *cnpgRepair) Heal(ctx context.Context, target HealTarget) error {
 func (r *cnpgRepair) restartInstance(ctx context.Context, pod string) error {
 	cfg := r.p.Config()
 	output.Section("Restart " + pod + " — data intact, no re-clone")
+	output.Bullet(0, "Clear any stale primary_conninfo shadow so CNPG owns replication")
 	output.Bullet(0, "Delete pod; CNPG recreates it against the same PVC")
 	output.Bullet(0, "Instance resumes streaming from the primary's retained WAL")
 	if r.DryRun() {
-		output.Info("[dry-run] would delete pod %s and wait for the cluster to become Ready", pod)
+		output.Info("[dry-run] would strip an auto.conf primary_conninfo shadow on %s, delete the pod, and wait for Ready", pod)
 		return nil
 	}
+	// A restart only restores streaming if CNPG's override.conf actually governs
+	// replication. A primary_conninfo left in postgresql.auto.conf by an EARLIER
+	// pg_basebackup -R (a raw pod IP + throwaway /tmp/certs paths) is read LAST and
+	// shadows override.conf, so the walreceiver loops FATAL and the pod comes up
+	// Ready-but-not-streaming. The reseed path already strips this; the restart path
+	// must too, or "restart" silently never restores streaming. Best-effort — if the
+	// exec can't reach a crash-looping container, VerifyRecovery still fails the run
+	// loud rather than reporting a false green.
+	r.clearConninfoShadow(ctx, pod)
 	c := k8s.GetClients()
 	if err := c.Clientset.CoreV1().Pods(cfg.Namespace).Delete(ctx, pod, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("deleting pod %s for restart: %w", pod, err)
@@ -271,6 +281,31 @@ func (r *cnpgRepair) restartInstance(ctx context.Context, pod string) error {
 	common.InfoLog("Deleted %s; waiting for the cluster to become Ready", pod)
 	r.waitForAllReady(ctx)
 	return nil
+}
+
+// clearConninfoShadow removes any primary_conninfo from the instance's
+// postgresql.auto.conf so CNPG's override.conf governs replication. Idempotent
+// and best-effort: a crash-looping pod may be un-execable, in which case the
+// post-repair VerifyRecovery is the backstop that fails the run loud. Mirrors the
+// strip the basebackup/reseed heal already performs (healInstance), so BOTH heal
+// paths leave the datadir in a CNPG-consistent, streamable state.
+func (r *cnpgRepair) clearConninfoShadow(ctx context.Context, pod string) {
+	cfg := r.p.Config()
+	const autoConf = "/var/lib/postgresql/data/pgdata/postgresql.auto.conf"
+	res, err := k8s.ExecCommand(ctx, pod, cfg.Namespace, "postgres", []string{
+		"sh", "-c", fmt.Sprintf(
+			`f=%s; if [ -f "$f" ] && grep -qiE '^[[:space:]]*primary_conninfo[[:space:]]*=' "$f"; then `+
+				`sed -i -E '/^[[:space:]]*primary_conninfo[[:space:]]*=/d' "$f" && echo stripped; else echo clean; fi`,
+			autoConf),
+	})
+	if err != nil {
+		common.WarnLog("Could not clear a possible primary_conninfo shadow on %s (%v); "+
+			"VerifyRecovery will confirm streaming after restart", pod, err)
+		return
+	}
+	if strings.TrimSpace(res.Stdout) == "stripped" {
+		common.InfoLog("Stripped a stale primary_conninfo from %s auto.conf; CNPG now owns the conninfo", pod)
+	}
 }
 
 // Stabilize waits for the operator to reconcile and all pods to become ready.
@@ -523,4 +558,66 @@ func (r *cnpgRepair) waitForAllReady(ctx context.Context) {
 		return
 	}
 	common.WarnLog("Not all pods became ready within timeout")
+}
+
+// VerifyRecovery confirms each healed replica is actually STREAMING from the
+// primary (present in pg_stat_replication with state='streaming') — not merely
+// Ready. This catches the stale-primary_conninfo shadow: a reseeded or restarted
+// replica whose postmaster is up and Ready but whose walreceiver never connected,
+// which CNPG's phase/readyInstances happily reports as healthy.
+func (r *cnpgRepair) VerifyRecovery(ctx context.Context, healed []string) error {
+	if len(healed) == 0 {
+		return nil
+	}
+	cfg := r.p.Config()
+	ns := cfg.Namespace
+	// Resolve the primary LIVE — a switchover during heal may have moved it.
+	obj, err := k8s.GetClients().Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("cannot resolve the current primary to verify streaming: %w", err)
+	}
+	primary := k8s.GetNestedString(obj, "status", "currentPrimary")
+	if primary == "" {
+		return fmt.Errorf("cluster reports no currentPrimary; cannot verify streaming")
+	}
+	streaming, err := r.streamingStandbys(ctx, primary, ns)
+	if err != nil {
+		return fmt.Errorf("querying pg_stat_replication on primary %s: %w", primary, err)
+	}
+	var stranded []string
+	for _, pod := range healed {
+		if pod == primary {
+			continue // a healed instance promoted to primary has no upstream to stream from
+		}
+		if !streaming[pod] {
+			stranded = append(stranded, pod)
+		}
+	}
+	if len(stranded) > 0 {
+		return fmt.Errorf("instance(s) Ready but NOT streaming from primary %s: %s — the walreceiver never "+
+			"connected (check postgresql.auto.conf for a stale primary_conninfo shadowing CNPG's override.conf); "+
+			"the cluster is degraded despite reporting N/N Ready", primary, strings.Join(stranded, ", "))
+	}
+	common.InfoLog("Verified: all healed instance(s) are streaming from primary %s", primary)
+	return nil
+}
+
+// streamingStandbys returns the set of application_names currently streaming from
+// the primary. application_name == the CNPG instance (pod) name, so callers test
+// membership by pod name. Reuses the same pg_stat_replication read triage performs.
+func (r *cnpgRepair) streamingStandbys(ctx context.Context, primary, ns string) (map[string]bool, error) {
+	res, err := k8s.ExecCommand(ctx, primary, ns, "postgres", []string{
+		"psql", "-U", "postgres", "-d", "postgres", "-tAF", "|", "-c",
+		"SELECT application_name FROM pg_stat_replication WHERE state = 'streaming'",
+	})
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			set[name] = true
+		}
+	}
+	return set, nil
 }

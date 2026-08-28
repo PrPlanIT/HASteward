@@ -29,6 +29,16 @@ type Repairer interface {
 	Heal(ctx context.Context, target HealTarget) error
 	Stabilize(ctx context.Context) error
 	Reassess(ctx context.Context) (*model.TriageResult, error)
+	// VerifyRecovery is the loud-failure gate run after Stabilize + Reassess. It
+	// confirms each healed instance recovered at the ENGINE's replication level —
+	// not merely that its pod is Ready. CNPG marks an instance Ready while it is in
+	// recovery, streaming or NOT, so "N/N Ready" can hide a standby whose walreceiver
+	// never connected (a stale primary_conninfo in postgresql.auto.conf shadowing
+	// CNPG's override.conf); Galera can be Ready but not Synced. Returns an error
+	// naming any instance that is Ready-but-not-replicating, so the service reports a
+	// FAILED/incomplete repair instead of a false green over a still-degraded cluster.
+	// healed is the list of instances Heal touched (empty => no-op).
+	VerifyRecovery(ctx context.Context, healed []string) error
 	// Cleanup restores any cluster state the run mutated for its own duration
 	// (e.g. a suspended operator CR) and MUST be safe to call on every exit path,
 	// including partial failures and no-op runs. Invoked via defer by the service.

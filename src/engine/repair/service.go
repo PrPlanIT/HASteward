@@ -115,6 +115,21 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	result.PostTriageResult = postTriage
 	sink.Step("reassess", "done")
 
+	// Phase 7: Verify the healed instances actually recovered at the engine's
+	// replication level — not merely Ready. CNPG marks an instance Ready while its
+	// walreceiver is dead (a stale primary_conninfo shadow), and Galera can be Ready
+	// but not Synced, so skipping this reports a false green over a degraded cluster
+	// ("N/N Ready masks broken replication"). Fail the run loud instead.
+	if len(result.HealedInstances) > 0 {
+		sink.Step("verify", "running")
+		if verr := r.VerifyRecovery(ctx, result.HealedInstances); verr != nil {
+			sink.Step("verify", "failed")
+			result.Duration = time.Since(start)
+			return result, fmt.Errorf("heal applied but recovery verification FAILED: %w", verr)
+		}
+		sink.Step("verify", "done")
+	}
+
 	result.Duration = time.Since(start)
 	return result, nil
 }
