@@ -264,7 +264,9 @@ func (p *GaleraProvider) RunWsrepRecover(ctx context.Context, podName, sa string
 		RunAsUID: &uid, RunAsGID: &uid, FSGroup: &uid,
 		Labels:                map[string]string{"hasteward": "heal-helper"},
 		ActiveDeadlineSeconds: 150,
-		Command: []string{"sh", "-c", wsrepRecoverCommand(galeraProviderSO)},
+		// mariadbd --wsrep-recover is a DB engine writing outside its mounts.
+		Hardening: k8s.HelperHardening{WritableRootFS: true},
+		Command:   []string{"sh", "-c", wsrepRecoverCommand(galeraProviderSO)},
 	})
 
 	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
@@ -406,6 +408,8 @@ func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpe
 		Command: spec.Command, ServiceAccount: spec.SA,
 		PVCName: spec.PVCName, MountPath: spec.MountPath, ReadOnly: spec.ReadOnly,
 		RunAsUID: &root, NodeName: spec.NodeName, Labels: labels,
+		// Runs as root with an arbitrary caller-supplied command that may write to rootfs.
+		Hardening: k8s.HelperHardening{RootRequired: true, WritableRootFS: true},
 	})
 
 	if _, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {

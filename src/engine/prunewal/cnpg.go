@@ -233,6 +233,9 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 			},
 		},
 	}
+	// Runs as the postgres uid (non-root); pg_archivecleanup / WAL relocation write to the
+	// data disk, so treat it as a DB engine writing outside its mounts.
+	k8s.ApplyHelperHardening(walPod, k8s.HelperHardening{WritableRootFS: true})
 
 	// Fence → disable reconcile → acquire the PVC → prune WAL → re-enable → unfence,
 	// via the shared primitive repair uses. The reconcile bracket is what makes the

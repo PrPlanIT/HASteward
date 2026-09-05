@@ -487,6 +487,9 @@ fi`, primaryIP)
 			},
 		},
 	}
+	// Runs as the postgres uid (non-root); pg_basebackup is a DB engine that also writes
+	// throwaway certs under /tmp, so its rootfs stays writable.
+	k8s.ApplyHelperHardening(healPod, k8s.HelperHardening{WritableRootFS: true})
 
 	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
 		Namespace:          ns,

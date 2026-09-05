@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/engine/cnpgjob"
+	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 
 	corev1 "k8s.io/api/core/v1"
@@ -88,6 +89,9 @@ echo "pgdata cleared."`
 			}},
 		},
 	}
+	// Non-root postgres uid; rm -rf touches only the mounted PVC, so the rootfs can stay
+	// read-only — strongest posture, no exception label needed.
+	k8s.ApplyHelperHardening(clearPod, k8s.HelperHardening{})
 
 	if err := cnpgjob.Run(ctx, cnpgjob.OfflinePVCJob{
 		Namespace:          ns,

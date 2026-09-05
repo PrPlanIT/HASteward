@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/PrPlanIT/HASteward/src/common"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -22,6 +24,14 @@ import (
 
 // istioInjectKey is the label/annotation Istio honours to skip sidecar injection.
 const istioInjectKey = "sidecar.istio.io/inject"
+
+// Per-workload exception labels the cluster's enforce-pod-hardening ClusterPolicy excludes on.
+// A helper stamps the matching label for a dimension it legitimately cannot satisfy, so the
+// exception is visible in the live pod instead of the pod silently failing admission.
+const (
+	exceptNonRootLabel = "policy.prplanit.com/except-non-root"
+	exceptROFSLabel    = "policy.prplanit.com/except-ro-rootfs"
+)
 
 // DisableIstioInjection stamps the sidecar-exclusion label + annotation onto a pod.
 // Safe to call on any hand-built pod; BuildHelperPod applies it automatically.
@@ -57,6 +67,67 @@ type HelperPodOpts struct {
 	Labels   map[string]string // extra labels; the Istio exemption is always added
 	// ActiveDeadlineSeconds bounds the pod's own runtime (0 => unset).
 	ActiveDeadlineSeconds int64
+	// Hardening classifies this helper against the cluster's enforce-pod-hardening policy;
+	// BuildHelperPod applies it via ApplyHelperHardening. The zero value is the strongest
+	// posture (non-root, read-only rootfs) — set the flags only for a helper that genuinely
+	// runs as root or writes outside its mounts. See HelperHardening.
+	Hardening HelperHardening
+}
+
+// HelperHardening classifies which of the cluster's enforce-pod-hardening dimensions a helper
+// can satisfy by construction versus which it legitimately cannot. Every helper is hardened on
+// the three dimensions a PVC-mounting pod never needs — ALL capabilities dropped, privilege
+// escalation forbidden, seccomp=RuntimeDefault — unconditionally. The two flags cover the
+// dimensions a database-recovery helper genuinely cannot meet; each maps to the self-documenting
+// except-<dimension> label the policy excludes on, so the exception is visible in the live pod
+// instead of the pod silently failing admission.
+type HelperHardening struct {
+	RootRequired   bool // runs as root (e.g. restic reading every owner's files) → except-non-root
+	WritableRootFS bool // runs a DB engine writing outside its mounts (postgres --single, mariadbd, pg_basebackup) → except-ro-rootfs
+}
+
+// ApplyHelperHardening stamps the SEC-compliant securityContext + exception labels onto a helper
+// pod so it clears the cluster's enforce-pod-hardening admission policy. It is the ONE source of
+// truth for hasteward's helper-pod security posture: BuildHelperPod applies it automatically, and
+// the hand-built helper pods (escrow, heal, clear, wal-prune, deadlock-recover, galera reconfigure)
+// call it directly, so no call site can drift out of policy. Container-level (required on EVERY
+// container by the policy): drop ALL capabilities, allowPrivilegeEscalation=false always;
+// readOnlyRootFilesystem=true unless WritableRootFS. Pod-level (the policy accepts these
+// pod-level): seccompProfile=RuntimeDefault always; runAsNonRoot=true unless RootRequired. Any
+// RunAsUser/RunAsGroup/FSGroup a caller already set is preserved.
+func ApplyHelperHardening(pod *corev1.Pod, h HelperHardening) {
+	if pod == nil {
+		return
+	}
+	if pod.Spec.SecurityContext == nil {
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	pod.Spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	if !h.RootRequired {
+		pod.Spec.SecurityContext.RunAsNonRoot = common.Ptr(true)
+	}
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
+		}
+		c.SecurityContext.AllowPrivilegeEscalation = common.Ptr(false)
+		c.SecurityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+		if !h.WritableRootFS {
+			c.SecurityContext.ReadOnlyRootFilesystem = common.Ptr(true)
+		}
+	}
+	if h.RootRequired || h.WritableRootFS {
+		if pod.Labels == nil {
+			pod.Labels = map[string]string{}
+		}
+		if h.RootRequired {
+			pod.Labels[exceptNonRootLabel] = "true"
+		}
+		if h.WritableRootFS {
+			pod.Labels[exceptROFSLabel] = "true"
+		}
+	}
 }
 
 // BuildHelperPod builds the one-shot PVC-mounting helper pod, with Istio sidecar
@@ -108,6 +179,7 @@ func BuildHelperPod(o HelperPodOpts) *corev1.Pod {
 		Spec:       spec,
 	}
 	DisableIstioInjection(pod)
+	ApplyHelperHardening(pod, o.Hardening)
 	return pod
 }
 

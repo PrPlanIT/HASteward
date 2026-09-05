@@ -63,15 +63,86 @@ func TestBuildHelperPod_FSGroupOmittedWhenUnset(t *testing.T) {
 	}
 }
 
-func TestBuildHelperPod_NoUIDMeansNoSecurityContext(t *testing.T) {
+func TestBuildHelperPod_NoUIDStillHardened(t *testing.T) {
+	// Even with no RunAsUID, the pod carries the hardening posture (the policy needs it) —
+	// but no RunAsUser/RunAsGroup/FSGroup is invented.
 	pod := BuildHelperPod(HelperPodOpts{Name: "p", Namespace: "ns", Image: "busybox",
 		Command: []string{"true"}, PVCName: "v", MountPath: "/m"})
-	if pod.Spec.SecurityContext != nil {
-		t.Fatalf("expected no SecurityContext when RunAsUID is nil, got %+v", pod.Spec.SecurityContext)
+	sc := pod.Spec.SecurityContext
+	if sc == nil {
+		t.Fatal("expected a hardened pod SecurityContext (seccomp + runAsNonRoot)")
+	}
+	if sc.RunAsUser != nil || sc.RunAsGroup != nil || sc.FSGroup != nil {
+		t.Fatalf("no UID/GID/FSGroup should be invented, got %+v", sc)
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("want seccomp RuntimeDefault, got %+v", sc.SeccompProfile)
+	}
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Fatal("want runAsNonRoot=true by default")
 	}
 	// Exemption still applied even with no other labels.
 	if pod.Labels[istioInjectKey] != "false" {
 		t.Fatal("exemption must apply even with no caller labels")
+	}
+}
+
+func TestApplyHelperHardening_StrongestPostureByDefault(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
+	ApplyHelperHardening(pod, HelperHardening{})
+
+	csc := pod.Spec.Containers[0].SecurityContext
+	if csc == nil || csc.AllowPrivilegeEscalation == nil || *csc.AllowPrivilegeEscalation {
+		t.Fatalf("want allowPrivilegeEscalation=false, got %+v", csc)
+	}
+	if csc.Capabilities == nil || len(csc.Capabilities.Drop) != 1 || csc.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("want capabilities drop [ALL], got %+v", csc.Capabilities)
+	}
+	if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
+		t.Fatalf("want readOnlyRootFilesystem=true, got %+v", csc.ReadOnlyRootFilesystem)
+	}
+	if pod.Labels[exceptNonRootLabel] != "" || pod.Labels[exceptROFSLabel] != "" {
+		t.Fatalf("no exception labels for the strongest posture, got %v", pod.Labels)
+	}
+}
+
+func TestApplyHelperHardening_ExceptionsAreSelfDocumented(t *testing.T) {
+	// A root helper that also writes to rootfs asserts neither dimension, and stamps BOTH
+	// exception labels so the policy excludes it visibly.
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
+	ApplyHelperHardening(pod, HelperHardening{RootRequired: true, WritableRootFS: true})
+
+	if sc := pod.Spec.SecurityContext; sc.RunAsNonRoot != nil {
+		t.Fatalf("root-required helper must not assert runAsNonRoot, got %+v", sc.RunAsNonRoot)
+	}
+	if roc := pod.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem; roc != nil {
+		t.Fatalf("writable-rootfs helper must not assert readOnlyRootFilesystem, got %+v", roc)
+	}
+	if pod.Labels[exceptNonRootLabel] != "true" || pod.Labels[exceptROFSLabel] != "true" {
+		t.Fatalf("both exception labels must be stamped, got %v", pod.Labels)
+	}
+	// Caps + privesc are hardened regardless of the exceptions.
+	csc := pod.Spec.Containers[0].SecurityContext
+	if *csc.AllowPrivilegeEscalation || csc.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("caps/privesc must always be hardened, got %+v", csc)
+	}
+}
+
+func TestApplyHelperHardening_PreservesExistingUID(t *testing.T) {
+	// A hand-built pod that already set RunAsUser/FSGroup keeps them; hardening only adds
+	// seccomp + runAsNonRoot alongside.
+	uid := int64(26)
+	pod := &corev1.Pod{Spec: corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid},
+		Containers:      []corev1.Container{{Name: "c"}},
+	}}
+	ApplyHelperHardening(pod, HelperHardening{})
+	sc := pod.Spec.SecurityContext
+	if sc.RunAsUser == nil || *sc.RunAsUser != 26 || sc.FSGroup == nil || *sc.FSGroup != 26 {
+		t.Fatalf("existing UID/FSGroup must be preserved, got %+v", sc)
+	}
+	if sc.SeccompProfile == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Fatalf("hardening must add seccomp + runAsNonRoot, got %+v", sc)
 	}
 }
 

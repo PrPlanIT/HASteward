@@ -119,6 +119,8 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 			},
 		},
 	}
+	// Runs as uid 26 (non-root); postgres --single is a DB engine writing outside its mounts.
+	k8s.ApplyHelperHardening(helper, k8s.HelperHardening{WritableRootFS: true})
 
 	// 3. Fence → disable reconcile → acquire PVC → (replay+recycle in Go) → ALWAYS keep it
 	//    fenced through cnpgjob so its data is preserved while we judge authority. The

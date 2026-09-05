@@ -613,6 +613,8 @@ func (g *galeraReconfigure) runHelperPod(ctx context.Context, name, ns, pvc, mou
 			}},
 		},
 	}
+	// Runs as root with an arbitrary reconfigure script that may write to rootfs.
+	k8s.ApplyHelperHardening(pod, k8s.HelperHardening{RootRequired: true, WritableRootFS: true})
 
 	_, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {

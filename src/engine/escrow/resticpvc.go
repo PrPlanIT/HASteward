@@ -116,6 +116,9 @@ func (e *resticPVCEscrow) captureOne(ctx context.Context, rc *restic.Client, pvc
 			}},
 		},
 	}
+	// Runs as root to read every owner's files; tar streams to stdout off a read-only mount,
+	// so the rootfs stays read-only and only the non-root dimension is excepted.
+	k8s.ApplyHelperHardening(pod, k8s.HelperHardening{RootRequired: true})
 
 	if _, err := c.Clientset.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return EscrowRef{}, fmt.Errorf("failed to create escrow helper pod for pvc %s: %w", pvc, err)
