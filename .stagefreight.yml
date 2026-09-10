@@ -80,7 +80,7 @@ metadata:
   description:
     - 'Stateful-workload steward for Kubernetes: bootstraps, heals and migrates databases.'
     - Operator-facing tool that bootstraps and repairs stateful workloads on Kubernetes -- Galera, CNPG and friends -- including triage and recovery of clusters that will not converge on their own.
-  license: MIT
+  license: AGPL-3.0-only
   org: PrPlanIT
   title: HASteward
   topics:
