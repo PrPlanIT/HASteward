@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     -o /hasteward ./cmd/hasteward
 
 # Fetch restic binary
-FROM docker.io/library/alpine:3.24.1 AS restic
+FROM docker.io/library/alpine:3.24.2 AS restic
 ARG TARGETOS
 ARG TARGETARCH
 RUN apk add --no-cache curl bzip2 && \
