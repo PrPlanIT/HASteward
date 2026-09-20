@@ -45,6 +45,7 @@ publish:
     checksums: true
     when:
       - { git_tags: [stable], events: [tag] }
+      - { git_tags: [prerelease], events: [tag] }
       - { branches: [main], events: [push] }
 
   release:
@@ -61,6 +62,19 @@ publish:
   # repo and not only from a registry tag someone has to know to look for. Kept to the
   # last 2: a dev release is a pointer to "what main is right now", so history beyond
   # the previous one is noise that buries the stable releases in the same list.
+  prerelease-release:
+    # An -rc tag is a release candidate: it should be reachable from the repo like
+    # any other, marked prerelease so it does not displace the latest stable one,
+    # and without the "latest" alias for the same reason. Pages are deliberately
+    # absent — a candidate must not overwrite the published documentation site.
+    kind: release
+    security_summary: true
+    registry_links: true
+    repos: [primary]
+    archives: binaries
+    type: prerelease
+    when: { git_tags: [prerelease], events: [tag] }
+
   dev-release:
     kind: release
     security_summary: true

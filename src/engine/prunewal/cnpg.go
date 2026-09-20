@@ -58,7 +58,7 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	c := k8s.GetClients()
 
 	if cfg.InstanceNumber == nil {
-		return nil, fmt.Errorf("prune wal requires --instance/-i to specify which instance to clear")
+		return nil, fmt.Errorf("prune-wal requires --instance/-i to specify which instance to clear")
 	}
 	instanceNum := *cfg.InstanceNumber
 	targetPod := fmt.Sprintf("%s-%d", cfg.ClusterName, instanceNum)
@@ -116,15 +116,21 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 	// for its recovery; committed data past the checkpoint lives in WAL we KEEP), and
 	// nothing streams from a crash-looping non-primary, so the primary-only replica-
 	// caughtup gate does not apply. Eligibility is authority-gated below.
-	verifyReplicas := isPrimary
+	// deadlock-recover does not cross-check against a replica: its safety comes from the
+	// escrow VolumeSnapshot plus a replay that only removes segments older than the target's
+	// OWN checkpoint REDO. Requiring a ready replica here makes the verb unusable in the one
+	// situation it exists for -- a single trapped instance with no healthy peer -- and the
+	// only way through would be --force, which is the wrong trade: it accepts an
+	// unverifiable-authority risk to escape a check that does not apply.
+	verifyReplicas := isPrimary && !cfg.DeadlockRecover
 	var readyReplicas []string
-	if isPrimary {
+	if isPrimary && !cfg.DeadlockRecover {
 		output.Success("Target %s is the primary and not ready — proceeding", targetPod)
 		// ReadyCount includes the primary; the primary is NOT ready (checked above), so it
 		// equals the number of healthy replicas we can verify WAL safety against.
 		if triageResult.ReadyCount == 0 {
 			if !cfg.Force {
-				return nil, fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override")
+				return nil, fmt.Errorf("ABORT: no ready replicas found. Cannot verify data safety without at least one healthy replica. Re-run with --force to override, or use --deadlock-recover, which escrows instead of cross-checking")
 			}
 			common.WarnLog("force=true — proceeding with WAL prune despite no ready replicas. Data safety cannot be verified by a replica.")
 		} else {

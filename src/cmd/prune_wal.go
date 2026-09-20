@@ -45,8 +45,8 @@ func init() {
 	RootCmd.AddCommand(pruneWALTopCmd)
 }
 
-// runPruneWAL clears accumulated WAL from a disk-full CNPG instance. Shared by the
-// top-level `prune-wal` and the compat `prune wal`.
+// runPruneWAL clears accumulated WAL from a disk-full CNPG instance. `prune` is a
+// separate top-level command for backup retention; there is no `prune wal` subcommand.
 func runPruneWAL(cmd *cobra.Command, args []string) error {
 	p, err := InitPrinter("prune-wal")
 	if err != nil {

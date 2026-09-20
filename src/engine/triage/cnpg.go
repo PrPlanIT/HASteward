@@ -967,14 +967,14 @@ func (t *cnpgTriage) diagnoseAuthorityRecovery(comparison model.DataComparison, 
 
 // cnpgRebuildAroundAuthoritySteps renders the ordered, escrow-first recovery plan for
 // making a non-primary authority the cluster's source of truth. It prescribes only
-// safe HASteward primitives (escrow, prune wal, the standard heal-from-primary once the
+// safe HASteward primitives (escrow, prune-wal, the standard heal-from-primary once the
 // authority IS primary); the promotion itself is flagged as the manual step HASteward
 // does not yet automate (P3.2b) rather than glossed over.
 func cnpgRebuildAroundAuthoritySteps(cluster, ns, authority string, assessments []model.InstanceAssessment) string {
 	relief := ""
 	if authorityIsDiskConstrained(authority, assessments) {
 		relief = fmt.Sprintf(" (it is disk-full/crash-looping — relieve WAL first: "+
-			"`hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run`)", cluster, ns, cnpgOrdinal(authority))
+			"`hasteward prune-wal -e cnpg -c %s -n %s --instance %s --dry-run`)", cluster, ns, cnpgOrdinal(authority))
 	}
 	return fmt.Sprintf(
 		"  1. Escrow every instance (reversible) before touching anything: hasteward backup -e cnpg -c %s -n %s\n"+
@@ -991,7 +991,7 @@ func cnpgRebuildAroundAuthoritySteps(cluster, ns, authority string, assessments 
 // actionable, --dry-run-able line.
 func cnpgAuthorityFirstStep(cluster, ns, authority string, assessments []model.InstanceAssessment) string {
 	if authorityIsDiskConstrained(authority, assessments) {
-		return fmt.Sprintf("hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run   # relieve the wedged authority first",
+		return fmt.Sprintf("hasteward prune-wal -e cnpg -c %s -n %s --instance %s --dry-run   # relieve the wedged authority first",
 			cluster, ns, cnpgOrdinal(authority))
 	}
 	return fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow the authority before any promotion", cluster, ns)
@@ -1036,7 +1036,7 @@ func diagnoseTrappedAuthority(comparison model.DataComparison, assessments []mod
 					"never recovers on its own and the newest data sits at risk. Relieve it by pruning WAL older than its " +
 					"OWN checkpoint REDO — committed data past the checkpoint is kept, so this is safe. HASteward can now " +
 					"run this relief even when the authority is a non-primary replica. Escrow first if the data is irreplaceable.",
-				Remedy: fmt.Sprintf("hasteward prune wal -e cnpg -c %s -n %s --instance %s --dry-run", cluster, ns, cnpgOrdinal(a.Pod)),
+				Remedy: fmt.Sprintf("hasteward prune-wal -e cnpg -c %s -n %s --instance %s --dry-run", cluster, ns, cnpgOrdinal(a.Pod)),
 				Target: a.Pod,
 			}
 		}

@@ -60,10 +60,18 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 
 	// 1. ESCROW: snapshot the PVC before any mutation. This is the rollback point — the
 	//    replay is non-destructive of committed data, but a durable escrow means even a
-	//    mid-operation pod death (with WAL on ephemeral scratch) is recoverable. --force
+	//    mid-operation pod death (with WAL on ephemeral scratch) is recoverable. --no-escrow
 	//    skips it (loudly); refuse rather than proceed blind if no snapshot class is found.
-	if cfg.Force {
-		common.WarnLog("force=true — SKIPPING the escrow VolumeSnapshot for %s. The replay is non-destructive of committed "+
+	//    Kept separate from --force: --force accepts an unverifiable-authority risk, which is
+	//    exactly when the rollback point matters most.
+	//
+	//    --no-escrow is honoured here, unlike --unwedge/--promote where it is refused. There
+	//    the escrow authorizes an operation that is itself destructive (datadir clear, an
+	//    irreversible promotion). Here the replay keeps every committed record, so the escrow
+	//    insures against interruption rather than against the operation — a risk an operator
+	//    may accept, and must be able to on a cluster with no usable VolumeSnapshotClass.
+	if cfg.NoEscrow {
+		common.WarnLog("--no-escrow — SKIPPING the escrow VolumeSnapshot for %s. The replay is non-destructive of committed "+
 			"data, but there is NO rollback point if the operation is interrupted.", targetPVC)
 	} else {
 		snap, err := w.escrowSnapshot(ctx, ns, targetPVC)

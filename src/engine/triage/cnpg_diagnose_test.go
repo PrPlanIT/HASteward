@@ -41,14 +41,14 @@ func TestDiagnose_LeaderNotPrimary(t *testing.T) {
 }
 
 // TestDiagnose_LeaderNotPrimary_DiskWedged: a disk-full authority must be relieved
-// (prune wal --dry-run) FIRST, before it can be brought up.
+// (prune-wal --dry-run) FIRST, before it can be brought up.
 func TestDiagnose_LeaderNotPrimary_DiskWedged(t *testing.T) {
 	tr := cnpgTriageForTest()
 	cmp := model.DataComparison{SafeToHeal: false, Authority: model.AuthorityLeaderNotPrimary, MostAdvanced: "pg-2"}
 	assess := []model.InstanceAssessment{{Pod: "pg-2", CrashReason: "disk_full"}}
 	d := tr.diagnose(cmp, assess, "pg-1", &cnpgTriageData{})[0]
-	if !strings.Contains(d.Remedy, "prune wal") || !strings.Contains(d.Remedy, "--instance 2") {
-		t.Fatalf("wedged authority must be relieved first via prune wal --instance 2, got: %q", d.Remedy)
+	if !strings.Contains(d.Remedy, "prune-wal") || !strings.Contains(d.Remedy, "--instance 2") {
+		t.Fatalf("wedged authority must be relieved first via prune-wal --instance 2, got: %q", d.Remedy)
 	}
 	if !strings.Contains(d.Detail, "relieve WAL first") {
 		t.Fatalf("plan must call out WAL relief for the wedged authority; detail=\n%s", d.Detail)
@@ -98,7 +98,7 @@ func TestDiagnoseTrappedAuthority(t *testing.T) {
 	if d == nil || d.ID != "cnpg-authority-wal-trapped" || d.Target != "pg-2" {
 		t.Fatalf("trapped authority must be flagged targeting pg-2, got %+v", d)
 	}
-	if !strings.Contains(d.Remedy, "prune wal") || !strings.Contains(d.Remedy, "--instance 2") {
+	if !strings.Contains(d.Remedy, "prune-wal") || !strings.Contains(d.Remedy, "--instance 2") {
 		t.Fatalf("remedy must be WAL relief on instance 2, got %q", d.Remedy)
 	}
 

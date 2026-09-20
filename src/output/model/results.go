@@ -313,7 +313,7 @@ type PruneResult struct {
 	TotalRemoved int `json:"totalRemoved"`
 }
 
-// PruneWALResult holds the output of "prune wal".
+// PruneWALResult holds the output of "prune-wal".
 type PruneWALResult struct {
 	Engine   string    `json:"engine"`
 	Cluster  ObjectRef `json:"cluster"`

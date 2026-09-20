@@ -200,7 +200,7 @@ func cnpgPromotionRunbook(cluster, ns string, plan *promotionPlan) string {
 	return fmt.Sprintf(
 		"Promotion of %s prepared. Escrow captured + proof persisted; the recovery set is reversible.\n"+
 			"Remaining steps (the in-place swap is not yet automated — P3.2c):\n"+
-			"  1. Relieve + inspect %s: `hasteward prune wal -e cnpg -c %s -n %s --instance %s` frees its disk and "+
+			"  1. Relieve + inspect %s: `hasteward prune-wal -e cnpg -c %s -n %s --instance %s` frees its disk and "+
 			"KEEPS IT FENCED (isolated from operator reconcile, so it is NOT pg_rewound onto the stale primary); then "+
 			"`hasteward triage -e cnpg -c %s -n %s` reads it read-only. Confirm it holds the expected data.\n"+
 			"  2. Fence the instances to rebuild (%v) and clear their datadirs so they cannot win a race.\n"+
