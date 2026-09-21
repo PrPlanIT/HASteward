@@ -1386,6 +1386,7 @@ func (t *cnpgTriage) buildAssessments(data *cnpgTriageData, comparison *model.Da
 
 		assessments = append(assessments, model.InstanceAssessment{
 			Pod:            inst.Pod,
+			Instance:       podInstanceNumber(inst.Pod),
 			IsRunning:      isRunning,
 			IsReady:        isReady,
 			IsPrimary:      isPrimary,
@@ -1890,4 +1891,16 @@ func cnpgOrdinal(pod string) string {
 	}
 	parts := strings.Split(pod, "-")
 	return parts[len(parts)-1]
+}
+
+// podInstanceNumber is the trailing ordinal as the integer InstanceAssessment.Instance
+// carries, or -1 when the pod name does not end in one. -1 rather than 0 because 0 is a
+// valid ordinal: an unset field reading 0 for every instance is what made the escrow of
+// three diverged lineages write to one filename.
+func podInstanceNumber(pod string) int {
+	n, err := strconv.Atoi(cnpgOrdinal(pod))
+	if err != nil {
+		return -1
+	}
+	return n
 }

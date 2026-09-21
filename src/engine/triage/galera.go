@@ -894,6 +894,7 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 
 		assessments = append(assessments, model.InstanceAssessment{
 			Pod:                gs.Pod,
+			Instance:           podInstanceNumber(gs.Pod),
 			IsRunning:          isRunning,
 			IsReady:            isRunning && wsState == 4,
 			NeedsHeal:          needsHeal,
