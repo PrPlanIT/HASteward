@@ -3,6 +3,7 @@ package repair
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -26,6 +27,15 @@ func (f *fakeBacker) BackupDump(ctx context.Context, backupType, donor, stdinFil
 		return nil, fmt.Errorf("injected backup failure for %s", donor)
 	}
 	return &model.BackupResult{SnapshotID: "snap-" + donor}, nil
+}
+
+// TestMain stubs the repository presence check for the whole package: these tests
+// exercise escrow orchestration, not restic, and the default would shell out to a
+// binary that is not present. The absent-repository refusal is asserted explicitly
+// in TestRunEscrowRepositoryMustPreExist.
+func TestMain(m *testing.M) {
+	escrowRepoExists = func(context.Context, *common.Config) (bool, error) { return true, nil }
+	os.Exit(m.Run())
 }
 
 func escrowCfg() *common.Config {
@@ -269,4 +279,88 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 			t.Fatalf("a down instance on a HEALTHY cluster is not a diverged lineage, captured = %v", p.captured)
 		}
 	})
+}
+
+// withEscrowRepo swaps the repository presence check for one test.
+func withEscrowRepo(t *testing.T, exists bool, err error) {
+	t.Helper()
+	prev := escrowRepoExists
+	escrowRepoExists = func(context.Context, *common.Config) (bool, error) { return exists, err }
+	t.Cleanup(func() { escrowRepoExists = prev })
+}
+
+// BackupDump initialises a restic repository on demand. That is right for a first
+// `backup create` and wrong for an escrow: a repository created by this run holds
+// nothing, and under the container wrapper (kubeconfig is the only mount) it is a
+// directory inside the container that is discarded on exit — so the escrow would
+// report a snapshot ID, satisfy the safety gate, and not exist.
+func TestRunEscrowRepositoryMustPreExist(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("absent repository: refuse before any backup runs", func(t *testing.T) {
+		withEscrowRepo(t, false, nil)
+		b := &fakeBacker{}
+		err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql")
+		if err == nil {
+			t.Fatal("an escrow repository that this run would create proves nothing — must refuse")
+		}
+		if len(b.calls) != 0 {
+			t.Fatalf("refusal must come before any dump, got %v", b.calls)
+		}
+	})
+
+	t.Run("unreachable backend: refuse, distinct from absent", func(t *testing.T) {
+		withEscrowRepo(t, false, fmt.Errorf("dial tcp: connection refused"))
+		if err := runEscrow(ctx, escrowCfg(), &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err == nil {
+			t.Fatal("an unreachable escrow backend must refuse, not proceed")
+		}
+	})
+
+	t.Run("present repository: proceeds", func(t *testing.T) {
+		withEscrowRepo(t, true, nil)
+		b := &fakeBacker{}
+		if err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.calls) != 1 {
+			t.Fatalf("calls = %v", b.calls)
+		}
+	})
+
+	t.Run("no_escrow: presence is not required", func(t *testing.T) {
+		withEscrowRepo(t, false, nil)
+		cfg := escrowCfg()
+		cfg.NoEscrow = true
+		if err := runEscrow(ctx, cfg, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err != nil {
+			t.Fatalf("--no-escrow opts out of escrow entirely: %v", err)
+		}
+	})
+}
+
+// Each diverged lineage must land on its own path. Instance is what distinguishes
+// them, and a live CNPG triage reported 0 for every instance — which sent all three
+// of gitlab-postgresql's lineages to ns/cluster/0-dump.sql, leaving the snapshots
+// indistinguishable at exactly the moment one has to be chosen.
+func TestRunEscrowDivergedFilenamesAreDistinct(t *testing.T) {
+	b := &fakeBacker{}
+	r := triageRes(false,
+		model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
+		model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: true, IsReady: true},
+		model.InstanceAssessment{Pod: "c-3", Instance: 3, IsRunning: true, IsReady: true},
+	)
+	if err := runEscrow(context.Background(), escrowCfg(), b, r, "c-1", "dump.sql"); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, c := range b.calls {
+		if seen[c] {
+			t.Fatalf("two lineages escrowed to the same path: %q (calls = %v)", c, b.calls)
+		}
+		seen[c] = true
+	}
+	for _, want := range []string{"diverged:c-1:ns/c/1-dump.sql", "diverged:c-2:ns/c/2-dump.sql", "diverged:c-3:ns/c/3-dump.sql"} {
+		if !seen[want] {
+			t.Fatalf("missing %q in %v", want, b.calls)
+		}
+	}
 }

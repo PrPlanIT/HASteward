@@ -9,6 +9,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/engine/backup"
 	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/output/model"
+	"github.com/PrPlanIT/HASteward/src/restic"
 )
 
 // runEscrow is the shared pre-repair escrow for both engines: a full backup from
@@ -24,6 +25,9 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 	if !cfg.NoEscrow {
 		if cfg.BackupsPath == "" || cfg.ResticPassword == "" {
 			return fmt.Errorf("repair requires --backups-path and RESTIC_PASSWORD for escrow (or --no-escrow to skip)")
+		}
+		if err := assertEscrowRepo(ctx, cfg); err != nil {
+			return err
 		}
 		if donorPod != "" {
 			stdinFilename := fmt.Sprintf("%s/%s/%s", cfg.Namespace, cfg.ClusterName, dumpFilename)
@@ -67,6 +71,37 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 		}
 	}
 
+	return nil
+}
+
+// escrowRepoExists is the repository presence check behind a package variable, so the
+// refusal below is testable without a restic binary or a backend. Never reassigned
+// outside tests.
+var escrowRepoExists = func(ctx context.Context, cfg *common.Config) (bool, error) {
+	return restic.NewClient(cfg.BackupsPath, cfg.ResticPassword).Exists(ctx)
+}
+
+// assertEscrowRepo refuses an escrow whose repository does not already exist.
+//
+// BackupDump initialises one on demand, which is correct for `backup create` — a first
+// backup has to start somewhere — and wrong for an escrow. A repository this run just
+// created holds nothing and proves nothing. Worse, under the documented container
+// wrapper the only mount is the kubeconfig, so an unmounted --backups-path resolves
+// inside the container: restic initialises a repository there, the escrow reports a
+// snapshot ID, the safety gate is satisfied, repair clears a datadir, and the whole
+// repository is discarded when the container exits. The rollback never existed.
+//
+// So the repository must pre-date the run. Creating one is a deliberate act.
+func assertEscrowRepo(ctx context.Context, cfg *common.Config) error {
+	ok, err := escrowRepoExists(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("escrow REFUSED: cannot open the escrow repository at %s: %w", cfg.BackupsPath, err)
+	}
+	if !ok {
+		return fmt.Errorf("escrow REFUSED: no restic repository at %s — this run would create it, so it would hold nothing and prove nothing. "+
+			"Initialise it deliberately (hasteward backup create) and confirm --backups-path names durable storage that is actually mounted: "+
+			"under the container wrapper an unmounted path is written inside the container and discarded on exit", cfg.BackupsPath)
+	}
 	return nil
 }
 
