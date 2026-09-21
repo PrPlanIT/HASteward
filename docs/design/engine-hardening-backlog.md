@@ -109,3 +109,42 @@ A real CNPG split-brain (stale-restore primary on TL9 vs golden crash-looping re
 - **P3.5 — no pathological-history / restore-loop health signal.** ✅ DONE. boundary-postgres has 9 timelines with a non-monotonic rewind. CNPG triage now emits a `cnpg-timeline-rewind` diagnosis when any instance's lineage forks BEHIND an earlier fork point (`diagnoseTimelineRewind`) — the unambiguous fingerprint of a PITR/restore (normal failovers only fork forward, so no false positives). It's a health SIGNAL (a restore may be intentional), pointing the operator at the authority verdict since the pre-rewind instance may be the real authority. Fires regardless of the authority outcome.
 
 Causality note: no proof hasteward caused the TL9 rewind (cluster bootstraps `initdb`, no backup configured → CNPG can't auto-restore; the rewind was manual/tool-driven; hasteward's old highest-timeline bug *could* have misguided a prior recovery but unconfirmed). The current shred-pressure on `-2` is CNPG's normal reconcile, not hasteward.
+
+---
+
+## P4 — design gaps exposed by the gitlab-postgresql recovery (2026-09-21)
+
+A live CNPG divergence (instance 1 on TL29 and instance 2 on TL28 both holding
+committed WAL past a shared fork at `119/9D02A138`, with the TL28 carrier in
+CrashLoopBackOff). Detection and refusal worked; the gaps are in what escrow
+leaves behind.
+
+- **P4.1 — escrow VolumeSnapshots are never retired, and retention cannot see them.** ⏳ FOLLOW-UP.
+  - **Where:** `escrow/escrow.go:51` declares `EscrowProvider.Cleanup`, and no non-test
+    code calls it — `repair/service.go:33`'s `defer r.Cleanup(ctx)` is the unrelated
+    `Repairer.Cleanup` (a CNPG no-op). `retention/prune.go` builds a `restic.Client` and
+    forgets by tag, so `backup prune` operates on restic snapshots only and has no
+    concept of a VolumeSnapshot.
+  - **Gap:** every escrow that selects the VolumeSnapshot provider leaves a Kubernetes
+    object and a backing CSI snapshot that nothing tracks, ages out, or reports. The
+    blast radius grew on 2026-09-21: escrow of a down diverged instance now happens on
+    the ORDINARY split-brain repair path (`repair/escrow.go` `escrowUndumpable`), not
+    only in `--unwedge`/`--promote`, so snapshots accumulate during routine recovery
+    rather than rare breaker runs. Live evidence that this already bites:
+    `hyrule-castle/calcom-postgres-{1,2,3}-preprune`, 23 days old and unreferenced.
+  - **Why it is not simply "call Cleanup":** an escrow is the rollback for a mutation,
+    so it must outlive the run that took it — deleting on success is exactly the window
+    an operator needs when the repair turns out to have been wrong. Retention has to be
+    time/count-based and deliberate, not tied to the run's exit.
+  - **Aggravating factor:** `csi-rbdplugin-snapclass` (the class matched on this estate)
+    has `deletionPolicy: Delete`, so deleting the VolumeSnapshot object destroys the
+    underlying Ceph snapshot. Any retention must be certain the escrow is spent, and the
+    absence of retention means the safe default today is "never delete", i.e. unbounded
+    growth on the pool the databases themselves live on.
+  - **Fix (either, not both):** teach `backup prune` the snapshot provider — label
+    escrow-created VolumeSnapshots (cluster, run ID, capture time) so retention can
+    enumerate and age them with the same policy vocabulary; or have the provider record
+    its refs into the restic repo as metadata so one retention pass covers both. The
+    label route keeps the provider self-describing and survives a lost repo.
+  - **Severity:** MEDIUM — no data loss, but it consumes the same pool the clusters run
+    on, with no signal until the pool is full. A full pool takes every database with it.
