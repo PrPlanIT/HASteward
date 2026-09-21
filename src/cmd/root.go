@@ -87,7 +87,11 @@ func init() {
 			"WAL/temp/growth). Set HASTEWARD_EXPAND_TARGET_PCT once to avoid repeating the flag.")
 	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
 	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")
-	pf.BoolVar(&dryRun, "dry-run", false, "Show planned actions without executing (destructive commands)")
+	// Bound through env like every other flag. It was the lone pf.BoolVar, so
+	// HASTEWARD_DRY_RUN did not exist — a Job that set it, as every other knob is set,
+	// was silently ignored and the destructive run proceeded while the author believed
+	// they had asked for a preview.
+	env.Bool(pf, &dryRun, "dry-run", "", "DRY_RUN", false, "Show planned actions without executing (destructive commands)")
 	env.String(pf, &outputMode, "output", "", "OUTPUT", "auto", "Output format: auto, human, json, jsonl")
 	pf.Bool("no-color", false, "Disable color output")
 	pf.Bool("debug", false, "Enable debug output")
