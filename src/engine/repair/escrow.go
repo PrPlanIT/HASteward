@@ -7,6 +7,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/backup"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 )
 
@@ -42,9 +43,14 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 	if !result.DataComparison.SafeToHeal && !cfg.NoEscrow {
 		jobID := start.UTC().Format("20060102T150405Z")
 		common.WarnLog("Split-brain detected — capturing per-instance diverged backups (job=%s)", jobID)
+		var undumpable []string
 		for _, a := range result.Assessments {
 			if !a.IsRunning || !a.IsReady {
-				common.WarnLog("Skipping diverged backup for %s (not running/ready)", a.Pod)
+				// A dump needs a live postgres, so this lineage cannot be reached that
+				// way. Collected rather than skipped: on a split-brain the instance that
+				// is down is frequently the divergent one, which makes it the lineage
+				// nothing else holds a copy of.
+				undumpable = append(undumpable, a.Pod)
 				continue
 			}
 			stdinFilename := fmt.Sprintf("%s/%s/%d-%s", cfg.Namespace, cfg.ClusterName, a.Instance, dumpFilename)
@@ -56,7 +62,55 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 			}
 			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
 		}
+		if err := escrowUndumpable(ctx, cfg, undumpable); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+// selectEscrow is escrow.Select behind a package variable so the fail-closed contract
+// below — a refusal or an unproven capture must abort the run — is testable without
+// standing up a storage backend. Never reassigned outside tests.
+var selectEscrow = escrow.Select
+
+// escrowUndumpable captures the instances a dump could not reach, at the block layer,
+// via the same fail-closed provider the deadlock breaker uses — a CSI VolumeSnapshot
+// when one matches the PVCs' provisioner, else a restic PVC backup. No postgres is
+// required, so a crash-looping instance is captured rather than passed over.
+//
+// Unlike the per-instance dumps above this is NOT best-effort. Those are redundant
+// copies of lineages that are also on a running instance; this is the only copy of
+// a lineage that exists nowhere else. Proceeding without it would let a subsequent
+// --force destroy the one instance no backup covers, so a failure here stops the run.
+//
+// CNPG only: an instance's PVC is named after its pod, which is what makes the
+// recovery set derivable. Galera does not name them that way, so rather than guess
+// at a PVC the gap is reported and left for an operator.
+func escrowUndumpable(ctx context.Context, cfg *common.Config, pods []string) error {
+	if len(pods) == 0 {
+		return nil
+	}
+	if cfg.Engine != "cnpg" {
+		common.WarnLog("Cannot escrow %v: no dump is possible while they are down, and their PVC names are not derivable for the %s engine — capture them manually before any --force", pods, cfg.Engine)
+		return nil
+	}
+
+	common.WarnLog("Capturing block-level escrow for instances a dump cannot reach: %v", pods)
+	prov, err := selectEscrow(ctx, cfg, pods)
+	if err != nil {
+		return fmt.Errorf("escrow REFUSED for down diverged instance(s) %v: %w", pods, err)
+	}
+	refs, err := prov.Capture(ctx, pods)
+	if err != nil {
+		return fmt.Errorf("escrow FAILED for down diverged instance(s) %v: capture: %w", pods, err)
+	}
+	if err := prov.Verify(ctx, refs); err != nil {
+		return fmt.Errorf("escrow FAILED for down diverged instance(s) %v: captured but not proven restorable: %w", pods, err)
+	}
+	for _, r := range refs {
+		common.InfoLog("Diverged escrow %s: %s %s", r.PVC, r.Provider, r.ID)
+	}
 	return nil
 }

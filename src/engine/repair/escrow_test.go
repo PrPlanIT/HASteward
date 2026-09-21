@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 )
 
@@ -52,7 +53,9 @@ func TestRunEscrow(t *testing.T) {
 		r := triageRes(false,
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
-			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false}, // skipped
+			// Not dumpable. Routed to block-level escrow, which is a no-op here because
+			// this cfg names no engine — see TestRunEscrowDownDivergedInstance.
+			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false},
 		)
 		if err := runEscrow(ctx, escrowCfg(), b, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
@@ -61,7 +64,7 @@ func TestRunEscrow(t *testing.T) {
 			b.calls[0] != "backup:c-0:ns/c/dump.sql" ||
 			b.calls[1] != "diverged:c-0:ns/c/0-dump.sql" ||
 			b.calls[2] != "diverged:c-1:ns/c/1-dump.sql" {
-			t.Fatalf("want [backup c-0, diverged c-0, diverged c-1] (c-2 skipped), got %v", b.calls)
+			t.Fatalf("want [backup c-0, diverged c-0, diverged c-1] (c-2 is not dumpable), got %v", b.calls)
 		}
 	})
 
@@ -112,6 +115,158 @@ func TestRunEscrow(t *testing.T) {
 		)
 		if err := runEscrow(ctx, escrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
 			t.Fatalf("a diverged failure must not abort escrow: %v", err)
+		}
+	})
+}
+
+// fakeEscrowProvider records what was captured and can fail at either stage, so the
+// "not best-effort" contract can be asserted without a storage backend.
+type fakeEscrowProvider struct {
+	captured    []string
+	failCapture bool
+	failVerify  bool
+	verified    bool
+}
+
+func (f *fakeEscrowProvider) Name() string { return "fake-escrow" }
+func (f *fakeEscrowProvider) Capture(ctx context.Context, set []string) ([]escrow.EscrowRef, error) {
+	f.captured = append(f.captured, set...)
+	if f.failCapture {
+		return nil, fmt.Errorf("injected capture failure")
+	}
+	refs := make([]escrow.EscrowRef, 0, len(set))
+	for _, p := range set {
+		refs = append(refs, escrow.EscrowRef{Provider: "fake-escrow", ID: "id-" + p, PVC: p})
+	}
+	return refs, nil
+}
+func (f *fakeEscrowProvider) Verify(ctx context.Context, refs []escrow.EscrowRef) error {
+	if f.failVerify {
+		return fmt.Errorf("injected verify failure")
+	}
+	f.verified = true
+	return nil
+}
+func (f *fakeEscrowProvider) Cleanup(ctx context.Context, refs []escrow.EscrowRef) error { return nil }
+func (f *fakeEscrowProvider) EstimateCaptureBytes(set []string, used map[string]int64) int64 {
+	return 0
+}
+func (f *fakeEscrowProvider) AvailableBytes() (int64, error) { return 1 << 40, nil }
+
+// withSelectEscrow swaps the package's provider selector for one test.
+func withSelectEscrow(t *testing.T, fn func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error)) {
+	t.Helper()
+	prev := selectEscrow
+	selectEscrow = fn
+	t.Cleanup(func() { selectEscrow = prev })
+}
+
+func cnpgEscrowCfg() *common.Config {
+	c := escrowCfg()
+	c.Engine = "cnpg"
+	return c
+}
+
+// A down instance on a split-brain is frequently the divergent one, so it is the
+// lineage nothing else holds a copy of. These assert it is captured rather than
+// skipped, and that a failure to capture it stops the run instead of being logged.
+func TestRunEscrowDownDivergedInstance(t *testing.T) {
+	ctx := context.Background()
+
+	// c-0 and c-1 are dumpable; c-2 is down and must be escrowed at the block layer.
+	downSplitBrain := func() *model.TriageResult {
+		return triageRes(false,
+			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false},
+		)
+	}
+
+	t.Run("down instance is captured, not skipped", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		b := &fakeBacker{}
+		if err := runEscrow(ctx, cnpgEscrowCfg(), b, downSplitBrain(), "c-0", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.captured) != 1 || p.captured[0] != "c-2" {
+			t.Fatalf("want the down instance c-2 escrowed, captured = %v", p.captured)
+		}
+		if !p.verified {
+			t.Fatal("capture must be verified — an unproven escrow is indistinguishable from none")
+		}
+		// The running instances still go through the dump path, unchanged.
+		if len(b.calls) != 3 || b.calls[2] != "diverged:c-1:ns/c/1-dump.sql" {
+			t.Fatalf("dump path changed: %v", b.calls)
+		}
+	})
+
+	t.Run("no provider: refusal aborts the run", func(t *testing.T) {
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return nil, fmt.Errorf("no provider can prove reversibility")
+		})
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+			t.Fatal("a down diverged instance that cannot be escrowed must abort, not warn")
+		}
+	})
+
+	t.Run("capture failure aborts the run", func(t *testing.T) {
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return &fakeEscrowProvider{failCapture: true}, nil
+		})
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+			t.Fatal("a failed capture of the only copy of a lineage must abort")
+		}
+	})
+
+	t.Run("unverified capture aborts the run", func(t *testing.T) {
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return &fakeEscrowProvider{failVerify: true}, nil
+		})
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+			t.Fatal("a capture that cannot be proven restorable must abort")
+		}
+	})
+
+	t.Run("all instances up: no block-level escrow attempted", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		r := triageRes(false, model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true})
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.captured) != 0 {
+			t.Fatalf("nothing was undumpable, captured = %v", p.captured)
+		}
+	})
+
+	t.Run("galera: gap is reported, run continues", func(t *testing.T) {
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			t.Fatal("galera PVC names are not derivable — selection must not be attempted")
+			return nil, nil
+		})
+		cfg := escrowCfg()
+		cfg.Engine = "galera"
+		if err := runEscrow(ctx, cfg, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err != nil {
+			t.Fatalf("galera must warn rather than abort: %v", err)
+		}
+	})
+
+	t.Run("safe cluster: no diverged escrow at all", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		r := triageRes(true, model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false})
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.captured) != 0 {
+			t.Fatalf("a down instance on a HEALTHY cluster is not a diverged lineage, captured = %v", p.captured)
 		}
 	})
 }
