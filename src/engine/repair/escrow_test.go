@@ -117,14 +117,21 @@ func TestRunEscrow(t *testing.T) {
 		}
 	})
 
-	t.Run("diverged failure is best-effort: no error", func(t *testing.T) {
+	// A failed diverged dump no longer ends there: for cnpg it falls through to the
+	// block-level escrow (see TestRunEscrowFailedDumpFallsBackToBlockLevel). This cfg
+	// names no engine, so that fallback is a no-op and the dump failure alone must not
+	// abort the remaining dumps.
+	t.Run("a failed diverged dump does not abort the other dumps", func(t *testing.T) {
 		b := &fakeBacker{failOn: "c-0"} // c-0's diverged backup fails; donor c-9 succeeds
 		r := triageRes(false,
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
 		)
 		if err := runEscrow(ctx, escrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
-			t.Fatalf("a diverged failure must not abort escrow: %v", err)
+			t.Fatalf("one failed dump must not stop the rest: %v", err)
+		}
+		if len(b.calls) != 3 {
+			t.Fatalf("want the donor backup plus both diverged attempts, got %v", b.calls)
 		}
 	})
 }
@@ -363,4 +370,88 @@ func TestRunEscrowDivergedFilenamesAreDistinct(t *testing.T) {
 			t.Fatalf("missing %q in %v", want, b.calls)
 		}
 	}
+}
+
+// A running instance whose dump fails is as unprotected as one that is down — the
+// cause differs, the consequence does not. Observed on a replica with
+// hot_standby_feedback off, where dumping a large table outlives
+// max_standby_streaming_delay and recovery cancels it.
+func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("running instance with a failed dump is escrowed at block level", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		// c-1's dump fails; it is running and ready, so the old code warned and moved on.
+		b := &fakeBacker{failOn: "c-1"}
+		r := triageRes(false,
+			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
+		)
+		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.captured) != 1 || p.captured[0] != "c-1" {
+			t.Fatalf("the instance whose dump failed must be captured at the block layer, got %v", p.captured)
+		}
+		if !p.verified {
+			t.Fatal("the fallback capture must be verified")
+		}
+	})
+
+	t.Run("both a down instance and a failed dump are captured together", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		b := &fakeBacker{failOn: "c-1"}
+		r := triageRes(false,
+			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},   // dump fails
+			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false}, // down
+		)
+		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, c := range p.captured {
+			got[c] = true
+		}
+		if !got["c-1"] || !got["c-2"] || len(p.captured) != 2 {
+			t.Fatalf("want both c-1 (failed dump) and c-2 (down) captured, got %v", p.captured)
+		}
+	})
+
+	t.Run("a failed dump that cannot be escrowed aborts the run", func(t *testing.T) {
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return nil, fmt.Errorf("no provider can prove reversibility")
+		})
+		b := &fakeBacker{failOn: "c-1"}
+		r := triageRes(false,
+			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
+		)
+		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err == nil {
+			t.Fatal("a lineage with neither a dump nor a block-level escrow must abort, not warn")
+		}
+	})
+
+	t.Run("all dumps succeed: no block-level escrow attempted", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
+		r := triageRes(false,
+			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
+			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
+		)
+		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-9", "dump.sql"); err != nil {
+			t.Fatal(err)
+		}
+		if len(p.captured) != 0 {
+			t.Fatalf("every dump succeeded, nothing needed the block layer, got %v", p.captured)
+		}
+	})
 }

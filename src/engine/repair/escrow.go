@@ -61,7 +61,14 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 			extraTags := map[string]string{"job": jobID}
 			divResult, err := backuper.BackupDump(ctx, "diverged", a.Pod, stdinFilename, start, extraTags)
 			if err != nil {
-				common.WarnLog("Failed diverged backup for %s: %v", a.Pod, err)
+				// Running is not the same as dumpable, and the reason does not change
+				// the consequence: a lineage nobody captured is a lineage that a later
+				// --force destroys. Seen on a replica with hot_standby_feedback off,
+				// where dumping a large table outlives max_standby_streaming_delay and
+				// recovery cancels it — the instance is healthy, the dump simply cannot
+				// finish. Fall through to the block layer rather than warn and move on.
+				common.WarnLog("Diverged dump failed for %s, falling back to block-level escrow: %v", a.Pod, err)
+				undumpable = append(undumpable, a.Pod)
 				continue
 			}
 			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
@@ -114,6 +121,11 @@ var selectEscrow = escrow.Select
 // via the same fail-closed provider the deadlock breaker uses — a CSI VolumeSnapshot
 // when one matches the PVCs' provisioner, else a restic PVC backup. No postgres is
 // required, so a crash-looping instance is captured rather than passed over.
+//
+// "Could not reach" covers both an instance that is not running and one that is running
+// but whose dump failed. The distinction matters to the cause and not at all to the
+// outcome: either way that lineage has no copy, and the run is on its way to a --force
+// that destroys it.
 //
 // Unlike the per-instance dumps above this is NOT best-effort. Those are redundant
 // copies of lineages that are also on a running instance; this is the only copy of
