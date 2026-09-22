@@ -182,7 +182,7 @@ func (w *cnpgPruner) PruneWAL(ctx context.Context) (*model.PruneWALResult, error
 			tail = "then KEEP IT FENCED (isolated from operator reconcile so it is NOT pg_rewound onto the stale " +
 				"primary's lineage) for a controlled promotion"
 		}
-		output.Info("DRY RUN: %s passed all safety gates (%s). Would fence it, mount PVC %s, delete WAL segments "+
+		output.Plan("DRY RUN: %s passed all safety gates (%s). Would fence it, mount PVC %s, delete WAL segments "+
 			"OLDER than its own checkpoint REDO (committed data past the checkpoint is KEPT; .history preserved), %s. "+
 			"No changes made.", targetPod, gate, targetPVC, tail)
 		return result, nil

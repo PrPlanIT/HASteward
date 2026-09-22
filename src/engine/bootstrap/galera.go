@@ -241,7 +241,7 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 
 	// Dry run: return plan without executing
 	if dryRun {
-		output.Info("DRY RUN — returning planned actions without executing")
+		output.Plan("DRY RUN — returning planned actions without executing")
 		return result, nil
 	}
 
@@ -295,7 +295,7 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 	output.Field("Bootstrap source", target)
 
 	if dryRun {
-		output.Info("DRY RUN — would force-bootstrap %s on the LIVE cluster (no scale-to-0), delete recovery jobs, and wait for GaleraReady", target)
+		output.Plan("DRY RUN — would force-bootstrap %s on the LIVE cluster (no scale-to-0), delete recovery jobs, and wait for GaleraReady", target)
 		return result, nil
 	}
 

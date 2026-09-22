@@ -51,7 +51,7 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 		if keepFenced {
 			tail = "then KEEP IT FENCED (isolated from operator reconcile so it is NOT pg_rewound onto the stale primary)"
 		}
-		output.Info("DRY RUN: deadlock-recover on %s (PVC %s) — would ESCROW it (VolumeSnapshot), fence + isolate it, "+
+		output.Plan("DRY RUN: deadlock-recover on %s (PVC %s) — would ESCROW it (VolumeSnapshot), fence + isolate it, "+
 			"relocate pg_wal to scratch, run a single-user crash-recovery REPLAY + CHECKPOINT (applies all committed WAL, "+
 			"no data loss), pg_archivecleanup the recycled segments, move the small WAL back, %s. No changes made.",
 			targetPod, targetPVC, tail)

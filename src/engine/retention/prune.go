@@ -33,7 +33,7 @@ func runPrune(ctx context.Context, cfg *common.Config, engine string, opts Prune
 		opts.Type, policy.KeepLast, policy.KeepDaily, policy.KeepWeekly, policy.KeepMonthly)
 
 	if cfg.DryRun {
-		output.Info("DRY RUN: would apply the retention policy above (type=%s) to %s and FORGET snapshots beyond it. "+
+		output.Plan("DRY RUN: would apply the retention policy above (type=%s) to %s and FORGET snapshots beyond it. "+
 			"No snapshots removed.", opts.Type, cfg.BackupsPath)
 		return &model.PruneResult{}, nil
 	}

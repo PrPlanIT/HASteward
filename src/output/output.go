@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/PrPlanIT/HASteward/src/common"
 )
 
 const bannerWidth = 60
@@ -121,6 +123,22 @@ func Info(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(writer, "  >> %s\n", fmt.Sprintf(format, args...))
+}
+
+// Plan announces what a --dry-run WOULD do. Unlike Info it also goes to the
+// structured log, because the human writer is io.Discard whenever stdout is not a
+// TTY: OutputAuto resolves to JSON there, and SetEnabled(false) silences every
+// output.* call. A dry run in a Kubernetes Job or CI therefore printed its safety
+// gates and nothing else — no plan at all — which is the one context where the
+// preview is the whole point. Logging it means the operator sees it in
+// `kubectl logs` regardless of the rendering mode.
+func Plan(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	common.InfoLog("%s", msg)
+	if !enabled {
+		return
+	}
+	fmt.Fprintf(writer, "  >> %s\n", msg)
 }
 
 // Success prints a success message.

@@ -53,7 +53,7 @@ func (r *cnpgRepair) promotePrepare(ctx context.Context) (*model.TriageResult, e
 	}
 
 	if cfg.DryRun {
-		output.Info("DRY RUN: would escrow %v, persist a promotion proof, and print the swap runbook — no changes made", plan.RecoverySet)
+		output.Plan("DRY RUN: would escrow %v, persist a promotion proof, and print the swap runbook — no changes made", plan.RecoverySet)
 		output.Println(cnpgPromotionRunbook(cfg.ClusterName, cfg.Namespace, plan))
 		return t, errDryRunPreview
 	}

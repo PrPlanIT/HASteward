@@ -99,7 +99,7 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 	}
 
 	if cfg.DryRun {
-		output.Info("DRY RUN: would stream snapshot %s into primary %s (OVERWRITING its data), then fence + "+
+		output.Plan("DRY RUN: would stream snapshot %s into primary %s (OVERWRITING its data), then fence + "+
 			"delete the replicas to force a clean re-sync. No changes made.", snapshotID, primary)
 		return &model.RestoreResult{Engine: r.p.Name(), Cluster: model.ObjectRef{Namespace: ns, Name: cfg.ClusterName},
 			SnapshotID: snapshotID, Duration: time.Since(start)}, nil

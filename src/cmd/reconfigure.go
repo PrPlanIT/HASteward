@@ -73,7 +73,7 @@ Requires --force, --instance, and at least one action flag (--fix-bootstrap).`,
 		reconf.PrintPlan(ctx, result)
 
 		if Cfg.DryRun {
-			output.Info("DRY RUN: plan above — stopping before any mutation (no CR suspend, scale-to-0, grastate reset, or pod delete). No changes made.")
+			output.Plan("DRY RUN: plan above — stopping before any mutation (no CR suspend, scale-to-0, grastate reset, or pod delete). No changes made.")
 			return nil
 		}
 

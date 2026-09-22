@@ -92,7 +92,7 @@ Examples:
 			if snap == "" {
 				snap = "latest"
 			}
-			output.Info("DRY RUN: would export snapshot %s (%s) to %s. No file written.", snap, snapshotPath, exportFile)
+			output.Plan("DRY RUN: would export snapshot %s (%s) to %s. No file written.", snap, snapshotPath, exportFile)
 			return nil
 		}
 

@@ -63,7 +63,7 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	// Heal clears datadirs. A --dry-run must preview, never mutate. (The --unwedge
 	// deadlock breaker previews and stops even earlier, in PreAssess.)
 	if r.DryRun() {
-		output.Info("DRY RUN: triage complete — stopping before any mutation (no CR suspend, escrow, or heal)")
+		output.Plan("DRY RUN: triage complete — stopping before any mutation (no CR suspend, escrow, or heal)")
 		result.Duration = time.Since(start)
 		return result, nil
 	}
