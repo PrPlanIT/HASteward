@@ -107,6 +107,12 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			// Inherit the cluster's own SA, as every other spawned pod does. Without it
+			// the pod lands on "default", which an ambient-mesh namespace refuses:
+			//   restrict-default-sa: Pods must specify a non-default serviceAccountName
+			// The refusal arrives at STEP 2, after STEP 1 has already fenced the instance,
+			// so the run aborts leaving the target fenced and unrelieved.
+			ServiceAccountName: w.serviceAccountFor(ctx, ns),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 			},
@@ -548,4 +554,18 @@ func (w *cnpgPruner) discoverSnapshotClass(ctx context.Context, ns, pvcName stri
 		}
 	}
 	return "", fmt.Errorf("no VolumeSnapshotClass matches the PVC provisioner %q — pass --snapshot-class", provisioner)
+}
+
+// serviceAccountFor inherits a workload SA from the namespace so the helper satisfies
+// its PodSecurity/RBAC and admission policy, falling back to "default". Mirrors the
+// resolution every other spawned pod uses (triage probes, heal, breaker, escrow).
+func (w *cnpgPruner) serviceAccountFor(ctx context.Context, ns string) string {
+	c := k8s.GetClients()
+	pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "cnpg.io/cluster=" + w.p.Config().ClusterName,
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return "default"
+	}
+	return k8s.ServiceAccountFromPods(pods.Items)
 }
