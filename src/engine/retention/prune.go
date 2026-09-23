@@ -14,6 +14,17 @@ import (
 // (Forget) and/or "diverged" (ForgetGrouped) per opts.Type — and tallies what was
 // kept vs removed. Identical across engines; only the "engine" tag value differs.
 func runPrune(ctx context.Context, cfg *common.Config, engine string, opts PruneOptions) (*model.PruneResult, error) {
+	// Escrow lives in the cluster, not in the restic repo, and is released on its
+	// own terms. It is handled before the repo client is built so that pruning
+	// escrow needs neither a backups path nor a repo password.
+	if opts.Type == "escrow" {
+		kept, removed, err := pruneEscrow(ctx, cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &model.PruneResult{TotalKept: kept, TotalRemoved: removed}, nil
+	}
+
 	rc := restic.NewClient(cfg.BackupsPath, cfg.ResticPassword)
 
 	baseTags := map[string]string{

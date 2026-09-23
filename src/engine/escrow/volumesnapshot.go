@@ -15,9 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// escrowLabelPrefix namespaces the discovery labels stamped on every escrow.
-const escrowLabelPrefix = "hasteward.prplanit.com/"
-
 // volumeSnapshotEscrow escrows PVCs as CSI VolumeSnapshots. Verify gates on the
 // snapshot's own readyToUse signal — the CSI driver's assertion that the snapshot
 // is restorable — which is the storage layer's authoritative restorability proof.
@@ -48,20 +45,10 @@ func (e *volumeSnapshotEscrow) Capture(ctx context.Context, recoverySet []string
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshot",
 			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": ns,
-				"labels": map[string]interface{}{
-					"app.kubernetes.io/managed-by": "hasteward",
-					escrowLabelPrefix + "escrow":   "true",
-					escrowLabelPrefix + "cluster":  e.cfg.ClusterName,
-					escrowLabelPrefix + "instance": pvc,
-					escrowLabelPrefix + "run-id":   e.runID,
-				},
-				// Timestamp lives in an annotation: RFC3339 contains ':' which is
-				// not a legal label value.
-				"annotations": map[string]interface{}{
-					escrowLabelPrefix + "captured-at": now.UTC().Format(time.RFC3339),
-				},
+				"name":        name,
+				"namespace":   ns,
+				"labels":      LabelsAsInterface(e.cfg.ClusterName, pvc, e.runID, KindSplitBrain),
+				"annotations": CapturedAtAnnotation(now),
 			},
 			"spec": map[string]interface{}{
 				"volumeSnapshotClassName": e.class,

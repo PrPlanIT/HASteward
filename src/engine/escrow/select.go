@@ -2,8 +2,6 @@ package escrow
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -29,7 +27,7 @@ func Select(ctx context.Context, cfg *common.Config, recoverySet []string) (Escr
 		return nil, fmt.Errorf("escrow: empty recovery set — nothing to make reversible")
 	}
 
-	runID := newRunID()
+	runID := NewRunID()
 
 	if class, err := matchSnapshotClass(ctx, cfg.Namespace, recoverySet[0]); err == nil && class != "" {
 		return newVolumeSnapshotEscrow(cfg, class, runID), nil
@@ -79,13 +77,6 @@ func matchSnapshotClass(ctx context.Context, ns, pvcName string) (string, error)
 // driverOf reads the top-level .driver of a VolumeSnapshotClass.
 func driverOf(obj *unstructured.Unstructured) string {
 	return k8s.GetNestedString(obj, "driver")
-}
-
-// newRunID returns a short random run id identifying one escrow operation.
-func newRunID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 // shortID is the human-discoverable prefix of a run id, used in object names.

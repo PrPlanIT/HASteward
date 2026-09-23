@@ -119,32 +119,25 @@ committed WAL past a shared fork at `119/9D02A138`, with the TL28 carrier in
 CrashLoopBackOff). Detection and refusal worked; the gaps are in what escrow
 leaves behind.
 
-- **P4.1 — escrow VolumeSnapshots are never retired, and retention cannot see them.** ⏳ FOLLOW-UP.
-  - **Where:** `escrow/escrow.go:51` declares `EscrowProvider.Cleanup`, and no non-test
-    code calls it — `repair/service.go:33`'s `defer r.Cleanup(ctx)` is the unrelated
-    `Repairer.Cleanup` (a CNPG no-op). `retention/prune.go` builds a `restic.Client` and
-    forgets by tag, so `backup prune` operates on restic snapshots only and has no
-    concept of a VolumeSnapshot.
-  - **Gap:** every escrow that selects the VolumeSnapshot provider leaves a Kubernetes
-    object and a backing CSI snapshot that nothing tracks, ages out, or reports. The
-    blast radius grew on 2026-09-21: escrow of a down diverged instance now happens on
-    the ORDINARY split-brain repair path (`repair/escrow.go` `escrowUndumpable`), not
-    only in `--unwedge`/`--promote`, so snapshots accumulate during routine recovery
-    rather than rare breaker runs. Live evidence that this already bites:
-    `hyrule-castle/calcom-postgres-{1,2,3}-preprune`, 23 days old and unreferenced.
-  - **Why it is not simply "call Cleanup":** an escrow is the rollback for a mutation,
-    so it must outlive the run that took it — deleting on success is exactly the window
-    an operator needs when the repair turns out to have been wrong. Retention has to be
-    time/count-based and deliberate, not tied to the run's exit.
-  - **Aggravating factor:** `csi-rbdplugin-snapclass` (the class matched on this estate)
-    has `deletionPolicy: Delete`, so deleting the VolumeSnapshot object destroys the
-    underlying Ceph snapshot. Any retention must be certain the escrow is spent, and the
-    absence of retention means the safe default today is "never delete", i.e. unbounded
-    growth on the pool the databases themselves live on.
-  - **Fix (either, not both):** teach `backup prune` the snapshot provider — label
-    escrow-created VolumeSnapshots (cluster, run ID, capture time) so retention can
-    enumerate and age them with the same policy vocabulary; or have the provider record
-    its refs into the restic repo as metadata so one retention pass covers both. The
-    label route keeps the provider self-describing and survives a lost repo.
-  - **Severity:** MEDIUM — no data loss, but it consumes the same pool the clusters run
-    on, with no signal until the pool is full. A full pool takes every database with it.
+- **P4.1 — escrow VolumeSnapshots are never retired, and retention cannot see them.** ✅ FIXED 2026-09-23.
+  - **Was:** `escrow/escrow.go` declared `EscrowProvider.Cleanup` and nothing called it, and
+    `retention/prune.go` forgot by restic tag, so it had no concept of a VolumeSnapshot.
+    Every escrow left a Kubernetes object and a backing CSI snapshot that nothing tracked or
+    aged. The blast radius grew on 2026-09-21 when escrow of a down diverged instance moved
+    onto the ordinary split-brain repair path.
+  - **Fix:** `backup prune -t escrow`. The label vocabulary moved to `escrow/labels.go` as one
+    exported source of truth, and the deadlock path (`prunewal/deadlock.go`) now stamps it too
+    instead of its own `hasteward: deadlock-escrow` dialect — so one retention pass finds every
+    escrow whatever took it. Retention groups by run id, keeps the most recent `--keep-last`
+    runs, and releases whole runs only.
+  - **Why it is safe to delete on a deletionPolicy: Delete class:** `--escrow-min-age` (default
+    7d) is a floor the count policy cannot override — an escrow inside it is held even at
+    `--keep-last 0`. `escrow` is deliberately NOT part of `-t all`, so no routine prune can
+    reach a rollback point. Snapshots without this tool's labels are reported and never
+    touched. `selectForRelease` and `groupEscrows` are pure and unit-tested, because that
+    decision destroys storage.
+  - **Still open:** escrows taken before labelling exist on this estate and retention will not
+    release them — by design, since it cannot prove what they protect. They are named in the
+    prune output and must be retired by hand:
+    `hyrule-castle/calcom-postgres-{1,2,3}-preprune` (2026-08-28) and the
+    `*-deadlock-escrow-*` snapshots in `temple-of-time` and `training-dummy`.

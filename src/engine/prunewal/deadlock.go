@@ -9,6 +9,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/cnpgjob"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
@@ -492,13 +493,18 @@ func (w *cnpgPruner) escrowSnapshot(ctx context.Context, ns, pvcName string) (st
 		}
 	}
 
-	name := fmt.Sprintf("%s-deadlock-escrow-%d", pvcName, time.Now().Unix())
+	// The same discovery labels the split-brain escrow stamps, so one retention
+	// pass can find and age every escrow regardless of which operation took it.
+	now := time.Now()
+	runID := escrow.NewRunID()
+	name := fmt.Sprintf("%s-deadlock-escrow-%d", pvcName, now.Unix())
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
 		"metadata": map[string]interface{}{
 			"name": name, "namespace": ns,
-			"labels": map[string]interface{}{"hasteward": "deadlock-escrow", "hasteward.pvc": pvcName},
+			"labels":      escrow.LabelsAsInterface(cfg.ClusterName, pvcName, runID, escrow.KindDeadlock),
+			"annotations": escrow.CapturedAtAnnotation(now),
 		},
 		"spec": map[string]interface{}{
 			"volumeSnapshotClassName": class,
