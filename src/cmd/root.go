@@ -56,7 +56,7 @@ func init() {
 			"required to declare the authoritative source node.")
 	env.String(pf, &Cfg.BackupsPath, "backups-path", "", "BACKUPS_PATH", "", "Restic repository path or URL")
 	env.RawOrPrefixed(pf, &Cfg.ResticPassword, "restic-password", "", "RESTIC_PASSWORD", "", "Restic repository encryption password")
-	env.Bool(pf, &Cfg.NoEscrow, "no-escrow", "", "NO_ESCROW", false, "Skip pre-repair escrow backup")
+	env.Bool(pf, &Cfg.NoEscrow, "no-escrow", "", "NO_ESCROW", false, "Skip the pre-mutation escrow on any destructive operation (accepting that data lost cannot be recovered)")
 	// Command-specific flags (demoted from persistent — #31: flag scope = "which cluster"
 	// stays global, "how this algorithm behaves" belongs on the owning command).
 	env.Bool(repairCmd.Flags(), &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")

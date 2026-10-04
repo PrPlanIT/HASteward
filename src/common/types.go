@@ -29,7 +29,7 @@ type Config struct {
 	WipeDatadir    bool // Wipe entire datadir (not just grastate) — forces full SST reseed from donor
 	FixBootstrap   bool // Reconfigure: clear grastate + remove bootstrap config on target instance
 	BackupsPath    string
-	NoEscrow       bool
+	NoEscrow       bool // --no-escrow: skip the pre-mutation escrow on ANY destructive operation (repair, restore, bootstrap, reset-authority, deadlock-recover) — the operator accepting unrecoverable loss
 	Unwedge        bool // --unwedge: enable the CNPG disk-full deadlock breaker (escrow-gated offline datadir clear)
 	Promote        bool // --promote: prepare a rebuild-around-authority promotion of --instance N (escrow + proof + runbook; P3.2b)
 	DeadlockRecover bool   // --deadlock-recover: replay+recycle WAL in place for a disk-full-DEADLOCKED CNPG instance (P3.6)
