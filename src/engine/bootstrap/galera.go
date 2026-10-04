@@ -9,6 +9,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -254,6 +255,17 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	return result, nil
 }
 
+// podsFromAssessments lists the instances triage assessed, which is the recovery set for
+// a bootstrap: every node is either the candidate or an SST target, so every node's
+// datadir is at risk.
+func podsFromAssessments(assessments []model.InstanceAssessment) []string {
+	out := make([]string, 0, len(assessments))
+	for _, a := range assessments {
+		out = append(out, a.Pod)
+	}
+	return out
+}
+
 // findDiagnosis returns the diagnosis with the given ID from a triage result, or nil.
 func findDiagnosis(t *model.TriageResult, id string) *model.Diagnosis {
 	for i := range t.Diagnoses {
@@ -361,6 +373,22 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	})
 	if err == nil {
 		sa = k8s.ServiceAccountFromPods(pods.Items)
+	}
+
+	// ESCROW GATE — the last point at which this is still reversible.
+	//
+	// Bootstrapping rewrites cluster authority: safe_to_bootstrap is marked on ONE
+	// node's grastate and the operator is directed to boot from it, after which every
+	// other node is re-seeded by SST and its datadir replaced wholesale. If the
+	// candidate is not the most advanced node, the committed data on the nodes that
+	// lose is gone — which is how osticket's database was wiped. Escrow every node's
+	// datadir before any of that, or refuse.
+	//
+	// Reached only on a real run; Bootstrap returns on dryRun before calling this.
+	nodes := podsFromAssessments(assessments)
+	if _, err := escrow.Gate(ctx, cfg, "bootstrap", escrow.PVCsFor(b.p, nodes),
+		escrow.UsedBytesByPVC(&model.TriageResult{Assessments: assessments}, nodes)); err != nil {
+		return err
 	}
 
 	suspended := false

@@ -38,6 +38,17 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// fakeNamer stands in for the provider's pod→PVC mapping; CNPG's is the identity, which
+// is what these tests assert against.
+type fakeNamer struct{}
+
+func (fakeNamer) DataPVCName(pod string) string { return pod }
+
+// galeraNamer mirrors GaleraProvider.DataPVCName.
+type galeraNamer struct{}
+
+func (galeraNamer) DataPVCName(pod string) string { return "storage-" + pod }
+
 func escrowCfg() *common.Config {
 	return &common.Config{Namespace: "ns", ClusterName: "c", BackupsPath: "/b", ResticPassword: "pw"}
 }
@@ -50,7 +61,7 @@ func TestRunEscrow(t *testing.T) {
 
 	t.Run("safe: one pre-repair backup, no diverged", func(t *testing.T) {
 		b := &fakeBacker{}
-		if err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, triageRes(true), "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(b.calls) != 1 || b.calls[0] != "backup:c-0:ns/c/dump.sql" {
@@ -67,7 +78,7 @@ func TestRunEscrow(t *testing.T) {
 			// this cfg names no engine — see TestRunEscrowDownDivergedInstance.
 			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false},
 		)
-		if err := runEscrow(ctx, escrowCfg(), b, r, "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(b.calls) != 3 ||
@@ -83,7 +94,7 @@ func TestRunEscrow(t *testing.T) {
 		cfg := escrowCfg()
 		cfg.NoEscrow = true
 		r := triageRes(false, model.InstanceAssessment{Pod: "c-0", IsRunning: true, IsReady: true})
-		if err := runEscrow(ctx, cfg, b, r, "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cfg, fakeNamer{}, b, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(b.calls) != 0 {
@@ -94,7 +105,7 @@ func TestRunEscrow(t *testing.T) {
 	t.Run("missing creds: error", func(t *testing.T) {
 		cfg := escrowCfg()
 		cfg.ResticPassword = ""
-		if err := runEscrow(ctx, cfg, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, cfg, fakeNamer{}, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err == nil {
 			t.Fatal("expected an error when RESTIC_PASSWORD is unset")
 		}
 	})
@@ -102,7 +113,7 @@ func TestRunEscrow(t *testing.T) {
 	t.Run("empty donor: skips pre-repair, still runs diverged", func(t *testing.T) {
 		b := &fakeBacker{}
 		r := triageRes(false, model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true})
-		if err := runEscrow(ctx, escrowCfg(), b, r, "", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, r, "", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(b.calls) != 1 || b.calls[0] != "diverged:c-0:ns/c/0-dump.sql" {
@@ -112,7 +123,7 @@ func TestRunEscrow(t *testing.T) {
 
 	t.Run("pre-repair backup fails: error", func(t *testing.T) {
 		b := &fakeBacker{failOn: "c-0"}
-		if err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, triageRes(true), "c-0", "dump.sql"); err == nil {
 			t.Fatal("expected an error when the pre-repair backup fails")
 		}
 	})
@@ -127,7 +138,7 @@ func TestRunEscrow(t *testing.T) {
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
 		)
-		if err := runEscrow(ctx, escrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, r, "c-9", "dump.sql"); err != nil {
 			t.Fatalf("one failed dump must not stop the rest: %v", err)
 		}
 		if len(b.calls) != 3 {
@@ -170,12 +181,14 @@ func (f *fakeEscrowProvider) EstimateCaptureBytes(set []string, used map[string]
 }
 func (f *fakeEscrowProvider) AvailableBytes() (int64, error) { return 1 << 40, nil }
 
-// withSelectEscrow swaps the package's provider selector for one test.
+// withSelectEscrow swaps the escrow package's provider selector for one test. The seam
+// lives there rather than here because the orchestration does, and all four destructive
+// paths now share it.
 func withSelectEscrow(t *testing.T, fn func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error)) {
 	t.Helper()
-	prev := selectEscrow
-	selectEscrow = fn
-	t.Cleanup(func() { selectEscrow = prev })
+	prev := escrow.SelectProvider
+	escrow.SelectProvider = fn
+	t.Cleanup(func() { escrow.SelectProvider = prev })
 }
 
 func cnpgEscrowCfg() *common.Config {
@@ -205,7 +218,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 			return p, nil
 		})
 		b := &fakeBacker{}
-		if err := runEscrow(ctx, cnpgEscrowCfg(), b, downSplitBrain(), "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, b, downSplitBrain(), "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(p.captured) != 1 || p.captured[0] != "c-2" {
@@ -224,7 +237,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return nil, fmt.Errorf("no provider can prove reversibility")
 		})
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
 			t.Fatal("a down diverged instance that cannot be escrowed must abort, not warn")
 		}
 	})
@@ -233,7 +246,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return &fakeEscrowProvider{failCapture: true}, nil
 		})
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
 			t.Fatal("a failed capture of the only copy of a lineage must abort")
 		}
 	})
@@ -242,7 +255,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return &fakeEscrowProvider{failVerify: true}, nil
 		})
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
 			t.Fatal("a capture that cannot be proven restorable must abort")
 		}
 	})
@@ -253,7 +266,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 			return p, nil
 		})
 		r := triageRes(false, model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true})
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(p.captured) != 0 {
@@ -261,15 +274,22 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 		}
 	})
 
-	t.Run("galera: gap is reported, run continues", func(t *testing.T) {
+	// Galera used to be skipped here on the premise that its PVC names were not
+	// derivable. They always were — EngineProvider.DataPVCName maps a node to
+	// storage-<pod> — so a down Galera node is escrowed like any other, and the gap that
+	// let bootstrap wipe osticket's data is closed rather than warned about.
+	t.Run("galera: the down node is escrowed, not skipped", func(t *testing.T) {
+		p := &fakeEscrowProvider{}
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
-			t.Fatal("galera PVC names are not derivable — selection must not be attempted")
-			return nil, nil
+			return p, nil
 		})
 		cfg := escrowCfg()
 		cfg.Engine = "galera"
-		if err := runEscrow(ctx, cfg, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err != nil {
-			t.Fatalf("galera must warn rather than abort: %v", err)
+		if err := runEscrow(ctx, cfg, galeraNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err != nil {
+			t.Fatalf("galera escrow must succeed, not warn: %v", err)
+		}
+		if len(p.captured) != 1 || p.captured[0] != "storage-c-2" {
+			t.Fatalf("want the down node's storage- PVC escrowed, captured = %v", p.captured)
 		}
 	})
 
@@ -279,7 +299,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 			return p, nil
 		})
 		r := triageRes(true, model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false})
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(p.captured) != 0 {
@@ -307,7 +327,7 @@ func TestRunEscrowRepositoryMustPreExist(t *testing.T) {
 	t.Run("absent repository: refuse before any backup runs", func(t *testing.T) {
 		withEscrowRepo(t, false, nil)
 		b := &fakeBacker{}
-		err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql")
+		err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, triageRes(true), "c-0", "dump.sql")
 		if err == nil {
 			t.Fatal("an escrow repository that this run would create proves nothing — must refuse")
 		}
@@ -318,7 +338,7 @@ func TestRunEscrowRepositoryMustPreExist(t *testing.T) {
 
 	t.Run("unreachable backend: refuse, distinct from absent", func(t *testing.T) {
 		withEscrowRepo(t, false, fmt.Errorf("dial tcp: connection refused"))
-		if err := runEscrow(ctx, escrowCfg(), &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err == nil {
 			t.Fatal("an unreachable escrow backend must refuse, not proceed")
 		}
 	})
@@ -326,7 +346,7 @@ func TestRunEscrowRepositoryMustPreExist(t *testing.T) {
 	t.Run("present repository: proceeds", func(t *testing.T) {
 		withEscrowRepo(t, true, nil)
 		b := &fakeBacker{}
-		if err := runEscrow(ctx, escrowCfg(), b, triageRes(true), "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, triageRes(true), "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(b.calls) != 1 {
@@ -338,7 +358,7 @@ func TestRunEscrowRepositoryMustPreExist(t *testing.T) {
 		withEscrowRepo(t, false, nil)
 		cfg := escrowCfg()
 		cfg.NoEscrow = true
-		if err := runEscrow(ctx, cfg, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cfg, fakeNamer{}, &fakeBacker{}, triageRes(true), "c-0", "dump.sql"); err != nil {
 			t.Fatalf("--no-escrow opts out of escrow entirely: %v", err)
 		}
 	})
@@ -390,7 +410,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
 		)
-		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, b, r, "c-9", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(p.captured) != 1 || p.captured[0] != "c-1" {
@@ -412,7 +432,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},   // dump fails
 			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false}, // down
 		)
-		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, b, r, "c-9", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		got := map[string]bool{}
@@ -433,7 +453,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
 		)
-		if err := runEscrow(ctx, cnpgEscrowCfg(), b, r, "c-9", "dump.sql"); err == nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, b, r, "c-9", "dump.sql"); err == nil {
 			t.Fatal("a lineage with neither a dump nor a block-level escrow must abort, not warn")
 		}
 	})
@@ -447,7 +467,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
 		)
-		if err := runEscrow(ctx, cnpgEscrowCfg(), &fakeBacker{}, r, "c-9", "dump.sql"); err != nil {
+		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, r, "c-9", "dump.sql"); err != nil {
 			t.Fatal(err)
 		}
 		if len(p.captured) != 0 {

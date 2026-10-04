@@ -138,7 +138,7 @@ func (g *galeraRepair) Escrow(ctx context.Context, result *model.TriageResult) e
 	if g.donorSelection != nil {
 		donor = g.donorSelection.Pod
 	}
-	return runEscrow(ctx, g.p.Config(), g.backuper, result, donor, galeraDumpFilename)
+	return runEscrow(ctx, g.p.Config(), g.p, g.backuper, result, donor, galeraDumpFilename)
 }
 
 // PlanTargets determines which instances need healing.

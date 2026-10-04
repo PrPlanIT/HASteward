@@ -19,10 +19,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// breakerReserveBytes is headroom that must remain free in the escrow store
-// beyond the capture estimate, so an escrow cannot fill the repository to the brim.
-const breakerReserveBytes int64 = 1 << 30 // 1 GiB
-
 // errDryRunPreview is returned by PreAssess in --dry-run mode after it previews
 // the plan, so the repair service stops cleanly instead of falling through to
 // Assess (which would abort — the cluster is still frozen, by design).
@@ -74,24 +70,24 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 
 	// 2. Select an escrow provider (fail-closed) and prove there is space BEFORE
 	//    any capture — "requires X, only Y available", never a full repo mid-escrow.
-	esc, err := prepareRecoverySetEscrow(ctx, cfg, "unwedge", t, rec.RecoverySet)
+	esc, err := escrow.Prepare(ctx, cfg, "unwedge", rec.RecoverySet, escrow.UsedBytesByPVC(t, rec.RecoverySet))
 	if err != nil {
 		return nil, err
 	}
-	output.Field("Escrow", esc.describe())
+	output.Field("Escrow", esc.Describe())
 
 	if cfg.DryRun {
 		common.InfoLog("DRY RUN: would escrow %v via %s, clear %v, preserve authority %s — no changes made",
-			rec.RecoverySet, esc.describe(), rec.Disposable, rec.Authority)
+			rec.RecoverySet, esc.Describe(), rec.Disposable, rec.Authority)
 		output.Section("Dry run — no escrow captured, no datadir cleared")
 		output.Field("Would clear (disposable)", strings.Join(rec.Disposable, ", "))
 		output.Field("Would preserve (authority)", rec.Authority)
-		output.Field("Would escrow via", esc.describe())
+		output.Field("Would escrow via", esc.Describe())
 		return t, errDryRunPreview
 	}
 
 	// 3. Capture + verify the escrow (the rollback that authorizes the clear).
-	refs, err := esc.capture(ctx)
+	refs, err := esc.Capture(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -199,23 +195,6 @@ func (r *cnpgRepair) discoverHealConfigLive(ctx context.Context) (*healConfig, e
 		imageName:      k8s.GetNestedString(cl, "spec", "imageName"),
 		serviceAccount: pp.Spec.ServiceAccountName,
 	}, nil
-}
-
-// usedBytesByPVC pulls each recovery-set PVC's used bytes from triage's DiskStats,
-// for the escrow space estimate. Missing/unknown disk → 0 (the estimate is a
-// guard, not an accounting record).
-func usedBytesByPVC(t *model.TriageResult, set []string) map[string]int64 {
-	want := make(map[string]bool, len(set))
-	for _, p := range set {
-		want[p] = true
-	}
-	out := make(map[string]int64, len(set))
-	for _, a := range t.Assessments {
-		if want[a.Pod] && a.Disk != nil {
-			out[a.Pod] = a.Disk.UsedBytes
-		}
-	}
-	return out
 }
 
 // buildBreakerConfig assembles the clear pod's prerequisites WITHOUT a primary

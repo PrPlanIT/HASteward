@@ -8,6 +8,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
@@ -55,20 +56,20 @@ func (r *cnpgRepair) promotePrepare(ctx context.Context) (*model.TriageResult, e
 	// the promotion is reversible before ANY mutation — including the manual swap to come.
 	// Selected and space-proven BEFORE the dry-run branch, so a preview refuses for the
 	// same reasons a live run would instead of promising an escrow that cannot be taken.
-	esc, err := prepareRecoverySetEscrow(ctx, cfg, "promote", t, plan.RecoverySet)
+	esc, err := escrow.Prepare(ctx, cfg, "promote", plan.RecoverySet, escrow.UsedBytesByPVC(t, plan.RecoverySet))
 	if err != nil {
 		return nil, err
 	}
-	output.Field("Escrow", esc.describe())
+	output.Field("Escrow", esc.Describe())
 
 	if cfg.DryRun {
 		output.Plan("DRY RUN: would escrow %v via %s, persist a promotion proof, and print the swap runbook — no changes made",
-			plan.RecoverySet, esc.describe())
+			plan.RecoverySet, esc.Describe())
 		output.Println(cnpgPromotionRunbook(cfg.ClusterName, cfg.Namespace, plan))
 		return t, errDryRunPreview
 	}
 
-	refs, err := esc.capture(ctx)
+	refs, err := esc.Capture(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -134,7 +134,7 @@ func (r *cnpgRepair) Cleanup(ctx context.Context) {}
 // Escrow performs the pre-repair escrow backup and diverged per-instance backups.
 func (r *cnpgRepair) Escrow(ctx context.Context, result *model.TriageResult) error {
 	primary := k8s.GetNestedString(r.p.Cluster(), "status", "currentPrimary")
-	return runEscrow(ctx, r.p.Config(), r.backuper, result, primary, cnpgDumpFilename)
+	return runEscrow(ctx, r.p.Config(), r.p, r.backuper, result, primary, cnpgDumpFilename)
 }
 
 // PlanTargets determines which instances need healing.

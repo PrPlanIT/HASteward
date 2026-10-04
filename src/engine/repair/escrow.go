@@ -19,7 +19,8 @@ import (
 // currentPrimary) and the dump filename. donorPod == "" skips the pre-repair
 // backup (no donor resolved). Diverged backups are best-effort: a failure on one
 // node is logged and the rest continue.
-func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, result *model.TriageResult, donorPod, dumpFilename string) error {
+func runEscrow(ctx context.Context, cfg *common.Config, namer escrow.PVCNamer, backuper backup.Backer,
+	result *model.TriageResult, donorPod, dumpFilename string) error {
 	start := time.Now()
 
 	if !cfg.NoEscrow {
@@ -73,7 +74,7 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 			}
 			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
 		}
-		if err := escrowUndumpable(ctx, cfg, result, undumpable); err != nil {
+		if err := escrowUndumpable(ctx, cfg, namer, result, undumpable); err != nil {
 			return err
 		}
 	}
@@ -112,11 +113,6 @@ func assertEscrowRepo(ctx context.Context, cfg *common.Config) error {
 	return nil
 }
 
-// selectEscrow is escrow.Select behind a package variable so the fail-closed contract
-// below — a refusal or an unproven capture must abort the run — is testable without
-// standing up a storage backend. Never reassigned outside tests.
-var selectEscrow = escrow.Select
-
 // escrowUndumpable captures the instances a dump could not reach, at the block layer,
 // via the same fail-closed provider the deadlock breaker uses — a CSI VolumeSnapshot
 // when one matches the PVCs' provisioner, else a restic PVC backup. No postgres is
@@ -132,32 +128,23 @@ var selectEscrow = escrow.Select
 // a lineage that exists nowhere else. Proceeding without it would let a subsequent
 // --force destroy the one instance no backup covers, so a failure here stops the run.
 //
-// CNPG only: an instance's PVC is named after its pod, which is what makes the
-// recovery set derivable. Galera does not name them that way, so rather than guess
-// at a PVC the gap is reported and left for an operator.
-func escrowUndumpable(ctx context.Context, cfg *common.Config, result *model.TriageResult, pods []string) error {
+// Engine-agnostic: the PVCs come from each pod's own volume list rather than from a
+// naming rule, so a Galera node's storage-/galera- pair is covered as readily as a CNPG
+// instance's pgdata. Guessing at names is what previously left Galera with no escrow
+// path at all.
+func escrowUndumpable(ctx context.Context, cfg *common.Config, namer escrow.PVCNamer,
+	result *model.TriageResult, pods []string) error {
 	if len(pods) == 0 {
-		return nil
-	}
-	if cfg.Engine != "cnpg" {
-		common.WarnLog("Cannot escrow %v: no dump is possible while they are down, and their PVC names are not derivable for the %s engine — capture them manually before any --force", pods, cfg.Engine)
 		return nil
 	}
 
 	common.WarnLog("Capturing block-level escrow for instances a dump cannot reach: %v", pods)
-	// Through the shared orchestration, so this path gets the pre-capture space check
-	// the breaker and the promotion already had: it was the one caller that could fill
-	// the escrow store mid-capture.
-	esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", result, pods)
-	if err != nil {
-		return fmt.Errorf("escrow of down diverged instance(s) %v: %w", pods, err)
-	}
-	refs, err := esc.capture(ctx)
-	if err != nil {
-		return fmt.Errorf("escrow of down diverged instance(s) %v: %w", pods, err)
-	}
-	for _, r := range refs {
-		common.InfoLog("Diverged escrow %s: %s %s", r.PVC, r.Provider, r.ID)
+	// Space is estimated per POD (that is how triage reports disk usage) while the
+	// capture is per PVC, so the estimate is a floor — a guard against a full store,
+	// not an accounting record.
+	pvcs := escrow.PVCsFor(namer, pods)
+	if _, err := escrow.Gate(ctx, cfg, "escrow", pvcs, escrow.UsedBytesByPVC(result, pods)); err != nil {
+		return fmt.Errorf("escrow of diverged instance(s) %v: %w", pods, err)
 	}
 	return nil
 }

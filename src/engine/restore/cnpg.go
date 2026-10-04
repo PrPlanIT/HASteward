@@ -12,6 +12,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -20,6 +21,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/restic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -94,7 +96,8 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 	// it can silently discard newer/committed data (the class of event that rewound
 	// boundary-postgres onto a stale lineage). Refuse or require explicit intent BEFORE
 	// any destructive step.
-	if err := r.guardRestoreRegression(ctx, primary, snapshotID); err != nil {
+	tr, err := r.guardRestoreRegression(ctx, primary, snapshotID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -105,15 +108,25 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 			SnapshotID: snapshotID, Duration: time.Since(start)}, nil
 	}
 
-	// Get replica instance names (non-primary)
-	var replicas []string
-	if names := k8s.GetNestedSlice(r.p.Cluster(), "status", "instanceNames"); names != nil {
-		for _, n := range names {
-			if s, ok := n.(string); ok && s != primary {
-				replicas = append(replicas, s)
-			}
-		}
+	// ESCROW GATE. A dump restore overwrites the primary's live data and then re-clones
+	// every replica from it, so the cluster's current contents are gone the moment the
+	// stream starts — including whatever newer committed data the guard above only
+	// WARNED about under --force. The whole cluster is therefore the recovery set, not
+	// just the primary.
+	//
+	// Placed after the dry-run return and before the first patch, so a preview writes
+	// nothing and a real run cannot reach the restore without a proven rollback.
+	instances := restoreInstanceNames(r.p.Cluster(), "")
+	pvcs, err := escrow.PVCsForPods(ctx, ns, instances)
+	if err != nil {
+		return nil, fmt.Errorf("restore REFUSED: %w", err)
 	}
+	if _, err := escrow.Gate(ctx, cfg, "restore", pvcs, escrow.UsedBytesByPVC(tr, instances)); err != nil {
+		return nil, err
+	}
+
+	// Get replica instance names (non-primary)
+	replicas := restoreInstanceNames(r.p.Cluster(), primary)
 
 	// Fence replicas before restore
 	if len(replicas) > 0 {
@@ -183,16 +196,30 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 // guardRestoreRegression runs triage and applies the restore-regression decision. It
 // runs before any destructive step so a refusal changes nothing. Triage failing is
 // itself fatal here: restoring blind is exactly what the guard exists to prevent.
-func (r *cnpgRestore) guardRestoreRegression(ctx context.Context, primary, snapshotID string) error {
+// Returns the triage snapshot it decided on, so the escrow that follows can size its
+// capture from the same assessment rather than running a second one.
+func (r *cnpgRestore) guardRestoreRegression(ctx context.Context, primary, snapshotID string) (*model.TriageResult, error) {
 	t, err := triage.Get(r.p)
 	if err != nil {
-		return fmt.Errorf("restore-regression guard: triage init failed: %w", err)
+		return nil, fmt.Errorf("restore-regression guard: triage init failed: %w", err)
 	}
 	tr, err := triage.Run(ctx, t, engine.NopSink{})
 	if err != nil {
-		return fmt.Errorf("restore-regression guard: triage failed — refusing to restore blind: %w", err)
+		return nil, fmt.Errorf("restore-regression guard: triage failed — refusing to restore blind: %w", err)
 	}
-	return restoreRegressionDecision(tr, primary, snapshotID, r.p.Config())
+	return tr, restoreRegressionDecision(tr, primary, snapshotID, r.p.Config())
+}
+
+// restoreInstanceNames lists the cluster's instances from its status, optionally
+// excluding one (the primary, when the caller wants only the replicas).
+func restoreInstanceNames(cluster *unstructured.Unstructured, except string) []string {
+	var out []string
+	for _, n := range k8s.GetNestedSlice(cluster, "status", "instanceNames") {
+		if s, ok := n.(string); ok && s != except {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // restoreRegressionDecision is the pure guard: given the current triage verdict, decide

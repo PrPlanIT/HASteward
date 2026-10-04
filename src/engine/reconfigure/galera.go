@@ -10,6 +10,7 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
+	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/k8s"
@@ -167,6 +168,17 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 		if targetPodObj.Spec.ServiceAccountName != "" {
 			sa = targetPodObj.Spec.ServiceAccountName
 		}
+	}
+
+	// ESCROW GATE — reconfigure stops every pod and rewrites the target's cluster
+	// metadata (clearing grastate / removing bootstrap config), so the target rejoins by
+	// SST and its datadir is replaced. Escrow it before any of that, or refuse.
+	//
+	// Reached only on a real run; the command returns on --dry-run after PrintPlan.
+	if _, err := escrow.Gate(ctx, cfg, "reset-authority",
+		escrow.PVCsFor(g.p, []string{targetPod}),
+		escrow.UsedBytesByPVC(result, []string{targetPod})); err != nil {
+		return err
 	}
 
 	storagePVC := g.p.DataPVCName(targetPod)

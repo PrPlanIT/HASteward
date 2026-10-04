@@ -31,6 +31,26 @@ func init() {
 // cnpgDumpFilename is the virtual filename used in restic snapshots for pg_dumpall output.
 const cnpgDumpFilename = "pgdumpall.sql"
 
+// cnpgBarmanPluginName is the CNPG plugin that archives to object storage.
+const cnpgBarmanPluginName = "barman-cloud.cloudnative-pg.io"
+
+// cnpgBarmanPlugin returns the name of the barman-cloud plugin entry enabled on the
+// cluster, or "" when the cluster does not use the plugin form. An entry with
+// enabled: false is deliberately not a backup target.
+func cnpgBarmanPlugin(cluster *unstructured.Unstructured) string {
+	for _, raw := range k8s.GetNestedSlice(cluster, "spec", "plugins") {
+		pl, ok := raw.(map[string]interface{})
+		if !ok || pl["name"] != cnpgBarmanPluginName {
+			continue
+		}
+		if enabled, ok := pl["enabled"].(bool); ok && !enabled {
+			continue
+		}
+		return cnpgBarmanPluginName
+	}
+	return ""
+}
+
 // cnpgBackup implements Backer for CloudNativePG PostgreSQL clusters.
 type cnpgBackup struct {
 	p *provider.CNPGProvider
@@ -142,27 +162,59 @@ func (b *cnpgBackup) backupNative(ctx context.Context) (*model.BackupResult, err
 	start := time.Now()
 	cfg := b.p.Config()
 
-	// Verify barmanObjectStore is configured
-	backup := k8s.GetNestedMap(b.p.Cluster(), "spec", "backup")
-	if backup == nil {
-		return nil, fmt.Errorf("barmanObjectStore not configured on cluster '%s'. Use --method dump or configure S3 backup", cfg.ClusterName)
-	}
-	if _, ok := backup["barmanObjectStore"]; !ok {
-		return nil, fmt.Errorf("barmanObjectStore not configured on cluster '%s'", cfg.ClusterName)
+	// CNPG archives to object storage two different ways, and a native backup must ask
+	// for the one this cluster actually uses.
+	//
+	// The barman-cloud PLUGIN is the current form: configuration lives in spec.plugins
+	// and spec.backup is nil, so a Backup CR must say method: plugin with a matching
+	// pluginConfiguration. The in-tree spec.backup.barmanObjectStore is the legacy form
+	// and takes method: barmanObjectStore. Checking only the legacy field — and then
+	// always emitting the legacy method — made --method native refuse on every
+	// plugin-configured cluster, which is all of them once the plugin is adopted.
+	pluginName := cnpgBarmanPlugin(b.p.Cluster())
+	legacy := false
+	if pluginName == "" {
+		if bk := k8s.GetNestedMap(b.p.Cluster(), "spec", "backup"); bk != nil {
+			_, legacy = bk["barmanObjectStore"]
+		}
+		if !legacy {
+			return nil, fmt.Errorf("no object-store backup configured on cluster '%s': neither the %s plugin "+
+				"(spec.plugins) nor spec.backup.barmanObjectStore is present. Configure one, or use --method dump",
+				cfg.ClusterName, cnpgBarmanPluginName)
+		}
 	}
 
 	backupName := fmt.Sprintf("%s-%s", cfg.ClusterName, strings.ToLower(time.Now().Format("20060102t150405")))
 
+	method := "barmanObjectStore"
+	if pluginName != "" {
+		method = "plugin"
+	}
+
 	output.Section("Native S3 Backup")
 	output.Field("Backup CR", backupName)
 	output.Field("Cluster", cfg.ClusterName)
-	output.Field("Method", "barmanObjectStore")
+	output.Field("Method", method)
+	if pluginName != "" {
+		output.Field("Plugin", pluginName)
+	}
 
 	if cfg.DryRun {
-		output.Plan("DRY RUN: would create Backup CR %s (method barmanObjectStore) for cluster %s. No changes made.",
-			backupName, cfg.ClusterName)
+		output.Plan("DRY RUN: would create Backup CR %s (method %s) for cluster %s. No changes made.",
+			backupName, method, cfg.ClusterName)
 		return &model.BackupResult{Engine: b.Name(), Cluster: model.ObjectRef{Namespace: cfg.Namespace, Name: cfg.ClusterName},
 			Duration: time.Since(start)}, nil
+	}
+
+	backupSpec := map[string]interface{}{
+		"cluster": map[string]interface{}{
+			"name": cfg.ClusterName,
+		},
+		"method": method,
+	}
+	if pluginName != "" {
+		// The plugin method is inert without naming which plugin takes the backup.
+		backupSpec["pluginConfiguration"] = map[string]interface{}{"name": pluginName}
 	}
 
 	// Create Backup CRD
@@ -175,12 +227,7 @@ func (b *cnpgBackup) backupNative(ctx context.Context) (*model.BackupResult, err
 				"name":      backupName,
 				"namespace": cfg.Namespace,
 			},
-			"spec": map[string]interface{}{
-				"cluster": map[string]interface{}{
-					"name": cfg.ClusterName,
-				},
-				"method": "barmanObjectStore",
-			},
+			"spec": backupSpec,
 		},
 	}
 
