@@ -44,6 +44,11 @@ type EscrowProvider interface {
 	// may gate a destructive operation; any non-nil error means do not proceed.
 	// Implementations must prove recovery of actual bytes, not merely that a
 	// snapshot object or repo entry exists.
+	//
+	// Implementations MUST set Verified on each ref they prove, in place. The refs
+	// outlive the call — they are logged and persisted into the recovery proof a
+	// future operator reads — so a proof that leaves the field false records the
+	// escrow as unverified and tells that operator the opposite of the truth.
 	Verify(ctx context.Context, refs []EscrowRef) error
 
 	// Cleanup releases escrow resources once the rollback window has closed

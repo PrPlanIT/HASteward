@@ -29,6 +29,23 @@ var repairCmd = &cobra.Command{
 		if Cfg.Promote && Cfg.NoEscrow {
 			return fmt.Errorf("--promote cannot be combined with --no-escrow: the verified escrow is the rollback that makes the promotion reversible")
 		}
+		if Cfg.EscrowOnly {
+			if Cfg.NoEscrow {
+				return fmt.Errorf("--escrow-only cannot be combined with --no-escrow: capturing the escrow IS the operation")
+			}
+			// Both of those escrow and then act. --escrow-only is the request to stop
+			// after the escrow, so combining them would silently grant the mutation the
+			// operator declined to ask for.
+			if Cfg.Promote || Cfg.Unwedge {
+				return fmt.Errorf("--escrow-only cannot be combined with --promote or --unwedge: it escrows and stops, while those escrow in order to act")
+			}
+			// Deriving a Galera node's PVC is not possible (they are not named after the
+			// pod), so there is nothing to snapshot. Refuse rather than fall through to
+			// Galera's inert PreAssess, which would run an ordinary repair.
+			if Cfg.Engine != "cnpg" {
+				return fmt.Errorf("--escrow-only supports -e cnpg only: a %s node's PVC name is not derivable, so there is nothing to escrow at the block layer", Cfg.Engine)
+			}
+		}
 		// NOTE: --instance is parsed into Cfg.InstanceNumber later, inside PreRun
 		// (ResolveInstance) — so it cannot be validated here. promotePrepare enforces
 		// "--promote requires --instance" after parsing.

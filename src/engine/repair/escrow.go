@@ -73,7 +73,7 @@ func runEscrow(ctx context.Context, cfg *common.Config, backuper backup.Backer, 
 			}
 			common.InfoLog("Diverged backup %s: %s", a.Pod, divResult.SnapshotID)
 		}
-		if err := escrowUndumpable(ctx, cfg, undumpable); err != nil {
+		if err := escrowUndumpable(ctx, cfg, result, undumpable); err != nil {
 			return err
 		}
 	}
@@ -135,7 +135,7 @@ var selectEscrow = escrow.Select
 // CNPG only: an instance's PVC is named after its pod, which is what makes the
 // recovery set derivable. Galera does not name them that way, so rather than guess
 // at a PVC the gap is reported and left for an operator.
-func escrowUndumpable(ctx context.Context, cfg *common.Config, pods []string) error {
+func escrowUndumpable(ctx context.Context, cfg *common.Config, result *model.TriageResult, pods []string) error {
 	if len(pods) == 0 {
 		return nil
 	}
@@ -145,16 +145,16 @@ func escrowUndumpable(ctx context.Context, cfg *common.Config, pods []string) er
 	}
 
 	common.WarnLog("Capturing block-level escrow for instances a dump cannot reach: %v", pods)
-	prov, err := selectEscrow(ctx, cfg, pods)
+	// Through the shared orchestration, so this path gets the pre-capture space check
+	// the breaker and the promotion already had: it was the one caller that could fill
+	// the escrow store mid-capture.
+	esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", result, pods)
 	if err != nil {
-		return fmt.Errorf("escrow REFUSED for down diverged instance(s) %v: %w", pods, err)
+		return fmt.Errorf("escrow of down diverged instance(s) %v: %w", pods, err)
 	}
-	refs, err := prov.Capture(ctx, pods)
+	refs, err := esc.capture(ctx)
 	if err != nil {
-		return fmt.Errorf("escrow FAILED for down diverged instance(s) %v: capture: %w", pods, err)
-	}
-	if err := prov.Verify(ctx, refs); err != nil {
-		return fmt.Errorf("escrow FAILED for down diverged instance(s) %v: captured but not proven restorable: %w", pods, err)
+		return fmt.Errorf("escrow of down diverged instance(s) %v: %w", pods, err)
 	}
 	for _, r := range refs {
 		common.InfoLog("Diverged escrow %s: %s %s", r.PVC, r.Provider, r.ID)

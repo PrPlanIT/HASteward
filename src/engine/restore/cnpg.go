@@ -224,16 +224,17 @@ func restoreRegressionDecision(tr *model.TriageResult, primary, snapshotID strin
 	case model.AuthorityDiverged:
 		if !force {
 			return fmt.Errorf("REFUSING to restore into %s: the cluster is DIVERGED — committed data exists on more than "+
-				"one lineage. Restoring blindly picks one lineage and discards the others. Escrow every instance and choose the "+
-				"survivor first; then re-run with --force if you intend to overwrite %s with snapshot %s",
-				primary, primary, snapshotID)
+				"one lineage. Restoring blindly picks one lineage and discards the others. Escrow every instance "+
+				"(hasteward repair --escrow-only -e cnpg -c %s -n %s) and choose the survivor first; then re-run with --force "+
+				"if you intend to overwrite %s with snapshot %s",
+				primary, cfg.ClusterName, cfg.Namespace, primary, snapshotID)
 		}
 		common.WarnLog("force=true — restoring into a DIVERGED cluster; overwriting %s with snapshot %s (other lineages will be lost)", primary, snapshotID)
 	default:
 		if !force {
 			return fmt.Errorf("ABORT: restore OVERWRITES the live data on %s (timeline %d, LSN %s) with snapshot %s — this "+
 				"is a REWIND and any newer committed data is discarded. Back up the current data first "+
-				"(hasteward backup -e cnpg -c %s -n %s), then re-run with --force to proceed",
+				"(hasteward backup create -e cnpg -c %s -n %s), then re-run with --force to proceed",
 				primary, pTL, pLSN, snapshotID, cfg.ClusterName, cfg.Namespace)
 		}
 		common.WarnLog("force=true — restore overwriting live data on %s (timeline %d, LSN %s) with snapshot %s (a rewind)", primary, pTL, pLSN, snapshotID)

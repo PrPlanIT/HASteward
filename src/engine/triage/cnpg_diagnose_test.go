@@ -35,7 +35,9 @@ func TestDiagnose_LeaderNotPrimary(t *testing.T) {
 			t.Fatalf("recovery plan missing %q; detail=\n%s", want, d.Detail)
 		}
 	}
-	if !strings.Contains(d.Remedy, "hasteward backup") {
+	// Pinned to the escrow-only verb specifically: the remedy previously named bare
+	// `hasteward backup`, which became a cobra GROUP and escrowed nothing.
+	if !strings.Contains(d.Remedy, "repair --escrow-only") {
 		t.Fatalf("first safe step should be an escrow (no disk pressure): %q", d.Remedy)
 	}
 }

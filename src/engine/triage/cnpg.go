@@ -958,7 +958,7 @@ func (t *cnpgTriage) diagnoseAuthorityRecovery(comparison model.DataComparison, 
 				"then ESCROW every instance before touching anything. Once you have chosen the surviving instance X, rebuild " +
 				"the cluster AROUND X with the same ordered steps as `cnpg-authority-not-primary` (escrow → relieve → promote " +
 				"X → heal the rest). HASteward will not choose for you: picking the wrong lineage is unrecoverable.",
-			Remedy: fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow ALL before any mutation", cfg.ClusterName, cfg.Namespace),
+			Remedy: fmt.Sprintf("hasteward repair --escrow-only -e cnpg -c %s -n %s --dry-run   # escrow EVERY instance, name no survivor, mutate nothing", cfg.ClusterName, cfg.Namespace),
 		}
 	default:
 		return nil
@@ -977,7 +977,7 @@ func cnpgRebuildAroundAuthoritySteps(cluster, ns, authority string, assessments 
 			"`hasteward prune-wal -e cnpg -c %s -n %s --instance %s --dry-run`)", cluster, ns, cnpgOrdinal(authority))
 	}
 	return fmt.Sprintf(
-		"  1. Escrow every instance (reversible) before touching anything: hasteward backup -e cnpg -c %s -n %s\n"+
+		"  1. Escrow every instance (reversible) before touching anything: hasteward repair --escrow-only -e cnpg -c %s -n %s\n"+
 			"  2. Bring the authority %s up Ready and inspect it%s\n"+
 			"  3. Make %s the primary. CNPG has no single safe command to promote a divergent/behind replica; do this "+
 			"deliberately (switchover only if the topology is healthy, otherwise a rebuild-based promotion) — HASteward "+
@@ -994,7 +994,7 @@ func cnpgAuthorityFirstStep(cluster, ns, authority string, assessments []model.I
 		return fmt.Sprintf("hasteward prune-wal -e cnpg -c %s -n %s --instance %s --dry-run   # relieve the wedged authority first",
 			cluster, ns, cnpgOrdinal(authority))
 	}
-	return fmt.Sprintf("hasteward backup -e cnpg -c %s -n %s   # escrow the authority before any promotion", cluster, ns)
+	return fmt.Sprintf("hasteward repair --escrow-only -e cnpg -c %s -n %s   # escrow every instance before any promotion", cluster, ns)
 }
 
 // authorityIsDiskConstrained reports whether the authority instance is stuck on disk

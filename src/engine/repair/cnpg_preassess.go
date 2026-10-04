@@ -43,6 +43,12 @@ var errDryRunPreview = errors.New("unwedge dry-run: preview complete, no changes
 // Returns nil when inert; otherwise the post-break triage.
 func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {
 	cfg := r.p.Config()
+	if cfg.EscrowOnly {
+		// Escrow every instance and stop. Runs before --promote's dispatch because it
+		// is the weaker, decision-free request: an operator who asked only to escrow
+		// must never have a promotion prepared on their behalf.
+		return r.escrowOnly(ctx)
+	}
 	if cfg.Promote {
 		// P3.2b: promote a chosen authority (escrow-first, proof-gated). Runs instead of
 		// the normal heal and stops before the manual swap (errPromotePrepared).
@@ -74,39 +80,26 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 
 	// 2. Select an escrow provider (fail-closed) and prove there is space BEFORE
 	//    any capture — "requires X, only Y available", never a full repo mid-escrow.
-	prov, err := escrow.Select(ctx, cfg, rec.RecoverySet)
+	esc, err := prepareRecoverySetEscrow(ctx, cfg, "unwedge", t, rec.RecoverySet)
 	if err != nil {
-		return nil, fmt.Errorf("unwedge REFUSED: %w", err)
+		return nil, err
 	}
-	used := usedBytesByPVC(t, rec.RecoverySet)
-	est := prov.EstimateCaptureBytes(rec.RecoverySet, used)
-	avail, aerr := prov.AvailableBytes()
-	if aerr != nil {
-		return nil, fmt.Errorf("unwedge REFUSED: cannot determine escrow free space: %w", aerr)
-	}
-	if est+breakerReserveBytes > avail {
-		return nil, fmt.Errorf("unwedge REFUSED: escrow (%s) requires %s + %s reserve, only %s available in the escrow store",
-			prov.Name(), output.FormatBytes(est), output.FormatBytes(breakerReserveBytes), output.FormatBytes(avail))
-	}
-	output.Field("Escrow", fmt.Sprintf("%s — ~%s needed, %s available", prov.Name(), output.FormatBytes(est), output.FormatBytes(avail)))
+	output.Field("Escrow", esc.describe())
 
 	if cfg.DryRun {
-		common.InfoLog("DRY RUN: would escrow %v (~%s) via %s, clear %v, preserve authority %s — no changes made",
-			rec.RecoverySet, output.FormatBytes(est), prov.Name(), rec.Disposable, rec.Authority)
+		common.InfoLog("DRY RUN: would escrow %v via %s, clear %v, preserve authority %s — no changes made",
+			rec.RecoverySet, esc.describe(), rec.Disposable, rec.Authority)
 		output.Section("Dry run — no escrow captured, no datadir cleared")
 		output.Field("Would clear (disposable)", strings.Join(rec.Disposable, ", "))
 		output.Field("Would preserve (authority)", rec.Authority)
-		output.Field("Would escrow via", fmt.Sprintf("%s (~%s)", prov.Name(), output.FormatBytes(est)))
+		output.Field("Would escrow via", esc.describe())
 		return t, errDryRunPreview
 	}
 
 	// 3. Capture + verify the escrow (the rollback that authorizes the clear).
-	refs, err := prov.Capture(ctx, rec.RecoverySet)
+	refs, err := esc.capture(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unwedge REFUSED: escrow capture failed: %w", err)
-	}
-	if err := prov.Verify(ctx, refs); err != nil {
-		return nil, fmt.Errorf("unwedge REFUSED: escrow verification failed (rollback unproven): %w", err)
+		return nil, err
 	}
 
 	// 4. Re-triage at the destructive edge and bind the proof to THAT snapshot.
@@ -127,7 +120,7 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 
 	// 5. Persist the proof BEFORE any clear, so the audit of the most important
 	//    action survives a crash mid-clear.
-	if err := r.persistRecoveryProof(ctx, proof); err != nil {
+	if err := r.persistRecoveryProof(ctx, "repair-unwedge", proof); err != nil {
 		return nil, fmt.Errorf("unwedge REFUSED: cannot persist the decision record before clear: %w", err)
 	}
 
@@ -258,7 +251,7 @@ func (r *cnpgRepair) buildBreakerConfig(ctx context.Context, t *model.TriageResu
 // persistRecoveryProof writes the decision record to a ConfigMap BEFORE the clear,
 // so months later an operator can answer "why did HASteward believe it was safe
 // to clear this PVC?" without reconstructing from logs. Small by design.
-func (r *cnpgRepair) persistRecoveryProof(ctx context.Context, proof RecoveryProof) error {
+func (r *cnpgRepair) persistRecoveryProof(ctx context.Context, operation string, proof RecoveryProof) error {
 	cfg := r.p.Config()
 	c := k8s.GetClients()
 
@@ -269,16 +262,16 @@ func (r *cnpgRepair) persistRecoveryProof(ctx context.Context, proof RecoveryPro
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("hasteward-unwedge-%s-%d", cfg.ClusterName, time.Now().Unix()),
+			Name:      fmt.Sprintf("hasteward-%s-%s-%d", strings.TrimPrefix(operation, "repair-"), cfg.ClusterName, time.Now().Unix()),
 			Namespace: cfg.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "hasteward",
-				"hasteward":                    "unwedge-decision",
+				"hasteward":                    operation + "-decision",
 				"hasteward.cluster":            cfg.ClusterName,
 			},
 		},
 		Data: map[string]string{
-			"operation":      "repair-unwedge",
+			"operation":      operation,
 			"timestamp":      time.Now().UTC().Format(time.RFC3339),
 			"authority":      proof.Authority,
 			"disposable":     strings.Join(proof.Disposable, ","),

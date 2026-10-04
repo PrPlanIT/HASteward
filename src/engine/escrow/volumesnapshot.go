@@ -85,7 +85,8 @@ func (e *volumeSnapshotEscrow) Verify(ctx context.Context, refs []EscrowRef) err
 		attempts = 60
 		interval = 5 * time.Second
 	)
-	for _, ref := range refs {
+	for ri := range refs {
+		ref := &refs[ri]
 		ready := false
 		for i := 0; i < attempts; i++ {
 			obj, err := c.Dynamic.Resource(k8s.VolumeSnapshotGVR).Namespace(ns).Get(ctx, ref.ID, metav1.GetOptions{})
@@ -106,6 +107,7 @@ func (e *volumeSnapshotEscrow) Verify(ctx context.Context, refs []EscrowRef) err
 			return fmt.Errorf("escrow %s (pvc %s) never became readyToUse within %s — restorability unproven, refuse to proceed",
 				ref.ID, ref.PVC, time.Duration(attempts)*interval)
 		}
+		ref.Verified = true
 		common.InfoLog("Verified VolumeSnapshot %s is readyToUse (pvc %s)", ref.ID, ref.PVC)
 	}
 	return nil

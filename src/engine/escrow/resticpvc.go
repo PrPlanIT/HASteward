@@ -164,12 +164,14 @@ func (e *resticPVCEscrow) captureOne(ctx context.Context, rc *restic.Client, pvc
 func (e *resticPVCEscrow) Verify(ctx context.Context, refs []EscrowRef) error {
 	rc := e.newResticClient()
 	ns := e.cfg.Namespace
-	for _, ref := range refs {
+	for ri := range refs {
+		ref := &refs[ri]
 		path := escrowTarPath(ns, ref.Cluster, ref.PVC)
 		if err := proveRestorable(ctx, rc, ref.ID, path); err != nil {
 			return fmt.Errorf("escrow %s (pvc %s) restorability proof failed — refuse to proceed: %w",
 				ref.ID, ref.PVC, err)
 		}
+		ref.Verified = true
 		common.InfoLog("Proved restorability of escrow %s (pvc %s)", ref.ID, ref.PVC)
 	}
 	return nil

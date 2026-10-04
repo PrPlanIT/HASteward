@@ -8,7 +8,6 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine"
-	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/engine/triage"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
@@ -52,33 +51,26 @@ func (r *cnpgRepair) promotePrepare(ctx context.Context) (*model.TriageResult, e
 		common.WarnLog("DIVERGED cluster — %s is the operator-designated survivor (--force). The other lineages are discarded once rebuilt.", plan.Authority)
 	}
 
+	// Escrow the full recovery set + verify (same fail-closed machinery as --unwedge), so
+	// the promotion is reversible before ANY mutation — including the manual swap to come.
+	// Selected and space-proven BEFORE the dry-run branch, so a preview refuses for the
+	// same reasons a live run would instead of promising an escrow that cannot be taken.
+	esc, err := prepareRecoverySetEscrow(ctx, cfg, "promote", t, plan.RecoverySet)
+	if err != nil {
+		return nil, err
+	}
+	output.Field("Escrow", esc.describe())
+
 	if cfg.DryRun {
-		output.Plan("DRY RUN: would escrow %v, persist a promotion proof, and print the swap runbook — no changes made", plan.RecoverySet)
+		output.Plan("DRY RUN: would escrow %v via %s, persist a promotion proof, and print the swap runbook — no changes made",
+			plan.RecoverySet, esc.describe())
 		output.Println(cnpgPromotionRunbook(cfg.ClusterName, cfg.Namespace, plan))
 		return t, errDryRunPreview
 	}
 
-	// Escrow the full recovery set + verify (same fail-closed machinery as --unwedge), so
-	// the promotion is reversible before ANY mutation — including the manual swap to come.
-	prov, err := escrow.Select(ctx, cfg, plan.RecoverySet)
+	refs, err := esc.capture(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("promote REFUSED: %w", err)
-	}
-	est := prov.EstimateCaptureBytes(plan.RecoverySet, usedBytesByPVC(t, plan.RecoverySet))
-	avail, aerr := prov.AvailableBytes()
-	if aerr != nil {
-		return nil, fmt.Errorf("promote REFUSED: cannot determine escrow free space: %w", aerr)
-	}
-	if est+breakerReserveBytes > avail {
-		return nil, fmt.Errorf("promote REFUSED: escrow (%s) requires %s + %s reserve, only %s available in the escrow store",
-			prov.Name(), output.FormatBytes(est), output.FormatBytes(breakerReserveBytes), output.FormatBytes(avail))
-	}
-	refs, err := prov.Capture(ctx, plan.RecoverySet)
-	if err != nil {
-		return nil, fmt.Errorf("promote REFUSED: escrow capture failed: %w", err)
-	}
-	if err := prov.Verify(ctx, refs); err != nil {
-		return nil, fmt.Errorf("promote REFUSED: escrow verification failed (rollback unproven): %w", err)
+		return nil, err
 	}
 
 	// Persist a promotion decision record BEFORE the operator performs the swap, so months
@@ -91,7 +83,7 @@ func (r *cnpgRepair) promotePrepare(ctx context.Context) (*model.TriageResult, e
 		EscrowRefs:     refs,
 		EscrowVerified: true,
 	}
-	if err := r.persistRecoveryProof(ctx, proof); err != nil {
+	if err := r.persistRecoveryProof(ctx, "repair-promote", proof); err != nil {
 		return nil, fmt.Errorf("promote REFUSED: cannot persist the promotion decision record: %w", err)
 	}
 

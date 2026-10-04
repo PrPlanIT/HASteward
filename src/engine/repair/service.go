@@ -37,10 +37,11 @@ func Run(ctx context.Context, r Repairer, sink engine.StepSink) (*model.RepairRe
 	// so the subsequent Assess finds a healthy primary instead of aborting.
 	sink.Step("pre-assess", "running")
 	if _, err := r.PreAssess(ctx); err != nil {
-		// A dry-run preview, or a completed --promote preparation, is a clean stop — not a
-		// failure. Do not fall through to Assess (which would run a normal heal, or abort
-		// while a --unwedge cluster is still frozen).
-		if errors.Is(err, errDryRunPreview) || errors.Is(err, errPromotePrepared) {
+		// A dry-run preview, a completed --promote preparation, or a completed
+		// --escrow-only capture is a clean stop — not a failure. Do not fall through to
+		// Assess (which would run a normal heal, or abort while a --unwedge cluster is
+		// still frozen).
+		if errors.Is(err, errDryRunPreview) || errors.Is(err, errPromotePrepared) || errors.Is(err, errEscrowCaptured) {
 			sink.Step("pre-assess", "done")
 			result.Duration = time.Since(start)
 			return result, nil
