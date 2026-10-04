@@ -43,12 +43,6 @@ var errDryRunPreview = errors.New("unwedge dry-run: preview complete, no changes
 // Returns nil when inert; otherwise the post-break triage.
 func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {
 	cfg := r.p.Config()
-	if cfg.EscrowOnly {
-		// Escrow every instance and stop. Runs before --promote's dispatch because it
-		// is the weaker, decision-free request: an operator who asked only to escrow
-		// must never have a promotion prepared on their behalf.
-		return r.escrowOnly(ctx)
-	}
 	if cfg.Promote {
 		// P3.2b: promote a chosen authority (escrow-first, proof-gated). Runs instead of
 		// the normal heal and stops before the manual swap (errPromotePrepared).

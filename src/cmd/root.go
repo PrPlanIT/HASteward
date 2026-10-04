@@ -61,7 +61,6 @@ func init() {
 	// stays global, "how this algorithm behaves" belongs on the owning command).
 	env.Bool(repairCmd.Flags(), &Cfg.Unwedge, "unwedge", "", "UNWEDGE", false, "CNPG deadlock breaker: clear a disposable replica's datadir offline (escrow-gated) to un-freeze a disk-full cluster. Use --dry-run first.")
 	env.Bool(repairCmd.Flags(), &Cfg.Promote, "promote", "", "PROMOTE", false, "CNPG rebuild-around-authority: escrow the cluster + persist a proof + print the swap runbook to promote --instance N when the authority is not the primary. Use --dry-run first.")
-	env.Bool(repairCmd.Flags(), &Cfg.EscrowOnly, "escrow-only", "", "ESCROW_ONLY", false, "Escrow + verify EVERY instance and stop, naming no survivor and mutating nothing. The escrow to take BEFORE adjudicating a split-brain, when the choice has not been made yet. Use --dry-run first.")
 	env.Bool(pruneWALTopCmd.Flags(), &Cfg.DeadlockRecover, "deadlock-recover", "", "DEADLOCK_RECOVER", false, "CNPG disk-full DEADLOCK recovery: replay + recycle WAL IN PLACE for an instance too full to start (escrow-snapshot → single-user replay → archivecleanup). For when plain prune-wal finds nothing to trim. Use --dry-run first.")
 	env.String(pruneWALTopCmd.Flags(), &Cfg.SnapshotClass, "snapshot-class", "", "SNAPSHOT_CLASS", "", "VolumeSnapshotClass for the deadlock-recover escrow (auto-discovered from the PVC provisioner if empty)")
 	env.Bool(repairCmd.Flags(), &Cfg.WipeDatadir, "wipe-datadir", "", "WIPE_DATADIR", false,

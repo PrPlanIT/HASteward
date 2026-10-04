@@ -62,12 +62,6 @@ func (g *galeraRepair) OperationLock(ctx context.Context) (func(), error) {
 // PreAssess is a no-op for Galera — the CNPG disk-full deadlock breaker (Phase 0)
 // does not apply.
 func (g *galeraRepair) PreAssess(ctx context.Context) (*model.TriageResult, error) {
-	// Refuse rather than return inert: --escrow-only means "escrow and stop", so
-	// proceeding would run an ordinary repair on a cluster whose operator asked for no
-	// mutation at all. The CLI rejects this too; this is the engine-level backstop.
-	if g.p.Config().EscrowOnly {
-		return nil, fmt.Errorf("--escrow-only is not supported for galera: a node's PVC name is not derivable, so there is nothing to escrow at the block layer")
-	}
 	return nil, nil
 }
 

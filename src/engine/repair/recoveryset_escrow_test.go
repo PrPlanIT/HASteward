@@ -52,7 +52,7 @@ func escrowTriage(pods ...string) *model.TriageResult {
 }
 
 // prepareRecoverySetEscrow is the single orchestration behind --unwedge, --promote and
-// --escrow-only. Before it existed each of those carried its own copy, two of them
+// the diverged-instance escrow in repair. Before it existed each carried its own copy, two
 // bypassed the selectEscrow seam, and none of their refusals were covered.
 func TestPrepareRecoverySetEscrow(t *testing.T) {
 	ctx := context.Background()
@@ -60,7 +60,7 @@ func TestPrepareRecoverySetEscrow(t *testing.T) {
 	tr := escrowTriage("c-0", "c-1")
 
 	t.Run("empty recovery set is refused", func(t *testing.T) {
-		if _, err := prepareRecoverySetEscrow(ctx, cfg, "escrow-only", tr, nil); err == nil {
+		if _, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", tr, nil); err == nil {
 			t.Fatal("an empty recovery set makes nothing reversible and must refuse")
 		}
 	})
@@ -105,7 +105,7 @@ func TestPrepareRecoverySetEscrow(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return &sizedProvider{availErr: fmt.Errorf("backend unreachable")}, nil
 		})
-		if _, err := prepareRecoverySetEscrow(ctx, cfg, "escrow-only", tr, []string{"c-0"}); err == nil {
+		if _, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", tr, []string{"c-0"}); err == nil {
 			t.Fatal("space that cannot be determined must refuse")
 		}
 	})
@@ -114,7 +114,7 @@ func TestPrepareRecoverySetEscrow(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return &sizedProvider{available: 1 << 40}, nil
 		})
-		esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow-only", tr, []string{"c-0", "c-1"})
+		esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", tr, []string{"c-0", "c-1"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestPrepareRecoverySetEscrow(t *testing.T) {
 		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
 			return &sizedProvider{available: 1 << 40, failVerify: true}, nil
 		})
-		esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow-only", tr, []string{"c-0"})
+		esc, err := prepareRecoverySetEscrow(ctx, cfg, "escrow", tr, []string{"c-0"})
 		if err != nil {
 			t.Fatal(err)
 		}

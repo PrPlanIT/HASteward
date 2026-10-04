@@ -12,8 +12,9 @@ import (
 
 // recoverySetEscrow is a selected escrow provider plus the proven space headroom for
 // capturing a recovery set. It exists so the three operations that must make a set of
-// instances reversible before touching them — the deadlock breaker, a promotion, and a
-// bare --escrow-only — share ONE orchestration instead of three copies of it. The copies
+// instances reversible before touching them — the deadlock breaker, a promotion, and the
+// diverged instances a dump cannot reach — share ONE orchestration instead of three
+// copies of it. The copies
 // had already drifted: only two of them checked free space, and each worded its refusals
 // differently for the same failure.
 type recoverySetEscrow struct {

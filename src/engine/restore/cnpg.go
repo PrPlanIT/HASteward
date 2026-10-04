@@ -225,7 +225,7 @@ func restoreRegressionDecision(tr *model.TriageResult, primary, snapshotID strin
 		if !force {
 			return fmt.Errorf("REFUSING to restore into %s: the cluster is DIVERGED — committed data exists on more than "+
 				"one lineage. Restoring blindly picks one lineage and discards the others. Escrow every instance "+
-				"(hasteward repair --escrow-only -e cnpg -c %s -n %s) and choose the survivor first; then re-run with --force "+
+				"(hasteward backup create -e cnpg -c %s -n %s) and choose the survivor first; then re-run with --force "+
 				"if you intend to overwrite %s with snapshot %s",
 				primary, cfg.ClusterName, cfg.Namespace, primary, snapshotID)
 		}
