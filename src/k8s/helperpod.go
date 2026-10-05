@@ -109,17 +109,15 @@ func ApplyHelperHardening(pod *corev1.Pod, h HelperHardening) {
 	// Root here is not omnipotence: with ALL capabilities dropped, uid 0 has no DAC
 	// bypass, so a 0700 datadir owned by the database uid still refuses it — seen as
 	// `tar: ./pgdata: Permission denied` on a resticpvc escrow of a CNPG volume. Add
-	// back exactly the DAC bypass the posture needs ("add back only the minimum"):
-	// the read-only escrow tar gets DAC_READ_SEARCH (read/search bypass, no writes);
-	// a root recovery script that rewrites other-uid files (galera ops/reconfigure,
-	// the RootRequired+WritableRootFS pair) gets DAC_OVERRIDE.
+	// back the DAC bypass. DAC_OVERRIDE rather than the read-only DAC_READ_SEARCH,
+	// although the escrow tar only reads: PodSecurity "baseline" restricts capability
+	// adds to the Docker default set, which includes DAC_OVERRIDE and NOT the weaker
+	// DAC_READ_SEARCH (admission rejected it). The escrow helper stays effectively
+	// read-only regardless — its PVC mount is ReadOnly, which blocks writes at the
+	// filesystem layer below any capability.
 	caps := &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
 	if h.RootRequired {
-		if h.WritableRootFS {
-			caps.Add = []corev1.Capability{"DAC_OVERRIDE"}
-		} else {
-			caps.Add = []corev1.Capability{"DAC_READ_SEARCH"}
-		}
+		caps.Add = []corev1.Capability{"DAC_OVERRIDE"}
 	}
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]

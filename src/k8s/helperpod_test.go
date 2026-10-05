@@ -136,16 +136,17 @@ func TestApplyHelperHardening_ExceptionsAreSelfDocumented(t *testing.T) {
 	}
 }
 
-func TestApplyHelperHardening_RootReaderGetsReadBypassOnly(t *testing.T) {
+func TestApplyHelperHardening_RootReaderGetsDACBypass(t *testing.T) {
 	// The escrow tar runs as root purely to READ every owner's files (a 0700 pgdata
-	// owned by the database uid refuses dropped-ALL root outright). It gets the
-	// read/search bypass and nothing that could write.
+	// owned by the database uid refuses dropped-ALL root outright). DAC_OVERRIDE, not
+	// DAC_READ_SEARCH: PodSecurity baseline's add-allowlist (the Docker default set)
+	// has only the former. Read-only-ness comes from the helper's ReadOnly PVC mount.
 	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
 	ApplyHelperHardening(pod, HelperHardening{RootRequired: true})
 
 	csc := pod.Spec.Containers[0].SecurityContext
-	if len(csc.Capabilities.Add) != 1 || csc.Capabilities.Add[0] != "DAC_READ_SEARCH" {
-		t.Fatalf("root reader must add back exactly DAC_READ_SEARCH, got %+v", csc.Capabilities.Add)
+	if len(csc.Capabilities.Add) != 1 || csc.Capabilities.Add[0] != "DAC_OVERRIDE" {
+		t.Fatalf("root reader must add back exactly DAC_OVERRIDE, got %+v", csc.Capabilities.Add)
 	}
 	if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
 		t.Fatalf("root reader keeps the read-only rootfs, got %+v", csc.ReadOnlyRootFilesystem)
