@@ -106,13 +106,28 @@ func ApplyHelperHardening(pod *corev1.Pod, h HelperHardening) {
 	if !h.RootRequired {
 		pod.Spec.SecurityContext.RunAsNonRoot = common.Ptr(true)
 	}
+	// Root here is not omnipotence: with ALL capabilities dropped, uid 0 has no DAC
+	// bypass, so a 0700 datadir owned by the database uid still refuses it — seen as
+	// `tar: ./pgdata: Permission denied` on a resticpvc escrow of a CNPG volume. Add
+	// back exactly the DAC bypass the posture needs ("add back only the minimum"):
+	// the read-only escrow tar gets DAC_READ_SEARCH (read/search bypass, no writes);
+	// a root recovery script that rewrites other-uid files (galera ops/reconfigure,
+	// the RootRequired+WritableRootFS pair) gets DAC_OVERRIDE.
+	caps := &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+	if h.RootRequired {
+		if h.WritableRootFS {
+			caps.Add = []corev1.Capability{"DAC_OVERRIDE"}
+		} else {
+			caps.Add = []corev1.Capability{"DAC_READ_SEARCH"}
+		}
+	}
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.SecurityContext == nil {
 			c.SecurityContext = &corev1.SecurityContext{}
 		}
 		c.SecurityContext.AllowPrivilegeEscalation = common.Ptr(false)
-		c.SecurityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+		c.SecurityContext.Capabilities = caps.DeepCopy()
 		if !h.WritableRootFS {
 			c.SecurityContext.ReadOnlyRootFilesystem = common.Ptr(true)
 		}
