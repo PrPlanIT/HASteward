@@ -75,12 +75,12 @@ func TestRunEscrow(t *testing.T) {
 
 	t.Run("split-brain: pre-repair + diverged per running node", func(t *testing.T) {
 		b := &fakeBacker{}
+		// Running nodes only: this subtest is about the dump path. A node a dump cannot
+		// reach routes to the FAIL-CLOSED block layer — no longer a no-op — and that
+		// contract (captured-and-verified, or abort) is TestRunEscrowDownDivergedInstance's.
 		r := triageRes(false,
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
 			model.InstanceAssessment{Pod: "c-1", Instance: 1, IsRunning: true, IsReady: true},
-			// Not dumpable. Routed to block-level escrow, which is a no-op here because
-			// this cfg names no engine — see TestRunEscrowDownDivergedInstance.
-			model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false},
 		)
 		if err := runEscrow(ctx, escrowCfg(), fakeNamer{}, b, r, "c-0", "dump.sql"); err != nil {
 			t.Fatal(err)
@@ -89,7 +89,7 @@ func TestRunEscrow(t *testing.T) {
 			b.calls[0] != "backup:c-0:ns/c/dump.sql" ||
 			b.calls[1] != "diverged:c-0:ns/c/0-dump.sql" ||
 			b.calls[2] != "diverged:c-1:ns/c/1-dump.sql" {
-			t.Fatalf("want [backup c-0, diverged c-0, diverged c-1] (c-2 is not dumpable), got %v", b.calls)
+			t.Fatalf("want [backup c-0, diverged c-0, diverged c-1], got %v", b.calls)
 		}
 	})
 
