@@ -379,7 +379,7 @@ func TestRunEscrowDivergedFilenamesAreDistinct(t *testing.T) {
 		model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: true, IsReady: true},
 		model.InstanceAssessment{Pod: "c-3", Instance: 3, IsRunning: true, IsReady: true},
 	)
-	if err := runEscrow(context.Background(), escrowCfg(), b, r, "c-1", "dump.sql"); err != nil {
+	if err := runEscrow(context.Background(), escrowCfg(), fakeNamer{}, b, r, "c-1", "dump.sql"); err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
