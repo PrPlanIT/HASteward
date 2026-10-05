@@ -91,7 +91,10 @@ func TestExecuteBootstrap_RescueRevertsAuthorityMarkers(t *testing.T) {
 		return "WSREP: Recovered position: " + uuid + ":552481\nWSREP: Last committed: 552481\n"
 	})()
 
-	p := provider.NewGaleraProviderForTest(&common.Config{ClusterName: "c", Namespace: "ns", DeleteTimeout: 5}, 3, cr)
+	// NoEscrow: this test injects a STEP 8 failure to assert rescue unwinds the
+	// authority mutations. The escrow gate now runs before those, and it is covered in
+	// the escrow package; opting out keeps this test on its own subject.
+	p := provider.NewGaleraProviderForTest(&common.Config{ClusterName: "c", Namespace: "ns", DeleteTimeout: 5, NoEscrow: true}, 3, cr)
 	b := &galeraBootstrap{p: p}
 
 	// One assessment = the candidate, so STEP 4b (gcache) and STEP 5 (clear peers)

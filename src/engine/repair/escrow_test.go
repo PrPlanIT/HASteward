@@ -35,6 +35,10 @@ func (f *fakeBacker) BackupDump(ctx context.Context, backupType, donor, stdinFil
 // in TestRunEscrowRepositoryMustPreExist.
 func TestMain(m *testing.M) {
 	escrowRepoExists = func(context.Context, *common.Config) (bool, error) { return true, nil }
+	// The escrow gate censuses existing snapshots against a live cluster before it
+	// captures. These tests assert the orchestration, not the Kubernetes API, and the
+	// cap's own behaviour is covered in the escrow package.
+	escrow.CountOutstanding = func(context.Context, *common.Config) (int, error) { return 0, nil }
 	os.Exit(m.Run())
 }
 

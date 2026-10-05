@@ -73,7 +73,7 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 			return nil, fmt.Errorf("deadlock-recover REFUSED: could not escrow %s before mutating it (fix the "+
 				"VolumeSnapshotClass, pass --snapshot-class, or --force to skip escrow): %w", targetPVC, err)
 		}
-		output.Success("Escrow VolumeSnapshot %s is ready — rollback point captured", snap)
+		output.Success("Escrow %s captured and proven — rollback point in place", snap)
 	}
 
 	// 2. Prerequisites. Image comes from the cluster spec (reliable even when no healthy
