@@ -17,16 +17,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const scratchWALDir = "/scratch/wal"
-
-var (
-	volumeSnapshotGVR      = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
-	volumeSnapshotClassGVR = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotclasses"}
-)
 
 // deadlockRecover (P3.6) rehabilitates a CNPG instance that is disk-full DEADLOCKED: too
 // full to start, so it can never checkpoint to recycle its own WAL, so it stays full —
@@ -498,39 +491,6 @@ func (w *cnpgPruner) escrowSnapshot(ctx context.Context, ns, pvcName string) (st
 		return "", fmt.Errorf("deadlock-recover REFUSED: no escrow was captured for %s — the in-place replay is irreversible without one", pvcName)
 	}
 	return refs[0].ID, nil
-}
-
-// discoverSnapshotClass finds a VolumeSnapshotClass whose driver matches the PVC's storage
-// provisioner. Errors (rather than guessing) when none is found.
-func (w *cnpgPruner) discoverSnapshotClass(ctx context.Context, ns, pvcName string) (string, error) {
-	c := k8s.GetClients()
-	pvc, err := c.Clientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, pvcName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("reading PVC %s: %w", pvcName, err)
-	}
-	scName := ""
-	if pvc.Spec.StorageClassName != nil {
-		scName = *pvc.Spec.StorageClassName
-	}
-	if scName == "" {
-		return "", fmt.Errorf("PVC %s has no StorageClass — pass --snapshot-class explicitly", pvcName)
-	}
-	sc, err := c.Clientset.StorageV1().StorageClasses().Get(ctx, scName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("reading StorageClass %s: %w", scName, err)
-	}
-	provisioner := sc.Provisioner
-
-	list, err := c.Dynamic.Resource(volumeSnapshotClassGVR).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return "", fmt.Errorf("listing VolumeSnapshotClasses (is the snapshot CRD installed?): %w", err)
-	}
-	for _, item := range list.Items {
-		if driver, ok, _ := unstructured.NestedString(item.Object, "driver"); ok && driver == provisioner {
-			return item.GetName(), nil
-		}
-	}
-	return "", fmt.Errorf("no VolumeSnapshotClass matches the PVC provisioner %q — pass --snapshot-class", provisioner)
 }
 
 // serviceAccountFor inherits a workload SA from the namespace so the helper satisfies
