@@ -117,7 +117,10 @@ func (r *cnpgRestore) restoreDump(ctx context.Context) (*model.RestoreResult, er
 	// Placed after the dry-run return and before the first patch, so a preview writes
 	// nothing and a real run cannot reach the restore without a proven rollback.
 	instances := restoreInstanceNames(r.p.Cluster(), "")
-	pvcs := escrow.PVCsFor(r.p, instances)
+	pvcs, err := escrow.DiscoverPVCs(ctx, ns, r.p, instances)
+	if err != nil {
+		return nil, fmt.Errorf("restore REFUSED: %w", err)
+	}
 	if _, err := escrow.Gate(ctx, cfg, "restore", pvcs, escrow.UsedBytesByPVC(tr, instances)); err != nil {
 		return nil, err
 	}

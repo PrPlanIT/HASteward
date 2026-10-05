@@ -9,6 +9,8 @@ import (
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -199,4 +201,50 @@ func PVCsFor(n PVCNamer, pods []string) []string {
 		out = append(out, n.DataPVCName(p))
 	}
 	return out
+}
+
+// ReadPod is the pod read behind DiscoverPVCs, a package variable so the union contract
+// is testable without a cluster — the same seam SelectProvider and CountOutstanding use.
+// Never reassigned outside tests.
+var ReadPod = readPod
+
+func readPod(ctx context.Context, ns, name string) (*corev1.Pod, error) {
+	return k8s.GetClients().Clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
+// DiscoverPVCs maps instance pods to the PVCs an escrow must capture: the UNION of the
+// provider's naming rule and every PersistentVolumeClaim in each pod's own volume list.
+// The naming rule alone under-captures a multi-PVC instance — CNPG with walStorage adds
+// <pod>-wal, a Galera node carries a storage-/galera- pair — and an escrow that omits
+// one of a lineage's volumes is not a rollback, it is a trap a later --force springs.
+// The union's other half covers the opposite gap: a pod object that no longer exists has
+// no volume list to read, and the naming rule is the only recovery set it has left.
+//
+// Fail-closed on any pod read error other than NotFound: assuming the best about a
+// volume list you could not read is how an escrow under-captures.
+func DiscoverPVCs(ctx context.Context, ns string, n PVCNamer, pods []string) ([]string, error) {
+	seen := make(map[string]bool, len(pods))
+	out := make([]string, 0, len(pods))
+	add := func(pvc string) {
+		if pvc != "" && !seen[pvc] {
+			seen[pvc] = true
+			out = append(out, pvc)
+		}
+	}
+	for _, pod := range pods {
+		add(n.DataPVCName(pod))
+		p, err := ReadPod(ctx, ns, pod)
+		if apierrors.IsNotFound(err) {
+			continue // pod object gone: the naming rule above is all that is left
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cannot read pod %s/%s to discover its PVCs: %w", ns, pod, err)
+		}
+		for _, v := range p.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				add(v.PersistentVolumeClaim.ClaimName)
+			}
+		}
+	}
+	return out, nil
 }

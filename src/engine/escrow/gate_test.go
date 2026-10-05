@@ -9,6 +9,9 @@ import (
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/output/model"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // TestMain stubs the escrow census for the whole package: these tests exercise the gate's
@@ -188,6 +191,76 @@ func (idNamer) DataPVCName(pod string) string { return pod }
 type storageNamer struct{}
 
 func (storageNamer) DataPVCName(pod string) string { return "storage-" + pod }
+
+// withReadPod swaps the pod read behind DiscoverPVCs for one test.
+func withReadPod(t *testing.T, fn func(ctx context.Context, ns, name string) (*corev1.Pod, error)) {
+	t.Helper()
+	prev := ReadPod
+	ReadPod = fn
+	t.Cleanup(func() { ReadPod = prev })
+}
+
+// podWithClaims builds a pod whose volume list names the given PVCs, plus one non-PVC
+// volume that discovery must skip.
+func podWithClaims(claims ...string) *corev1.Pod {
+	p := &corev1.Pod{}
+	for _, c := range claims {
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: c},
+			},
+		})
+	}
+	p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "not-a-pvc"})
+	return p
+}
+
+// The recovery set is the UNION of the naming rule and the pod's own volume list: the
+// rule alone misses a second volume (CNPG walStorage's <pod>-wal, Galera's galera-<pod>),
+// and the volume list alone misses an instance whose pod object is already gone. An
+// escrow that omits either is not a rollback.
+func TestDiscoverPVCs(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("union covers a multi-PVC instance, deduping the namer's answer", func(t *testing.T) {
+		withReadPod(t, func(_ context.Context, _, name string) (*corev1.Pod, error) {
+			switch name {
+			case "c-1": // CNPG with walStorage
+				return podWithClaims("c-1", "c-1-wal"), nil
+			case "g-1": // Galera storage-/galera- pair
+				return podWithClaims("storage-g-1", "galera-g-1"), nil
+			}
+			return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+		})
+		got, err := DiscoverPVCs(ctx, "ns", idNamer{}, []string{"c-1"})
+		if err != nil || len(got) != 2 || got[0] != "c-1" || got[1] != "c-1-wal" {
+			t.Fatalf("want [c-1 c-1-wal], got %v (%v)", got, err)
+		}
+		got, err = DiscoverPVCs(ctx, "ns", storageNamer{}, []string{"g-1"})
+		if err != nil || len(got) != 2 || got[0] != "storage-g-1" || got[1] != "galera-g-1" {
+			t.Fatalf("want [storage-g-1 galera-g-1], got %v (%v)", got, err)
+		}
+	})
+
+	t.Run("deleted pod falls back to the naming rule", func(t *testing.T) {
+		withReadPod(t, func(_ context.Context, _, name string) (*corev1.Pod, error) {
+			return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+		})
+		got, err := DiscoverPVCs(ctx, "ns", storageNamer{}, []string{"g-2"})
+		if err != nil || len(got) != 1 || got[0] != "storage-g-2" {
+			t.Fatalf("want [storage-g-2], got %v (%v)", got, err)
+		}
+	})
+
+	t.Run("unreadable pod fails closed", func(t *testing.T) {
+		withReadPod(t, func(_ context.Context, _, _ string) (*corev1.Pod, error) {
+			return nil, fmt.Errorf("apiserver unreachable")
+		})
+		if _, err := DiscoverPVCs(ctx, "ns", idNamer{}, []string{"c-1"}); err == nil {
+			t.Fatal("a volume list that could not be read must abort, not under-capture")
+		}
+	})
+}
 
 // Galera was previously skipped for escrow on the premise that its PVC names were not
 // derivable. The mapping was on EngineProvider all along.

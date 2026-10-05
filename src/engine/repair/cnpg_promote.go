@@ -56,7 +56,11 @@ func (r *cnpgRepair) promotePrepare(ctx context.Context) (*model.TriageResult, e
 	// the promotion is reversible before ANY mutation — including the manual swap to come.
 	// Selected and space-proven BEFORE the dry-run branch, so a preview refuses for the
 	// same reasons a live run would instead of promising an escrow that cannot be taken.
-	esc, err := escrow.Prepare(ctx, cfg, "promote", escrow.PVCsFor(r.p, plan.RecoverySet),
+	set, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, r.p, plan.RecoverySet)
+	if err != nil {
+		return nil, fmt.Errorf("promote REFUSED: %w", err)
+	}
+	esc, err := escrow.Prepare(ctx, cfg, "promote", set,
 		escrow.UsedBytesByPVC(t, plan.RecoverySet))
 	if err != nil {
 		return nil, err

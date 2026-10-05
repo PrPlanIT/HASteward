@@ -386,7 +386,11 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	//
 	// Reached only on a real run; Bootstrap returns on dryRun before calling this.
 	nodes := podsFromAssessments(assessments)
-	if _, err := escrow.Gate(ctx, cfg, "bootstrap", escrow.PVCsFor(b.p, nodes),
+	set, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, b.p, nodes)
+	if err != nil {
+		return fmt.Errorf("bootstrap REFUSED: %w", err)
+	}
+	if _, err := escrow.Gate(ctx, cfg, "bootstrap", set,
 		escrow.UsedBytesByPVC(&model.TriageResult{Assessments: assessments}, nodes)); err != nil {
 		return err
 	}

@@ -10,6 +10,9 @@ import (
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/engine/escrow"
 	"github.com/PrPlanIT/HASteward/src/output/model"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // fakeBacker records BackupDump calls as "type:donor:stdinFilename" and can be
@@ -39,6 +42,13 @@ func TestMain(m *testing.M) {
 	// captures. These tests assert the orchestration, not the Kubernetes API, and the
 	// cap's own behaviour is covered in the escrow package.
 	escrow.CountOutstanding = func(context.Context, *common.Config) (int, error) { return 0, nil }
+	// DiscoverPVCs unions the naming rule with each pod's live volume list. These tests
+	// have no cluster, so every pod reads as deleted and the union degrades to the naming
+	// rule — which is what the expectations encode. The union contract itself is asserted
+	// in the escrow package.
+	escrow.ReadPod = func(_ context.Context, _, name string) (*corev1.Pod, error) {
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+	}
 	os.Exit(m.Run())
 }
 

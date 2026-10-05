@@ -128,10 +128,10 @@ func assertEscrowRepo(ctx context.Context, cfg *common.Config) error {
 // a lineage that exists nowhere else. Proceeding without it would let a subsequent
 // --force destroy the one instance no backup covers, so a failure here stops the run.
 //
-// Engine-agnostic: the PVCs come from each pod's own volume list rather than from a
-// naming rule, so a Galera node's storage-/galera- pair is covered as readily as a CNPG
-// instance's pgdata. Guessing at names is what previously left Galera with no escrow
-// path at all.
+// Engine-agnostic: the recovery set is the union of the provider's naming rule and each
+// pod's own volume list (DiscoverPVCs), so a Galera node's storage-/galera- pair and a
+// CNPG walStorage instance's <pod>-wal are covered as readily as a lone pgdata — and an
+// instance whose pod object is already gone still contributes via the naming rule.
 func escrowUndumpable(ctx context.Context, cfg *common.Config, namer escrow.PVCNamer,
 	result *model.TriageResult, pods []string) error {
 	if len(pods) == 0 {
@@ -142,7 +142,10 @@ func escrowUndumpable(ctx context.Context, cfg *common.Config, namer escrow.PVCN
 	// Space is estimated per POD (that is how triage reports disk usage) while the
 	// capture is per PVC, so the estimate is a floor — a guard against a full store,
 	// not an accounting record.
-	pvcs := escrow.PVCsFor(namer, pods)
+	pvcs, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, namer, pods)
+	if err != nil {
+		return fmt.Errorf("escrow of diverged instance(s) %v: %w", pods, err)
+	}
 	if _, err := escrow.Gate(ctx, cfg, "escrow", pvcs, escrow.UsedBytesByPVC(result, pods)); err != nil {
 		return fmt.Errorf("escrow of diverged instance(s) %v: %w", pods, err)
 	}

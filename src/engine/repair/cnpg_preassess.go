@@ -70,7 +70,11 @@ func (r *cnpgRepair) PreAssess(ctx context.Context) (*model.TriageResult, error)
 
 	// 2. Select an escrow provider (fail-closed) and prove there is space BEFORE
 	//    any capture — "requires X, only Y available", never a full repo mid-escrow.
-	esc, err := escrow.Prepare(ctx, cfg, "unwedge", escrow.PVCsFor(r.p, rec.RecoverySet),
+	set, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, r.p, rec.RecoverySet)
+	if err != nil {
+		return nil, fmt.Errorf("unwedge REFUSED: %w", err)
+	}
+	esc, err := escrow.Prepare(ctx, cfg, "unwedge", set,
 		escrow.UsedBytesByPVC(t, rec.RecoverySet))
 	if err != nil {
 		return nil, err

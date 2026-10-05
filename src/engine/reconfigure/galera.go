@@ -175,8 +175,11 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 	// SST and its datadir is replaced. Escrow it before any of that, or refuse.
 	//
 	// Reached only on a real run; the command returns on --dry-run after PrintPlan.
-	if _, err := escrow.Gate(ctx, cfg, "reset-authority",
-		escrow.PVCsFor(g.p, []string{targetPod}),
+	set, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, g.p, []string{targetPod})
+	if err != nil {
+		return fmt.Errorf("reset-authority REFUSED: %w", err)
+	}
+	if _, err := escrow.Gate(ctx, cfg, "reset-authority", set,
 		escrow.UsedBytesByPVC(result, []string{targetPod})); err != nil {
 		return err
 	}
