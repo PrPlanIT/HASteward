@@ -147,6 +147,12 @@ func TestRunEscrow(t *testing.T) {
 	// names no engine, so that fallback is a no-op and the dump failure alone must not
 	// abort the remaining dumps.
 	t.Run("a failed diverged dump does not abort the other dumps", func(t *testing.T) {
+		// A failed dump is no longer warned-and-skipped: its lineage falls back to the
+		// block layer, so the escrow provider must be in play for the fallback to land.
+		p := &fakeEscrowProvider{}
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
+			return p, nil
+		})
 		b := &fakeBacker{failOn: "c-0"} // c-0's diverged backup fails; donor c-9 succeeds
 		r := triageRes(false,
 			model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true},
@@ -157,6 +163,10 @@ func TestRunEscrow(t *testing.T) {
 		}
 		if len(b.calls) != 3 {
 			t.Fatalf("want the donor backup plus both diverged attempts, got %v", b.calls)
+		}
+		if len(p.captured) != 1 || p.captured[0] != "c-0" || !p.verified {
+			t.Fatalf("the failed dump's lineage must be block-escrowed and verified, captured=%v verified=%v",
+				p.captured, p.verified)
 		}
 	})
 }
