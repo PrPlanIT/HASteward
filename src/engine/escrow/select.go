@@ -17,28 +17,37 @@ import (
 // breaker is unavailable", never "escrow silently skipped".
 //
 // Preference order:
-//  1. CSI VolumeSnapshot — if a VolumeSnapshotClass.driver matches the recovery
-//     set's StorageClass.provisioner (snapshots are cheap and the CSI layer
-//     itself asserts restorability).
-//  2. restic PVC-files backup — if a restic repo is configured.
+//  1. restic PVC-files backup — if a restic repo is configured. It DEDUPLICATES, and
+//     the repository is wherever the operator pointed --backups-path, which is how an
+//     escrow stays off the primary storage tier it is protecting. A CoW snapshot
+//     instead lives in the same pool as the volume it protects and grows as that
+//     volume diverges from it, so making it the default put escrows on the fast tier
+//     and left nothing bounding them.
+//  2. CSI VolumeSnapshot — when no restic repository is configured, or the recovery
+//     set cannot be reached by a helper pod. The CSI layer asserts restorability
+//     itself and needs no mount, so it remains the fallback that always works.
 //  3. refuse.
-func Select(ctx context.Context, cfg *common.Config, recoverySet []string) (EscrowProvider, error) {
+func Select(ctx context.Context, cfg *common.Config, kind string, recoverySet []string) (EscrowProvider, error) {
 	if len(recoverySet) == 0 {
 		return nil, fmt.Errorf("escrow: empty recovery set — nothing to make reversible")
 	}
 
 	runID := NewRunID()
 
-	if class, err := matchSnapshotClass(ctx, cfg.Namespace, recoverySet[0]); err == nil && class != "" {
-		return newVolumeSnapshotEscrow(cfg, class, runID), nil
+	if cfg.BackupsPath != "" && cfg.ResticPassword != "" {
+		return newResticPVCEscrow(cfg, kind, runID), nil
 	}
 
-	if cfg.BackupsPath != "" && cfg.ResticPassword != "" {
-		return newResticPVCEscrow(cfg, runID), nil
+	// --snapshot-class is an explicit operator choice, so it skips discovery entirely.
+	if cfg.SnapshotClass != "" {
+		return newVolumeSnapshotEscrow(cfg, cfg.SnapshotClass, kind, runID), nil
+	}
+	if class, err := matchSnapshotClass(ctx, cfg.Namespace, recoverySet[0]); err == nil && class != "" {
+		return newVolumeSnapshotEscrow(cfg, class, kind, runID), nil
 	}
 
 	return nil, fmt.Errorf(
-		"escrow unavailable: no VolumeSnapshotClass matches the recovery set's storage provisioner and no restic repo is configured (--backups-path + restic password) — reversibility cannot be proven, so the deadlock breaker is refused")
+		"escrow unavailable: no restic repo is configured (--backups-path + restic password) and no VolumeSnapshotClass matches the recovery set's storage provisioner — reversibility cannot be proven, so the operation is refused")
 }
 
 // matchSnapshotClass returns the name of a VolumeSnapshotClass whose driver

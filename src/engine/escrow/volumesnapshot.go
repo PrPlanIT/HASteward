@@ -21,11 +21,12 @@ import (
 type volumeSnapshotEscrow struct {
 	cfg   *common.Config
 	class string // selected VolumeSnapshotClass whose driver matches the PVCs' provisioner
+	kind  string // which operation took the escrow, stamped for retention to report
 	runID string
 }
 
-func newVolumeSnapshotEscrow(cfg *common.Config, class, runID string) *volumeSnapshotEscrow {
-	return &volumeSnapshotEscrow{cfg: cfg, class: class, runID: runID}
+func newVolumeSnapshotEscrow(cfg *common.Config, class, kind, runID string) *volumeSnapshotEscrow {
+	return &volumeSnapshotEscrow{cfg: cfg, class: class, kind: kind, runID: runID}
 }
 
 func (e *volumeSnapshotEscrow) Name() string { return "volumesnapshot" }
@@ -47,7 +48,7 @@ func (e *volumeSnapshotEscrow) Capture(ctx context.Context, recoverySet []string
 			"metadata": map[string]interface{}{
 				"name":        name,
 				"namespace":   ns,
-				"labels":      LabelsAsInterface(e.cfg.ClusterName, pvc, e.runID, KindSplitBrain),
+				"labels":      LabelsAsInterface(e.cfg.ClusterName, pvc, e.runID, e.kind),
 				"annotations": CapturedAtAnnotation(now),
 			},
 			"spec": map[string]interface{}{
@@ -134,6 +135,15 @@ func (e *volumeSnapshotEscrow) EstimateCaptureBytes(recoverySet []string, usedBy
 // AvailableBytes: a CoW snapshot consumes negligible host-side space up front, so
 // there is no budget to check — report effectively unbounded, making the space
 // guard a no-op for this provider.
+// AvailableBytes reports no byte limit, because for a copy-on-write snapshot there is
+// no number to report: creation consumes nothing, the cost accrues afterwards as the
+// source volume diverges, and Kubernetes exposes no free-space API for an RBD pool
+// (this cluster publishes no CSIStorageCapacity objects at all).
+//
+// That makes the byte guard structurally inert here, so it is NOT the guard that bounds
+// this provider — Prepare enforces a cap on how many unreleased escrows one cluster may
+// hold instead. Returning MaxInt64 without that cap is what left snapshot growth
+// unbounded.
 func (e *volumeSnapshotEscrow) AvailableBytes() (int64, error) {
 	return math.MaxInt64, nil
 }

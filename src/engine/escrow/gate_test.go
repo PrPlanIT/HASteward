@@ -3,12 +3,22 @@ package escrow
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/output/model"
 )
+
+// TestMain stubs the escrow census for the whole package: these tests exercise the gate's
+// decisions, not the Kubernetes API, and the real implementation lists VolumeSnapshots
+// against a live cluster. The cap's own behaviour is asserted explicitly in
+// TestOutstandingEscrowCap, which overrides this.
+func TestMain(m *testing.M) {
+	CountOutstanding = func(context.Context, *common.Config) (int, error) { return 0, nil }
+	os.Exit(m.Run())
+}
 
 // sizedProvider has controllable space accounting so the pre-capture refusal can be
 // asserted, and records whether Capture ran — which is the point of that refusal: a full
@@ -46,7 +56,7 @@ func (s *sizedProvider) EstimateCaptureBytes(set []string, used map[string]int64
 func (s *sizedProvider) AvailableBytes() (int64, error) { return s.available, s.availErr }
 
 // withProvider swaps the fail-closed selector for one test.
-func withProvider(t *testing.T, fn func(context.Context, *common.Config, []string) (EscrowProvider, error)) {
+func withProvider(t *testing.T, fn func(context.Context, *common.Config, string, []string) (EscrowProvider, error)) {
 	t.Helper()
 	prev := SelectProvider
 	SelectProvider = fn
@@ -71,7 +81,7 @@ func TestPrepare(t *testing.T) {
 	})
 
 	t.Run("a provider refusal carries the operation name", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return nil, fmt.Errorf("no provider can prove reversibility")
 		})
 		_, err := Prepare(ctx, cfg, "bootstrap", []string{"c-0"}, nil)
@@ -82,7 +92,7 @@ func TestPrepare(t *testing.T) {
 
 	t.Run("insufficient space refuses before anything is captured", func(t *testing.T) {
 		p := &sizedProvider{estimate: 10 << 30, available: 1 << 30}
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) { return p, nil })
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) { return p, nil })
 		if _, err := Prepare(ctx, cfg, "promote", []string{"c-0"}, nil); err == nil {
 			t.Fatal("an escrow that cannot fit must be refused")
 		}
@@ -93,7 +103,7 @@ func TestPrepare(t *testing.T) {
 
 	t.Run("the reserve is enforced, not just the estimate", func(t *testing.T) {
 		// Fits the estimate exactly, leaving no reserve headroom.
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return &sizedProvider{estimate: reserveBytes, available: reserveBytes}, nil
 		})
 		if _, err := Prepare(ctx, cfg, "unwedge", []string{"c-0"}, nil); err == nil {
@@ -102,7 +112,7 @@ func TestPrepare(t *testing.T) {
 	})
 
 	t.Run("unknown free space is a refusal, not an assumption", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return &sizedProvider{availErr: fmt.Errorf("backend unreachable")}, nil
 		})
 		if _, err := Prepare(ctx, cfg, "restore", []string{"c-0"}, nil); err == nil {
@@ -111,7 +121,7 @@ func TestPrepare(t *testing.T) {
 	})
 
 	t.Run("an unproven capture is refused", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return &sizedProvider{available: 1 << 40, failVerify: true}, nil
 		})
 		rs, err := Prepare(ctx, cfg, "restore", []string{"c-0"}, nil)
@@ -130,7 +140,7 @@ func TestGate(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("captures and proves, reporting every ref", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return &sizedProvider{available: 1 << 40}, nil
 		})
 		refs, err := Gate(ctx, testCfg(), "restore", []string{"c-0", "c-1"}, nil)
@@ -148,7 +158,7 @@ func TestGate(t *testing.T) {
 	})
 
 	t.Run("a refusal aborts the caller", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			return nil, fmt.Errorf("no provider")
 		})
 		if _, err := Gate(ctx, testCfg(), "bootstrap", []string{"c-0"}, nil); err == nil {
@@ -158,7 +168,7 @@ func TestGate(t *testing.T) {
 
 	// The one way past the gate is the operator saying so.
 	t.Run("--no-escrow proceeds with no capture", func(t *testing.T) {
-		withProvider(t, func(context.Context, *common.Config, []string) (EscrowProvider, error) {
+		withProvider(t, func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
 			t.Fatal("--no-escrow must not select a provider at all")
 			return nil, nil
 		})
@@ -207,5 +217,67 @@ func TestUsedBytesByPVC(t *testing.T) {
 	}
 	if len(UsedBytesByPVC(nil, []string{"c-0"})) != 0 {
 		t.Fatal("no triage means no sizes")
+	}
+}
+
+// withOutstanding stubs the escrow census for one test.
+func withOutstanding(t *testing.T, n int, err error) {
+	t.Helper()
+	prev := CountOutstanding
+	CountOutstanding = func(context.Context, *common.Config) (int, error) { return n, err }
+	t.Cleanup(func() { CountOutstanding = prev })
+}
+
+// The cap is what actually bounds a copy-on-write provider: its AvailableBytes has no
+// honest number to report, so without this an escrow store could only ever grow.
+func TestOutstandingEscrowCap(t *testing.T) {
+	ctx := context.Background()
+	ok := func(context.Context, *common.Config, string, []string) (EscrowProvider, error) {
+		return &sizedProvider{available: 1 << 40}, nil
+	}
+
+	t.Run("under the cap proceeds", func(t *testing.T) {
+		withProvider(t, ok)
+		withOutstanding(t, maxOutstandingEscrows-1, nil)
+		if _, err := Prepare(ctx, testCfg(), "restore", []string{"c-0"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("at the cap refuses and names the prune", func(t *testing.T) {
+		withProvider(t, ok)
+		withOutstanding(t, maxOutstandingEscrows, nil)
+		_, err := Prepare(ctx, testCfg(), "restore", []string{"c-0"}, nil)
+		if err == nil {
+			t.Fatal("an escrow store that only grows protects nothing; this must refuse")
+		}
+		if !strings.Contains(err.Error(), "prune -t escrow") {
+			t.Fatalf("the refusal must tell the operator how to clear it, got: %v", err)
+		}
+	})
+
+	// A number you could not read is not evidence of headroom.
+	t.Run("an unreadable census refuses", func(t *testing.T) {
+		withProvider(t, ok)
+		withOutstanding(t, 0, fmt.Errorf("api unreachable"))
+		if _, err := Prepare(ctx, testCfg(), "restore", []string{"c-0"}, nil); err == nil {
+			t.Fatal("failing to count must refuse, not assume zero")
+		}
+	})
+}
+
+// The kind is what retention reports, so the two long-standing values must survive the
+// move to a shared gate rather than every escrow becoming "split-brain".
+func TestEscrowKind(t *testing.T) {
+	for op, want := range map[string]string{
+		"escrow":            KindSplitBrain,
+		"deadlock-recover":  KindDeadlock,
+		"restore":           "restore",
+		"bootstrap":         "bootstrap",
+		"reset-authority":   "reset-authority",
+	} {
+		if got := escrowKind(op); got != want {
+			t.Fatalf("escrowKind(%q) = %q, want %q", op, got, want)
+		}
 	}
 }

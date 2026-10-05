@@ -5,13 +5,58 @@ import (
 	"fmt"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // reserveBytes is headroom that must remain free in the escrow store beyond the capture
 // estimate, so an escrow can never fill the repository to the brim.
 const reserveBytes int64 = 1 << 30 // 1 GiB
+
+// maxOutstandingEscrows caps how many unreleased escrow snapshots one cluster may hold.
+//
+// It exists because the byte guard cannot bound a copy-on-write provider: creation costs
+// nothing and the growth arrives later, so AvailableBytes has no honest number to report
+// and the space check is structurally inert there. Without a cap, nothing stops escrows
+// accumulating in the same pool as the volumes they protect. Twelve is deliberately
+// generous — a handful of operations' worth — because tripping it should mean retention
+// has stopped running, not that an operator was busy.
+const maxOutstandingEscrows = 12
+
+// escrowKind maps an operation to the kind label stamped on its escrow objects, so
+// retention can report what took an escrow in the operator's own terms. The two
+// long-standing values are preserved for the paths that already used them; anything
+// else is labelled with the operation's own name.
+func escrowKind(operation string) string {
+	switch operation {
+	case "escrow":
+		return KindSplitBrain
+	case "deadlock-recover":
+		return KindDeadlock
+	default:
+		return operation
+	}
+}
+
+// CountOutstanding is countOutstanding behind a package variable, so the cap can be
+// exercised without a live cluster — the same seam SelectProvider uses. Never reassigned
+// outside tests.
+var CountOutstanding = countOutstanding
+
+// countOutstanding reports how many escrow snapshots this cluster already holds. A
+// listing failure is returned, never treated as zero: the cap is a safety bound, and
+// assuming the best about a number you could not read is how bounds get bypassed.
+func countOutstanding(ctx context.Context, cfg *common.Config) (int, error) {
+	list, err := k8s.GetClients().Dynamic.Resource(k8s.VolumeSnapshotGVR).Namespace(cfg.Namespace).
+		List(ctx, metav1.ListOptions{LabelSelector: ClusterSelector(cfg.ClusterName)})
+	if err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
+}
 
 // SelectProvider is Select behind a package variable so the fail-closed contract — a
 // refusal or an unproven capture must abort the caller — is testable without standing up
@@ -38,9 +83,19 @@ func Prepare(ctx context.Context, cfg *common.Config, operation string, set []st
 	if len(set) == 0 {
 		return nil, fmt.Errorf("%s REFUSED: empty recovery set — nothing to make reversible", operation)
 	}
-	prov, err := SelectProvider(ctx, cfg, set)
+	prov, err := SelectProvider(ctx, cfg, escrowKind(operation), set)
 	if err != nil {
 		return nil, fmt.Errorf("%s REFUSED: %w", operation, err)
+	}
+	// The count bound, which is what actually guards a copy-on-write provider.
+	n, cerr := CountOutstanding(ctx, cfg)
+	if cerr != nil {
+		return nil, fmt.Errorf("%s REFUSED: cannot count the escrows %s already holds: %w", operation, cfg.ClusterName, cerr)
+	}
+	if n >= maxOutstandingEscrows {
+		return nil, fmt.Errorf("%s REFUSED: %s already holds %d unreleased escrows (cap %d) — release them with "+
+			"`hasteward backup prune -t escrow` before taking another; an escrow store that only grows protects nothing",
+			operation, cfg.ClusterName, n, maxOutstandingEscrows)
 	}
 	est := prov.EstimateCaptureBytes(set, usedBytes)
 	avail, err := prov.AvailableBytes()

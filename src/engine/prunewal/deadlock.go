@@ -477,56 +477,27 @@ func (w *cnpgPruner) scratchSizeForPVC(ctx context.Context, ns, pvcName string) 
 	return out, nil
 }
 
-// escrowSnapshot creates a VolumeSnapshot of the PVC and waits until it is readyToUse —
-// the rollback point for the in-place replay. The VolumeSnapshotClass is taken from
-// --snapshot-class, or discovered by matching the PVC's storage provisioner.
+// escrowSnapshot escrows the PVC through the shared, fail-closed escrow gate and returns
+// the backend handle of the capture — the rollback point for the in-place replay.
+//
+// It used to build the VolumeSnapshot by hand, which made it a fifth private escrow
+// implementation: snapshot-only with no restic fallback, outside the provider selection
+// every other destructive path goes through, and outside the bound on how many escrows a
+// cluster may accumulate. The capture it takes is identical in kind; what it gains is
+// the one code path, the deduplicating provider when a repository is configured, and the
+// refusals. --snapshot-class still wins, now honoured by Select itself.
 func (w *cnpgPruner) escrowSnapshot(ctx context.Context, ns, pvcName string) (string, error) {
 	cfg := w.p.Config()
-	c := k8s.GetClients()
-
-	class := cfg.SnapshotClass
-	if class == "" {
-		var err error
-		class, err = w.discoverSnapshotClass(ctx, ns, pvcName)
-		if err != nil {
-			return "", err
-		}
+	refs, err := escrow.Gate(ctx, cfg, "deadlock-recover", []string{pvcName}, nil)
+	if err != nil {
+		return "", err
 	}
-
-	// The same discovery labels the split-brain escrow stamps, so one retention
-	// pass can find and age every escrow regardless of which operation took it.
-	now := time.Now()
-	runID := escrow.NewRunID()
-	name := fmt.Sprintf("%s-deadlock-escrow-%d", pvcName, now.Unix())
-	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "snapshot.storage.k8s.io/v1",
-		"kind":       "VolumeSnapshot",
-		"metadata": map[string]interface{}{
-			"name": name, "namespace": ns,
-			"labels":      escrow.LabelsAsInterface(cfg.ClusterName, pvcName, runID, escrow.KindDeadlock),
-			"annotations": escrow.CapturedAtAnnotation(now),
-		},
-		"spec": map[string]interface{}{
-			"volumeSnapshotClassName": class,
-			"source":                  map[string]interface{}{"persistentVolumeClaimName": pvcName},
-		},
-	}}
-	if _, err := c.Dynamic.Resource(volumeSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{}); err != nil {
-		return "", fmt.Errorf("creating VolumeSnapshot (class %s): %w", class, err)
+	if len(refs) == 0 {
+		// Only reachable with --no-escrow, which this operation must never run under:
+		// the replay rewrites WAL in place and the snapshot is the only way back.
+		return "", fmt.Errorf("deadlock-recover REFUSED: no escrow was captured for %s — the in-place replay is irreversible without one", pvcName)
 	}
-
-	output.Bullet(0, "Waiting for escrow snapshot %s (class %s) to be ready", name, class)
-	for i := 0; i < 60; i++ { // up to 5 min
-		common.Sleep(5 * time.Second)
-		got, err := c.Dynamic.Resource(volumeSnapshotGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
-		if k8s.GetNestedBool(got, "status", "readyToUse") {
-			return name, nil
-		}
-	}
-	return "", fmt.Errorf("VolumeSnapshot %s did not become readyToUse within 5m", name)
+	return refs[0].ID, nil
 }
 
 // discoverSnapshotClass finds a VolumeSnapshotClass whose driver matches the PVC's storage

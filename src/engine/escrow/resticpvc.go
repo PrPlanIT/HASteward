@@ -35,11 +35,12 @@ const escrowMountPath = "/escrow-data"
 // listing.
 type resticPVCEscrow struct {
 	cfg   *common.Config
+	kind  string // which operation took the escrow, tagged for retention to report
 	runID string
 }
 
-func newResticPVCEscrow(cfg *common.Config, runID string) *resticPVCEscrow {
-	return &resticPVCEscrow{cfg: cfg, runID: runID}
+func newResticPVCEscrow(cfg *common.Config, kind, runID string) *resticPVCEscrow {
+	return &resticPVCEscrow{cfg: cfg, kind: kind, runID: runID}
 }
 
 func (e *resticPVCEscrow) Name() string { return "resticpvc" }
@@ -92,6 +93,13 @@ func (e *resticPVCEscrow) captureOne(ctx context.Context, rc *restic.Client, pvc
 		Spec: corev1.PodSpec{
 			RestartPolicy:      corev1.RestartPolicyNever,
 			ServiceAccountName: sa,
+			// Pin to the node already holding the volume. A ReadWriteOnce PVC can only
+			// attach on one node, so a helper scheduled anywhere else hangs unschedulable
+			// — which is exactly the case escrow exists for, an instance crash-looping on
+			// its own datadir. Same-node attachment is permitted, and the mount is
+			// read-only, so the live instance keeps its write access.
+			// Empty when nothing holds the PVC; the scheduler is then free to place it.
+			NodeName: nodeHoldingPVC(ctx, ns, pvc),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser: &root,
 			},
@@ -253,6 +261,29 @@ func (e *resticPVCEscrow) AvailableBytes() (int64, error) {
 	return int64(st.Bavail) * st.Bsize, nil
 }
 
+// nodeHoldingPVC returns the node of a pod that currently mounts the PVC, or "" when
+// nothing does. Asking the API beats assuming: the instance that needs escrowing is
+// usually still assigned to a node even while it crash-loops, and that assignment is
+// what decides where a ReadWriteOnce volume can be attached.
+func nodeHoldingPVC(ctx context.Context, ns, pvc string) string {
+	pods, err := k8s.GetClients().Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Spec.NodeName == "" {
+			continue
+		}
+		for _, v := range p.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == pvc {
+				return p.Spec.NodeName
+			}
+		}
+	}
+	return ""
+}
+
 // waitRunning polls until the helper pod is Running (exec needs a live pod),
 // failing fast if it terminates first.
 func (e *resticPVCEscrow) waitRunning(ctx context.Context, name string) error {
@@ -291,6 +322,7 @@ func (e *resticPVCEscrow) tags(pvc string) map[string]string {
 		"namespace": e.cfg.Namespace,
 		"instance":  pvc,
 		"type":      "escrow",
+		"kind":      e.kind,
 		"run-id":    e.runID,
 	}
 }

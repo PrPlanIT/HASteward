@@ -184,7 +184,7 @@ func (f *fakeEscrowProvider) AvailableBytes() (int64, error) { return 1 << 40, n
 // withSelectEscrow swaps the escrow package's provider selector for one test. The seam
 // lives there rather than here because the orchestration does, and all four destructive
 // paths now share it.
-func withSelectEscrow(t *testing.T, fn func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error)) {
+func withSelectEscrow(t *testing.T, fn func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error)) {
 	t.Helper()
 	prev := escrow.SelectProvider
 	escrow.SelectProvider = fn
@@ -214,7 +214,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 
 	t.Run("down instance is captured, not skipped", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		b := &fakeBacker{}
@@ -234,7 +234,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 	})
 
 	t.Run("no provider: refusal aborts the run", func(t *testing.T) {
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return nil, fmt.Errorf("no provider can prove reversibility")
 		})
 		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
@@ -243,7 +243,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 	})
 
 	t.Run("capture failure aborts the run", func(t *testing.T) {
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return &fakeEscrowProvider{failCapture: true}, nil
 		})
 		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
@@ -252,7 +252,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 	})
 
 	t.Run("unverified capture aborts the run", func(t *testing.T) {
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return &fakeEscrowProvider{failVerify: true}, nil
 		})
 		if err := runEscrow(ctx, cnpgEscrowCfg(), fakeNamer{}, &fakeBacker{}, downSplitBrain(), "c-0", "dump.sql"); err == nil {
@@ -262,7 +262,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 
 	t.Run("all instances up: no block-level escrow attempted", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		r := triageRes(false, model.InstanceAssessment{Pod: "c-0", Instance: 0, IsRunning: true, IsReady: true})
@@ -280,7 +280,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 	// let bootstrap wipe osticket's data is closed rather than warned about.
 	t.Run("galera: the down node is escrowed, not skipped", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		cfg := escrowCfg()
@@ -295,7 +295,7 @@ func TestRunEscrowDownDivergedInstance(t *testing.T) {
 
 	t.Run("safe cluster: no diverged escrow at all", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		r := triageRes(true, model.InstanceAssessment{Pod: "c-2", Instance: 2, IsRunning: false, IsReady: false})
@@ -401,7 +401,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 
 	t.Run("running instance with a failed dump is escrowed at block level", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		// c-1's dump fails; it is running and ready, so the old code warned and moved on.
@@ -423,7 +423,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 
 	t.Run("both a down instance and a failed dump are captured together", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		b := &fakeBacker{failOn: "c-1"}
@@ -445,7 +445,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 	})
 
 	t.Run("a failed dump that cannot be escrowed aborts the run", func(t *testing.T) {
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return nil, fmt.Errorf("no provider can prove reversibility")
 		})
 		b := &fakeBacker{failOn: "c-1"}
@@ -460,7 +460,7 @@ func TestRunEscrowFailedDumpFallsBackToBlockLevel(t *testing.T) {
 
 	t.Run("all dumps succeed: no block-level escrow attempted", func(t *testing.T) {
 		p := &fakeEscrowProvider{}
-		withSelectEscrow(t, func(context.Context, *common.Config, []string) (escrow.EscrowProvider, error) {
+		withSelectEscrow(t, func(context.Context, *common.Config, string, []string) (escrow.EscrowProvider, error) {
 			return p, nil
 		})
 		r := triageRes(false,
