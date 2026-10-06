@@ -574,32 +574,46 @@ func (r *cnpgRepair) VerifyRecovery(ctx context.Context, healed []string) error 
 	}
 	cfg := r.p.Config()
 	ns := cfg.Namespace
-	// Resolve the primary LIVE — a switchover during heal may have moved it.
-	obj, err := k8s.GetClients().Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("cannot resolve the current primary to verify streaming: %w", err)
-	}
-	primary := k8s.GetNestedString(obj, "status", "currentPrimary")
-	if primary == "" {
-		return fmt.Errorf("cluster reports no currentPrimary; cannot verify streaming")
-	}
-	streaming, err := r.streamingStandbys(ctx, primary, ns)
-	if err != nil {
-		return fmt.Errorf("querying pg_stat_replication on primary %s: %w", primary, err)
-	}
-	var stranded []string
-	for _, pod := range healed {
-		if pod == primary {
-			continue // a healed instance promoted to primary has no upstream to stream from
+
+	// The primary is resolved INSIDE the poll, not once before it: a switchover during
+	// heal moves it, and a restart makes it briefly unreadable. Both are states to wait
+	// through, not to fail on.
+	var primary string
+	stranded, perr := awaitRecovery(ctx, verifyCNPGTimeout, verifyInterval, func(ctx context.Context) ([]string, error) {
+		obj, err := k8s.GetClients().Dynamic.Resource(k8s.CNPGClusterGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve the current primary: %w", err)
 		}
-		if !streaming[pod] {
-			stranded = append(stranded, pod)
+		p := k8s.GetNestedString(obj, "status", "currentPrimary")
+		if p == "" {
+			return nil, fmt.Errorf("cluster reports no currentPrimary")
 		}
+		primary = p
+		streaming, err := r.streamingStandbys(ctx, p, ns)
+		if err != nil {
+			return nil, fmt.Errorf("querying pg_stat_replication on primary %s: %w", p, err)
+		}
+		var out []string
+		for _, pod := range healed {
+			if pod == p {
+				continue // a healed instance promoted to primary has no upstream to stream from
+			}
+			if !streaming[pod] {
+				out = append(out, pod)
+			}
+		}
+		return out, nil
+	})
+
+	// Never read the cluster at all: report that, rather than implying the instances
+	// were inspected and found wanting.
+	if stranded == nil && perr != nil {
+		return fmt.Errorf("could not verify streaming within %s: %w", verifyCNPGTimeout, perr)
 	}
 	if len(stranded) > 0 {
-		return fmt.Errorf("instance(s) Ready but NOT streaming from primary %s: %s — the walreceiver never "+
+		return fmt.Errorf("instance(s) Ready but NOT streaming from primary %s after %s: %s — the walreceiver never "+
 			"connected (check postgresql.auto.conf for a stale primary_conninfo shadowing CNPG's override.conf); "+
-			"the cluster is degraded despite reporting N/N Ready", primary, strings.Join(stranded, ", "))
+			"the cluster is degraded despite reporting N/N Ready", primary, verifyCNPGTimeout, strings.Join(stranded, ", "))
 	}
 	common.InfoLog("Verified: all healed instance(s) are streaming from primary %s", primary)
 	return nil

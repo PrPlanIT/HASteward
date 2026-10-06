@@ -244,21 +244,27 @@ func (g *galeraRepair) Reassess(ctx context.Context) (*model.TriageResult, error
 // streaming check. A node that is K8s-Ready but not in the primary component (SST
 // still running, or a failed join) must not be recorded as a successful heal.
 func (g *galeraRepair) VerifyRecovery(ctx context.Context, healed []string) error {
-	var notSynced []string
-	for _, pod := range healed {
-		probe := g.probeWsrep(ctx, pod)
-		synced := probe.ExecOK &&
-			probe.WsrepReady != nil && *probe.WsrepReady &&
-			probe.WsrepConnected != nil && *probe.WsrepConnected &&
-			probe.StateComment == "Synced"
-		if !synced {
-			notSynced = append(notSynced, pod)
+	// A joining node is not Synced until its SST finishes, which the previous single
+	// probe reported as a failed heal — the error even said an SST may still be running.
+	// Wait for it instead, bounded, and only then call the cluster degraded.
+	notSynced, _ := awaitRecovery(ctx, verifyGaleraTimeout, verifyInterval, func(ctx context.Context) ([]string, error) {
+		var out []string
+		for _, pod := range healed {
+			probe := g.probeWsrep(ctx, pod)
+			synced := probe.ExecOK &&
+				probe.WsrepReady != nil && *probe.WsrepReady &&
+				probe.WsrepConnected != nil && *probe.WsrepConnected &&
+				probe.StateComment == "Synced"
+			if !synced {
+				out = append(out, pod)
+			}
 		}
-	}
+		return out, nil
+	})
 	if len(notSynced) > 0 {
-		return fmt.Errorf("healed node(s) Ready but not in the Galera primary component (not Synced): %s — "+
-			"an SST may still be running or the node failed to join; re-triage before trusting the cluster",
-			strings.Join(notSynced, ", "))
+		return fmt.Errorf("healed node(s) Ready but not in the Galera primary component (not Synced) after %s: %s — "+
+			"an SST may have failed or the node could not join; re-triage before trusting the cluster",
+			verifyGaleraTimeout, strings.Join(notSynced, ", "))
 	}
 	return nil
 }
