@@ -68,7 +68,7 @@ docker run --rm --network host \
   -e KUBECONFIG=/kube/config \
   -v "$HOME/.kube:/kube:ro" \
   docker.io/prplanit/hasteward:latest \
-  prune wal -e cnpg -c <CLUSTER> -n <NAMESPACE>
+  prune-wal -e cnpg -c <CLUSTER> -n <NAMESPACE>
 ```
 
 ---

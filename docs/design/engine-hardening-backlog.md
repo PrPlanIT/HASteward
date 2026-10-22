@@ -141,3 +141,21 @@ leaves behind.
     prune output and must be retired by hand:
     `hyrule-castle/calcom-postgres-{1,2,3}-preprune` (2026-08-28) and the
     `*-deadlock-escrow-*` snapshots in `temple-of-time` and `training-dummy`.
+
+---
+
+## Open — live validation
+
+### V.1 — [CNPG] plain `prune-wal` through `cnpgjob.Run` — ⏳ unexercised against a real disk-full primary
+- **Status:** `prune-wal` routes through the shared `cnpgjob.Run` (cluster Lease, fence, reconcile-disabled single-delete PVC handoff, detached-context reconcile restore). The heal and breaker callers of that primitive are exercised; the WAL-prune mutation itself (`OnPVCAcquired`: REDO boundary → caught-up gate → delete older segments) is unit-tested but has not run end-to-end on a live disk-full primary.
+- **When:** on the next real disk-pressure event on a CNPG primary. Do not induce disk-full on a production cluster; a scratch cluster is the only place to force it.
+- **Preconditions:** at least one ready replica (the gate enforces it without `--force`); take a VolumeSnapshot of the primary PVC on the first run.
+- **Run:** `hasteward prune-wal -e cnpg -c <cluster> -n <ns> -i <primary-ordinal>` (`--dry-run` first).
+- **Pass criteria, in log order:**
+  1. `Acquired cluster operation lock <ns>/<cluster>`.
+  2. `STEP 1: Fencing` → `Disabling reconciliation loop` → `STEP 3: Deleting … (reconcile disabled — it stays down)`.
+  3. A single delete, then `wal-prune pod acquired the PVC` within seconds — no repeated delete loop.
+  4. `Checkpoint REDO WAL file: …`, `All N ready replica(s) are at or past the checkpoint`, `Deleted N WAL segment(s) older than …`; `.history` files kept.
+  5. `STEP 5: Re-enabling reconciliation` strictly before `STEP 6: Removing fence`.
+  6. `Released cluster operation lock`; the primary returns online; the Cluster carries no `cnpg.io/reconciliationLoop` annotation and an empty `cnpg.io/fencedInstances`.
+- **Close when:** one real run meets every criterion above.
