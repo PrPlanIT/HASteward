@@ -4,7 +4,7 @@
 # Downloads playbook files from the hasteward repository, runs hasteward
 # with the specified parameters, writes backups to a mounted PVC.
 #
-# Repository: https://gitlab.prplanit.com/PrPlanIT/HASteward
+# Repository: https://git.optcp.com/PrPlanIT/HASteward
 #             https://github.com/PrPlanIT/HASteward
 #
 # Prerequisites (one-time):
@@ -128,7 +128,7 @@ spec:
             - -c
             - |
               set -e
-              REPO_URL="https://gitlab.prplanit.com/PrPlanIT/HASteward/-/archive/main/hasteward-main.tar.gz"
+              REPO_URL="https://git.optcp.com/PrPlanIT/HASteward/-/archive/main/hasteward-main.tar.gz"
               echo "Fetching: $REPO_URL"
               wget -qO /tmp/repo.tar.gz "$REPO_URL"
               tar xzf /tmp/repo.tar.gz --strip-components=1 -C /workspace
