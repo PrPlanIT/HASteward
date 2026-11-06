@@ -9,7 +9,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	k8s.io/api v0.36.6
 	k8s.io/apimachinery v0.36.6
-	k8s.io/client-go v0.36.5
+	k8s.io/client-go v0.36.6
 	sigs.k8s.io/controller-runtime v0.24.1
 )
 
