@@ -162,13 +162,7 @@ func (g *galeraReconfigure) Execute(ctx context.Context, result *model.TriageRes
 	targetPod := fmt.Sprintf("%s-%d", cfg.ClusterName, instanceNum)
 	originalReplicas := int32(g.p.Replicas())
 
-	// Capture SA
-	sa := "default"
-	if targetPodObj, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{}); err == nil {
-		if targetPodObj.Spec.ServiceAccountName != "" {
-			sa = targetPodObj.Spec.ServiceAccountName
-		}
-	}
+	sa := g.p.ServiceAccount()
 
 	// ESCROW GATE — reconfigure stops every pod and rewrites the target's cluster
 	// metadata (clearing grastate / removing bootstrap config), so the target rejoins by

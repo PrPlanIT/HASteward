@@ -106,7 +106,7 @@ func (w *cnpgPruner) deadlockRecover(ctx context.Context, targetPod, targetPVC s
 			//   restrict-default-sa: Pods must specify a non-default serviceAccountName
 			// The refusal arrives at STEP 2, after STEP 1 has already fenced the instance,
 			// so the run aborts leaving the target fenced and unrelieved.
-			ServiceAccountName: w.serviceAccountFor(ctx, ns),
+			ServiceAccountName: w.p.ServiceAccount(),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 			},
@@ -491,18 +491,4 @@ func (w *cnpgPruner) escrowSnapshot(ctx context.Context, ns, pvcName string) (st
 		return "", fmt.Errorf("deadlock-recover REFUSED: no escrow was captured for %s — the in-place replay is irreversible without one", pvcName)
 	}
 	return refs[0].ID, nil
-}
-
-// serviceAccountFor inherits a workload SA from the namespace so the helper satisfies
-// its PodSecurity/RBAC and admission policy, falling back to "default". Mirrors the
-// resolution every other spawned pod uses (triage probes, heal, breaker, escrow).
-func (w *cnpgPruner) serviceAccountFor(ctx context.Context, ns string) string {
-	c := k8s.GetClients()
-	pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: "cnpg.io/cluster=" + w.p.Config().ClusterName,
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return "default"
-	}
-	return k8s.ServiceAccountFromPods(pods.Items)
 }

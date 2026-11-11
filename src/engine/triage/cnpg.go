@@ -295,7 +295,7 @@ func (t *cnpgTriage) triageCollect(ctx context.Context) (*cnpgTriageData, error)
 			joinCNPGProbeNames(probeInstances))
 
 		imageName := k8s.GetNestedString(t.p.Cluster(), "spec", "imageName")
-		sa := k8s.ServiceAccountFromPods(data.runningPods)
+		sa := t.p.ServiceAccount()
 		probeResults, probeDisks := t.runPVCProbes(ctx, probeInstances, imageName, ns, sa)
 
 		for name, cd := range probeResults {

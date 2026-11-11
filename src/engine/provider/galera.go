@@ -43,6 +43,16 @@ func (p *GaleraProvider) PodSelector() string {
 // DataPVCName returns the datadir PVC name for a pod (Galera: storage-<pod>).
 func (p *GaleraProvider) DataPVCName(pod string) string { return "storage-" + pod }
 
+// ServiceAccount is spec.serviceAccountName, which mariadb-operator defaults to the CR name.
+func (p *GaleraProvider) ServiceAccount() string {
+	if p.mariadb != nil {
+		if sa := k8s.GetNestedString(p.mariadb, "spec", "serviceAccountName"); sa != "" {
+			return sa
+		}
+	}
+	return p.cfg.ClusterName
+}
+
 // GaleraPVCName returns the galera-config PVC name for a pod (galera-<pod>).
 func (p *GaleraProvider) GaleraPVCName(pod string) string { return "galera-" + pod }
 

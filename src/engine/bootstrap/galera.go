@@ -366,14 +366,7 @@ func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod str
 	c := k8s.GetClients()
 	originalReplicas := int32(b.p.Replicas())
 
-	// Capture SA before pods are deleted
-	sa := "default"
-	pods, err := c.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: b.p.PodSelector(),
-	})
-	if err == nil {
-		sa = k8s.ServiceAccountFromPods(pods.Items)
-	}
+	sa := b.p.ServiceAccount()
 
 	// ESCROW GATE — the last point at which this is still reversible.
 	//

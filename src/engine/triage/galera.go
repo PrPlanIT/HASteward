@@ -273,7 +273,7 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 	if len(probeNodes) > 0 {
 		common.InfoLog("Probing PVC data for stranded nodes: %s",
 			joinGaleraProbeNames(probeNodes))
-		sa := k8s.ServiceAccountFromPods(data.runningPods)
+		sa := t.p.ServiceAccount()
 		probeResults := t.runPVCProbes(ctx, probeNodes, ns, sa)
 		for name, gs := range probeResults {
 			allGrastate = append(allGrastate, gs)
@@ -1161,7 +1161,7 @@ func (t *galeraTriage) anyServing(ctx context.Context, data *galeraTriageData) b
 // datadir a live mysqld may still hold open (concurrent-open corruption).
 func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) {
 	cfg := t.p.Config()
-	sa := k8s.ServiceAccountFromPods(data.runningPods)
+	sa := t.p.ServiceAccount()
 	origReplicas := int32(t.p.Replicas())
 
 	// Serialize against other fence operations. AcquireFenceLock atomically checks

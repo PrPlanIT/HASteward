@@ -120,7 +120,7 @@ func (t *cnpgTriage) deepRecoverInstance(ctx context.Context, data *cnpgTriageDa
 	targetPVC := instanceName
 	helperName := instanceName + "-triage-deeprecover"
 	imageName := k8s.GetNestedString(t.p.Cluster(), "spec", "imageName")
-	sa := k8s.ServiceAccountFromPods(data.runningPods)
+	sa := t.p.ServiceAccount()
 	uid := int64(26) // CNPG postgres uid, same as the read-only probe
 
 	// Shared builder → Istio exemption applied (a sidecar would strand the helper

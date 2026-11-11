@@ -21,6 +21,9 @@ type EngineProvider interface {
 	PodSelector() string
 	// DataPVCName returns the datadir PVC name for the given pod.
 	DataPVCName(pod string) string
+	// ServiceAccount returns the workload's ServiceAccount, read from the CR so it
+	// resolves while every pod is down: helper pods run as it, never as "default".
+	ServiceAccount() string
 }
 
 // registry maps engine names to provider constructors.

@@ -292,11 +292,7 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 			instanceNum, instanceNum+1, replicas-1)
 	}
 
-	// Capture SA from target pod before it gets deleted
-	sa := "default"
-	if targetPodObj, err := c.Clientset.CoreV1().Pods(ns).Get(ctx, targetPod, metav1.GetOptions{}); err == nil {
-		sa = k8s.ServiceAccountFromPods([]corev1.Pod{*targetPodObj})
-	}
+	sa := g.p.ServiceAccount()
 
 	storagePVC := g.p.DataPVCName(targetPod)
 	galeraPVC := g.p.GaleraPVCName(targetPod)
