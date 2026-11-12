@@ -116,8 +116,31 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	// deadlock. Bootstrap IS the fix (the operator needs a bootstrap source), but the LIGHT
 	// way — force-bootstrap the source on the LIVE cluster, no scale-to-0. Any OTHER healthy
 	// cluster is still refused by Gate 1 below.
-	if d := findDiagnosis(triageResult, "galera-operator-recovery-deadlock"); d != nil {
-		return b.bootstrapOnline(ctx, *d, dryRun, result)
+	if d := findDiagnosis(triageResult, "galera-operator-recovery-deadlock"); d != nil && cfg.InstanceNumber == nil {
+		return b.bootstrapOnline(ctx, *d, dryRun, result, nil)
+	}
+
+	// Declared source (--force --instance N): the human names the node to bootstrap from,
+	// the decision HASteward withholds when it can't prove authority itself (a zero-UUID
+	// lineage, a split-brain). A live cluster takes the online remedy, a down one the
+	// fenced bootstrap; either way every node is escrowed before anything changes.
+	declared := ""
+	if cfg.InstanceNumber != nil {
+		declared = fmt.Sprintf("%s-%d", cfg.ClusterName, *cfg.InstanceNumber)
+		if err := declaredSourceGate(declared, cfg.Force, triageResult.Assessments); err != nil {
+			result.Decision = model.BootstrapDecision{Eligible: false, Reason: err.Error()}
+			return result, err
+		}
+		if serving := servingPods(triageResult.Assessments); len(serving) > 0 {
+			if !containsPod(serving, declared) {
+				err := fmt.Errorf("ABORT: declared source %s is not serving while %v are; a live bootstrap "+
+					"must come from a serving node", declared, serving)
+				result.Decision = model.BootstrapDecision{Eligible: false, Reason: err.Error()}
+				return result, err
+			}
+			d := model.Diagnosis{ID: "operator-declared-source", Target: declared}
+			return b.bootstrapOnline(ctx, d, dryRun, result, triageResult.Assessments)
+		}
 	}
 
 	// Phase 2: Safety gates
@@ -152,7 +175,7 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	// refuses a split-brain/ambiguous result without --force. If wsrep_recover
 	// finds nothing recoverable, the candidate guard aborts (after a harmless fence
 	// of an already-down cluster) and the deferred rescue restores state.
-	bellyUp := triageResult.BestSeqnoNode == nil
+	bellyUp := triageResult.BestSeqnoNode == nil && declared == ""
 	if bellyUp && len(triageResult.Assessments) == 0 {
 		result.Decision = model.BootstrapDecision{Eligible: false, Reason: "no nodes found to recover"}
 		return result, fmt.Errorf("ABORT: No nodes found. Cannot bootstrap")
@@ -160,7 +183,18 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 
 	var candidatePod, candidateUUID string
 	var candidateSeqno int64
-	if !bellyUp {
+	if declared != "" {
+		candidatePod = declared
+		common.WarnLog("force=true — bootstrapping from operator-declared source %s", declared)
+		result.Decision = model.BootstrapDecision{
+			Eligible:      true,
+			Reason:        "operator-declared source (--force --instance)",
+			CandidatePod:  declared,
+			ForceRequired: true,
+			SafeToProceed: true,
+		}
+		output.Success("Bootstrap source (declared): %s", declared)
+	} else if !bellyUp {
 		candidate := triageResult.BestSeqnoNode
 		candidatePod, candidateSeqno, candidateUUID = candidate.Pod, candidate.EffectiveSeqno, candidate.UUID
 
@@ -249,11 +283,47 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 
 	// Phase 3: Execute
 	output.Section("Bootstrap Phase 3: Execute")
-	if err := b.executeBootstrap(ctx, candidatePod, bellyUp, triageResult.Assessments, result); err != nil {
+	if err := b.executeBootstrap(ctx, candidatePod, declared != "", bellyUp, triageResult.Assessments, result); err != nil {
 		return result, err
 	}
 
 	return result, nil
+}
+
+// declaredSourceGate admits a declared bootstrap source only under --force (naming the
+// authority is the human decision --force hands back) and only when it is a node
+// triage assessed.
+func declaredSourceGate(source string, force bool, assessments []model.InstanceAssessment) error {
+	if !force {
+		return fmt.Errorf("ABORT: --instance declares %s the bootstrap source, overriding HASteward's own "+
+			"choice; re-run with --force once that is your decision", source)
+	}
+	for _, a := range assessments {
+		if a.Pod == source {
+			return nil
+		}
+	}
+	return fmt.Errorf("ABORT: declared source %s is not an instance of this cluster", source)
+}
+
+// servingPods lists the instances that are running and ready.
+func servingPods(assessments []model.InstanceAssessment) []string {
+	var out []string
+	for _, a := range assessments {
+		if a.IsRunning && a.IsReady {
+			out = append(out, a.Pod)
+		}
+	}
+	return out
+}
+
+func containsPod(pods []string, pod string) bool {
+	for _, p := range pods {
+		if p == pod {
+			return true
+		}
+	}
+	return false
 }
 
 // podsFromAssessments lists the instances triage assessed, which is the recovery set for
@@ -282,7 +352,8 @@ func findDiagnosis(t *model.TriageResult, id string) *model.Diagnosis {
 // stuck recovery jobs, and wait for it to reform — WITHOUT scaling the cluster to zero.
 // The operator clears its own recovery status + unsets the force patch; we verify and
 // defensively unset. This is the light counterpart to the all-down offline flow.
-func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis, dryRun bool, result *model.BootstrapResult) (*model.BootstrapResult, error) {
+func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis, dryRun bool, result *model.BootstrapResult,
+	escrowSet []model.InstanceAssessment) (*model.BootstrapResult, error) {
 	cfg := b.p.Config()
 	target := d.Target
 	if target == "" {
@@ -313,6 +384,19 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 	}
 
 	output.Section("Bootstrap Phase 3: Execute (online)")
+
+	// A declared source re-seeds every other node by SST: escrow them all first, or refuse.
+	if len(escrowSet) > 0 {
+		nodes := podsFromAssessments(escrowSet)
+		set, err := escrow.DiscoverPVCs(ctx, cfg.Namespace, b.p, nodes)
+		if err != nil {
+			return result, fmt.Errorf("bootstrap REFUSED: %w", err)
+		}
+		if _, err := escrow.Gate(ctx, cfg, "bootstrap", set,
+			escrow.UsedBytesByPVC(&model.TriageResult{Assessments: escrowSet}, nodes)); err != nil {
+			return result, err
+		}
+	}
 
 	// 1. Atomic patch: resume + force the operator to bootstrap the synced authority.
 	common.InfoLog("Patching CR: forceClusterBootstrapInPod=%s (+ resume)", target)
@@ -361,7 +445,7 @@ func (b *galeraBootstrap) waitGaleraReady(ctx context.Context) error {
 	return fmt.Errorf("timeout: GaleraReady did not become True after force-bootstrap — check the operator and pods")
 }
 
-func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod string, bellyUp bool, assessments []model.InstanceAssessment, result *model.BootstrapResult) error {
+func (b *galeraBootstrap) executeBootstrap(ctx context.Context, candidatePod string, declared, bellyUp bool, assessments []model.InstanceAssessment, result *model.BootstrapResult) error {
 	cfg := b.p.Config()
 	ns := cfg.Namespace
 	c := k8s.GetClients()
@@ -524,12 +608,17 @@ echo "reverted safe_to_bootstrap to 0"`
 	markAction(model.PhaseWsrepRecover)
 
 	// Build lineage groups and select best candidate
-	candidatePod, err = b.selectCandidate(candidatePod, assessments, recoveredResults, result)
-	if err != nil {
-		rescue()
-		return err
+	if declared {
+		// The human named the source: recovers are reported, never used to override it.
+		result.Decision.LineageGroups = buildLineageGroups(recoveredResults)
+	} else {
+		candidatePod, err = b.selectCandidate(candidatePod, assessments, recoveredResults, result)
+		if err != nil {
+			rescue()
+			return err
+		}
 	}
-	if err := zeroLineageGate(candidatePod, zeroLineage, cfg.Force); err != nil {
+	if err := zeroLineageGate(candidatePod, zeroLineage, cfg.Force, declared); err != nil {
 		rescue()
 		return err
 	}
@@ -893,22 +982,28 @@ func (b *galeraBootstrap) selectCandidate(
 // zeroLineageGate refuses a bootstrap once a fenced recover found committed data on
 // the zero UUID. That data has no lineage to order it against the candidate's, so
 // SSTing those nodes from the candidate may discard their commits: refused unless
-// --force. A zero-lineage candidate is refused even under --force: the zero UUID
-// never establishes authority.
-func zeroLineageGate(candidatePod string, zeroLineage []string, force bool) error {
+// --force. HASteward never picks a zero-lineage candidate itself; only a source the
+// human declared (--force --instance) may be one.
+func zeroLineageGate(candidatePod string, zeroLineage []string, force, declared bool) error {
 	if len(zeroLineage) == 0 {
+		return nil
+	}
+	if declared && force {
+		common.WarnLog("force=true — declared source %s; zero-lineage nodes %s: the bootstrap gives the "+
+			"cluster a new lineage and the others are re-seeded from %s by SST",
+			candidatePod, strings.Join(zeroLineage, ", "), candidatePod)
 		return nil
 	}
 	if candidatePod == "" {
 		return fmt.Errorf("ABORT: no node recovered a position on a cluster lineage; %s hold committed data on the "+
-			"zero UUID, which can never be a bootstrap authority, with or without --force",
-			strings.Join(zeroLineage, ", "))
+			"zero UUID, so HASteward can't prove which is the authority. Declare the source with "+
+			"--force --instance <n> once you have chosen it", strings.Join(zeroLineage, ", "))
 	}
 	for _, p := range zeroLineage {
 		if p == candidatePod {
 			return fmt.Errorf("ABORT: bootstrap candidate %s holds committed data on the zero UUID (no cluster lineage); "+
-				"it can never be a bootstrap authority, with or without --force. Zero-lineage nodes: %s",
-				candidatePod, strings.Join(zeroLineage, ", "))
+				"HASteward can't prove it is the authority. Zero-lineage nodes: %s. Declare the source with "+
+				"--force --instance <n> once you have chosen it", candidatePod, strings.Join(zeroLineage, ", "))
 		}
 	}
 	if !force {

@@ -102,7 +102,7 @@ func TestExecuteBootstrap_RescueRevertsAuthorityMarkers(t *testing.T) {
 	assessments := []model.InstanceAssessment{
 		{Pod: "c-0", Instance: 0, UUID: uuid, EffectiveSeqno: 552481, SafeToBootstrap: "0"},
 	}
-	err := b.executeBootstrap(ctx, "c-0", true /*bellyUp*/, assessments, &model.BootstrapResult{})
+	err := b.executeBootstrap(ctx, "c-0", false /*declared*/, true /*bellyUp*/, assessments, &model.BootstrapResult{})
 
 	// The run must fail (STEP 8 scale-up was injected to fail).
 	if err == nil {

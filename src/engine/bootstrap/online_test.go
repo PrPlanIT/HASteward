@@ -67,7 +67,7 @@ func TestBootstrapOnline_ForceBootstrapsAndClears(t *testing.T) {
 		return false, nil, nil
 	})
 
-	res, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, false, &model.BootstrapResult{})
+	res, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, false, &model.BootstrapResult{}, nil)
 	if err != nil {
 		t.Fatalf("online bootstrap failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestBootstrapOnline_DryRunNoMutation(t *testing.T) {
 		return false, nil, nil
 	})
 
-	res, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, true, &model.BootstrapResult{})
+	res, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, true, &model.BootstrapResult{}, nil)
 	if err != nil {
 		t.Fatalf("dry-run should not error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBootstrapOnline_EmptyTargetRefuses(t *testing.T) {
 	})
 
 	_, err := b.bootstrapOnline(context.Background(),
-		model.Diagnosis{ID: "galera-operator-recovery-deadlock"}, false, &model.BootstrapResult{})
+		model.Diagnosis{ID: "galera-operator-recovery-deadlock"}, false, &model.BootstrapResult{}, nil)
 	if err == nil {
 		t.Fatal("must refuse when the diagnosis names no bootstrap source")
 	}
@@ -134,7 +134,7 @@ func TestBootstrapOnline_TimesOutIfNeverReady(t *testing.T) {
 	b, _, cleanup := onlineSetup(onlineCR("False")) // never becomes Ready
 	defer cleanup()
 
-	_, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, false, &model.BootstrapResult{})
+	_, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, false, &model.BootstrapResult{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "GaleraReady") {
 		t.Fatalf("must fail when the cluster never becomes GaleraReady, got: %v", err)
 	}

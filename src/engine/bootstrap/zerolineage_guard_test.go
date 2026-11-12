@@ -76,26 +76,60 @@ func TestSelectCandidate_ZeroUUIDNeverOverridesRealLineage(t *testing.T) {
 	}
 }
 
-// A fenced recover that finds committed data on the zero UUID blocks bootstrap: a
-// zero-lineage candidate always, even under --force; other zero-lineage nodes unless
-// --force accepts re-seeding them.
+// A fenced recover that finds committed data on the zero UUID blocks bootstrap unless
+// the human declared the source: HASteward never picks a zero-lineage candidate itself,
+// and re-seeding zero-lineage nodes from a real candidate needs --force.
 func TestZeroLineageGate(t *testing.T) {
 	zl := []string{"c-1", "c-2"}
 	for _, force := range []bool{false, true} {
-		if err := zeroLineageGate("c-1", zl, force); err == nil {
-			t.Errorf("force=%v: a zero-lineage candidate was allowed", force)
+		if err := zeroLineageGate("c-1", zl, force, false); err == nil {
+			t.Errorf("force=%v: HASteward picked a zero-lineage candidate itself", force)
 		}
-		if err := zeroLineageGate("", zl, force); err == nil {
-			t.Errorf("force=%v: an all-zero-lineage recover was allowed", force)
+		if err := zeroLineageGate("", zl, force, false); err == nil {
+			t.Errorf("force=%v: an all-zero-lineage recover was allowed with no declared source", force)
 		}
-		if err := zeroLineageGate("c-0", nil, force); err != nil {
+		if err := zeroLineageGate("c-0", nil, force, false); err != nil {
 			t.Errorf("force=%v: no zero-lineage nodes, yet refused: %v", force, err)
 		}
 	}
-	if err := zeroLineageGate("c-0", zl, false); err == nil {
+	if err := zeroLineageGate("c-0", zl, false, false); err == nil {
 		t.Error("zero-lineage nodes would be SST'd from c-0 without --force")
 	}
-	if err := zeroLineageGate("c-0", zl, true); err != nil {
+	if err := zeroLineageGate("c-0", zl, true, false); err != nil {
 		t.Errorf("--force accepts re-seeding zero-lineage nodes from a real candidate; got %v", err)
+	}
+	// The human's decision: a declared source under --force proceeds, even on the zero UUID.
+	if err := zeroLineageGate("c-1", zl, true, true); err != nil {
+		t.Errorf("declared zero-lineage source under --force was refused: %v", err)
+	}
+	if err := zeroLineageGate("c-1", zl, false, true); err == nil {
+		t.Error("a declared source without --force was allowed")
+	}
+}
+
+// Declaring the bootstrap source is the decision --force hands back: never without it,
+// and only for an instance of the cluster.
+func TestDeclaredSourceGate(t *testing.T) {
+	as := []model.InstanceAssessment{{Pod: "c-0"}, {Pod: "c-1"}, {Pod: "c-2"}}
+	if err := declaredSourceGate("c-1", false, as); err == nil {
+		t.Error("a declared source was accepted without --force")
+	}
+	if err := declaredSourceGate("c-1", true, as); err != nil {
+		t.Errorf("declared source c-1 under --force refused: %v", err)
+	}
+	if err := declaredSourceGate("c-9", true, as); err == nil {
+		t.Error("a declared source outside the cluster was accepted")
+	}
+}
+
+// A live declared bootstrap comes from a serving node; servingPods is that set.
+func TestServingPods(t *testing.T) {
+	got := servingPods([]model.InstanceAssessment{
+		{Pod: "c-0", IsRunning: true, IsReady: false},
+		{Pod: "c-1", IsRunning: true, IsReady: true},
+		{Pod: "c-2", IsRunning: true, IsReady: true},
+	})
+	if len(got) != 2 || !containsPod(got, "c-1") || !containsPod(got, "c-2") || containsPod(got, "c-0") {
+		t.Fatalf("servingPods = %v; want [c-1 c-2]", got)
 	}
 }
