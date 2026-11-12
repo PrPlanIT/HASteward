@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -23,7 +24,10 @@ import (
 // import cycle (bootstrap imports triage; both import provider).
 
 const (
-	// ZeroUUID is the all-zero cluster UUID a node reports when it never joined.
+	// ZeroUUID is the all-zero cluster UUID: no lineage. A node that never joined
+	// reports it, and so does a group that formed from a saved view with no node of
+	// complete state (pc.recovery), which then commits real data on it. It never
+	// establishes authority: zero groups can't be told apart from each other.
 	ZeroUUID = "00000000-0000-0000-0000-000000000000"
 	// MaxPhantomSeqno bounds a plausible seqno; anything larger is corrupt gcache.
 	MaxPhantomSeqno = int64(1e12)
@@ -238,6 +242,17 @@ func (p *GaleraProvider) QueryWsrep(ctx context.Context, pod string) (map[string
 	return out, nil
 }
 
+// ErrZeroLineage is a recover that found committed data (seqno >= 0) on the zero
+// UUID. Unlike a failed read it is evidence: the node holds data with no lineage, so
+// its position can't be ordered against any other node's.
+var ErrZeroLineage = errors.New("recovered committed data on the zero UUID — no cluster lineage")
+
+// IsLineageUUID reports whether u names a real cluster lineage: not empty,
+// "unknown", or ZeroUUID. Only a position on a lineage UUID can be authoritative.
+func IsLineageUUID(u string) bool {
+	return u != "" && u != "unknown" && u != ZeroUUID
+}
+
 // RunWsrepRecover runs `mariadbd --wsrep-recover` against a node's PVC via a
 // short-lived helper pod and returns the authoritative recovered position. The
 // caller MUST have fenced the cluster first (see WaitPodsTerminated).
@@ -363,6 +378,9 @@ func ParseWsrepRecoverOutput(output string) (WsrepRecoverResult, error) {
 	}
 
 	if result.UUID == ZeroUUID {
+		if result.Seqno >= 0 {
+			return result, fmt.Errorf("%w (seqno %d)", ErrZeroLineage, result.Seqno)
+		}
 		return result, fmt.Errorf("recovered zero UUID — node never joined cluster")
 	}
 	if result.Seqno < 0 || result.Seqno > MaxPhantomSeqno {

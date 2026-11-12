@@ -75,3 +75,27 @@ func TestSelectCandidate_ZeroUUIDNeverOverridesRealLineage(t *testing.T) {
 		}
 	}
 }
+
+// A fenced recover that finds committed data on the zero UUID blocks bootstrap: a
+// zero-lineage candidate always, even under --force; other zero-lineage nodes unless
+// --force accepts re-seeding them.
+func TestZeroLineageGate(t *testing.T) {
+	zl := []string{"c-1", "c-2"}
+	for _, force := range []bool{false, true} {
+		if err := zeroLineageGate("c-1", zl, force); err == nil {
+			t.Errorf("force=%v: a zero-lineage candidate was allowed", force)
+		}
+		if err := zeroLineageGate("", zl, force); err == nil {
+			t.Errorf("force=%v: an all-zero-lineage recover was allowed", force)
+		}
+		if err := zeroLineageGate("c-0", nil, force); err != nil {
+			t.Errorf("force=%v: no zero-lineage nodes, yet refused: %v", force, err)
+		}
+	}
+	if err := zeroLineageGate("c-0", zl, false); err == nil {
+		t.Error("zero-lineage nodes would be SST'd from c-0 without --force")
+	}
+	if err := zeroLineageGate("c-0", zl, true); err != nil {
+		t.Errorf("--force accepts re-seeding zero-lineage nodes from a real candidate; got %v", err)
+	}
+}

@@ -395,14 +395,9 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 	}
 
 	for _, gs := range data.grastateData {
-		ws := data.wsrepMap[gs.Pod]
-		wsCommitted := int64(-1)
-		if ws != nil {
-			wsCommitted = ws.LastCommitted
-		}
+		wsCommitted, grastateSeqno := lineagePositions(gs, data.wsrepMap[gs.Pod])
 		crRecSeqno := getRecoverySeqno(crRecovered, gs.Pod)
 		crStateSeqno := getRecoverySeqno(crState, gs.Pod)
-		grastateSeqno := parseInt64(gs.Seqno, -1)
 		logSeqno := int64(-1)
 		if v, ok := data.logRecovered[gs.Pod]; ok {
 			logSeqno = v
@@ -1060,9 +1055,25 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 
 // --- Helpers ---
 
+// lineagePositions returns a node's live wsrep_last_committed and grastate seqno, each
+// -1 unless it sits on a lineage UUID. A seqno on the zero UUID (a group formed with
+// no node of complete state) can't be ordered against any other, so it stays unread
+// and fails closed like any unread node.
+func lineagePositions(gs grastate, ws *wsrepStatus) (wsCommitted, grastateSeqno int64) {
+	wsCommitted, grastateSeqno = -1, -1
+	if ws != nil && provider.IsLineageUUID(ws.ClusterStateUUID) {
+		wsCommitted = ws.LastCommitted
+	}
+	if provider.IsLineageUUID(gs.UUID) {
+		grastateSeqno = parseInt64(gs.Seqno, -1)
+	}
+	return wsCommitted, grastateSeqno
+}
+
 // deriveEffectiveSeqno picks a node's effective seqno from its candidate sources
 // and marks whether it is authoritative (Known). Only a fresh --wsrep-recover, a
-// live wsrep_last_committed, or a CLEAN grastate (>0) may establish Known and
+// live wsrep_last_committed, or a CLEAN grastate (>0) — each on a lineage UUID, which
+// the caller enforces by passing -1 otherwise — may establish Known and
 // drive the authority/bootstrap decision. The operator's galeraRecovery snapshot
 // (cr_recovered/cr_state) and the GCache log figure are HINTS only — display,
 // never authoritative — because the operator's numbers are stale/unreliable

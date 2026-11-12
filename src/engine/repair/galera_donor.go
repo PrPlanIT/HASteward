@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PrPlanIT/HASteward/src/common"
+	"github.com/PrPlanIT/HASteward/src/engine/provider"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 	"github.com/PrPlanIT/HASteward/src/output"
 	"github.com/PrPlanIT/HASteward/src/output/model"
@@ -33,6 +34,7 @@ type DonorProbeResult struct {
 	WsrepConnected *bool    `json:"wsrepConnected,omitempty"`
 	StateComment   string   `json:"stateComment,omitempty"`
 	ClusterSize    int      `json:"clusterSize,omitempty"`
+	ClusterUUID    string   `json:"clusterUUID,omitempty"`
 	Warnings       []string `json:"warnings,omitempty"`
 }
 
@@ -85,6 +87,9 @@ func (g *galeraRepair) resolveExplicitDonor(ctx context.Context, ordinal int, re
 		return nil, fmt.Errorf("ABORT: Donor %s is not Galera-suitable "+
 			"(ready=%v connected=%v state=%s)", donorPod, probe.WsrepReady, probe.WsrepConnected, probe.StateComment)
 	}
+	if err := donorLineageError(donorPod, probe); err != nil {
+		return nil, err
+	}
 
 	common.InfoLog("Using operator-declared donor %s: wsrep_ready=ON, state=Synced — valid donor.", donorPod)
 
@@ -136,6 +141,9 @@ func (g *galeraRepair) resolveAutoDonor(ctx context.Context, result *model.Triag
 	// Unambiguous: probe the first candidate via wsrep to confirm suitability
 	donor := candidates[0]
 	probe := g.probeWsrep(ctx, donor.Pod)
+	if err := donorLineageError(donor.Pod, probe); err != nil {
+		return nil, err
+	}
 
 	if cfg.Force {
 		common.WarnLog("Auto-selected donor %s based on unambiguous healthy state (--force active).", donor.Pod)
@@ -149,6 +157,18 @@ func (g *galeraRepair) resolveAutoDonor(ctx context.Context, result *model.Triag
 		Mode:    "auto",
 		Probe:   probe,
 	}, nil
+}
+
+// donorLineageError refuses a donor that is on no cluster lineage (zero, empty or
+// "unknown" cluster_state_uuid), with or without --force. An SST from it carries no
+// uuid:seqno the joiner can parse, so the joiner's datadir is wiped and it never joins.
+func donorLineageError(pod string, probe DonorProbeResult) error {
+	if provider.IsLineageUUID(probe.ClusterUUID) {
+		return nil
+	}
+	return fmt.Errorf("ABORT: Donor %s is on no cluster lineage (cluster_state_uuid=%q). An SST from it "+
+		"carries no position: the joiner's data would be wiped and it would fail to join. "+
+		"The cluster needs a new lineage before any node can be healed", pod, probe.ClusterUUID)
 }
 
 // probeWsrep executes a wsrep status query directly on a donor pod.
@@ -216,6 +236,7 @@ func (g *galeraRepair) probeWsrep(ctx context.Context, podName string) DonorProb
 	if v, ok := m["wsrep_cluster_size"]; ok {
 		result.ClusterSize, _ = strconv.Atoi(v)
 	}
+	result.ClusterUUID = m["wsrep_cluster_state_uuid"]
 
 	// Hard validation: if exec succeeded with data but no state was parsed,
 	// the parser failed. This is deterministic, not retryable.

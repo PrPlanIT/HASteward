@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -503,8 +504,12 @@ echo "reverted safe_to_bootstrap to 0"`
 	// STEP 4: Run wsrep_recover on all PVCs
 	common.InfoLog("STEP 4: Running wsrep_recover on all PVCs")
 	recoveredResults := make(map[string]wsrepRecoverResult)
+	var zeroLineage []string
 	for _, a := range assessments {
 		rr, rerr := b.p.RunWsrepRecover(ctx, a.Pod, sa)
+		if errors.Is(rerr, provider.ErrZeroLineage) {
+			zeroLineage = append(zeroLineage, a.Pod)
+		}
 		if rerr != nil {
 			// Skip a failed recover — never fabricate a hint-backed fallback. An
 			// invalid entry can't nominate authority (isAuthoritativeRecover), but a
@@ -521,6 +526,10 @@ echo "reverted safe_to_bootstrap to 0"`
 	// Build lineage groups and select best candidate
 	candidatePod, err = b.selectCandidate(candidatePod, assessments, recoveredResults, result)
 	if err != nil {
+		rescue()
+		return err
+	}
+	if err := zeroLineageGate(candidatePod, zeroLineage, cfg.Force); err != nil {
 		rescue()
 		return err
 	}
@@ -879,6 +888,37 @@ func (b *galeraBootstrap) selectCandidate(
 	}
 
 	return candidatePod, nil
+}
+
+// zeroLineageGate refuses a bootstrap once a fenced recover found committed data on
+// the zero UUID. That data has no lineage to order it against the candidate's, so
+// SSTing those nodes from the candidate may discard their commits: refused unless
+// --force. A zero-lineage candidate is refused even under --force: the zero UUID
+// never establishes authority.
+func zeroLineageGate(candidatePod string, zeroLineage []string, force bool) error {
+	if len(zeroLineage) == 0 {
+		return nil
+	}
+	if candidatePod == "" {
+		return fmt.Errorf("ABORT: no node recovered a position on a cluster lineage; %s hold committed data on the "+
+			"zero UUID, which can never be a bootstrap authority, with or without --force",
+			strings.Join(zeroLineage, ", "))
+	}
+	for _, p := range zeroLineage {
+		if p == candidatePod {
+			return fmt.Errorf("ABORT: bootstrap candidate %s holds committed data on the zero UUID (no cluster lineage); "+
+				"it can never be a bootstrap authority, with or without --force. Zero-lineage nodes: %s",
+				candidatePod, strings.Join(zeroLineage, ", "))
+		}
+	}
+	if !force {
+		return fmt.Errorf("ABORT: %s hold committed data on the zero UUID (no cluster lineage), which can't be ordered "+
+			"against candidate %s; bootstrapping %s would SST them and may discard those commits. "+
+			"Re-run with --force once that loss is accepted", strings.Join(zeroLineage, ", "), candidatePod, candidatePod)
+	}
+	common.WarnLog("force=true — bootstrapping %s; zero-lineage nodes %s will be re-seeded by SST",
+		candidatePod, strings.Join(zeroLineage, ", "))
+	return nil
 }
 
 // isAuthoritativeRecover reports whether a wsrep_recover result may drive cluster
