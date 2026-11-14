@@ -66,8 +66,9 @@ func (b *galeraBootstrap) Name() string { return "galera" }
 //  3. Identify best bootstrap candidate (highest effective seqno)
 //  4. If dryRun: return decision + planned actions without mutation
 //  5. Execute: suspend CR -> gen lock -> scale to 0 -> wsrep_recover -> clear stale safe_to_bootstrap ->
-//     set safe_to_bootstrap=1 on candidate PVC -> patch CR -> scale up -> wait ready ->
-//     cleanup (JSON Patch remove + lock remove) -> resume -> re-triage
+//     set safe_to_bootstrap=1 on candidate PVC -> patch CR -> scale up -> clear recovery status +
+//     resume (the operator bootstraps the candidate) -> wait ready -> cleanup (JSON Patch remove +
+//     lock remove) -> re-triage
 //  6. Return typed BootstrapResult
 func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.BootstrapResult, error) {
 	cfg := b.p.Config()
@@ -278,9 +279,9 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 		{Phase: model.PhaseBootstrapMark, Description: fmt.Sprintf("Set safe_to_bootstrap=1 on %s PVC", markDesc)},
 		{Phase: model.PhaseClusterPatch, Description: patchDesc, Resource: &crRef},
 		{Phase: model.PhaseScaleUp, Description: fmt.Sprintf("Scale StatefulSet to %d", b.p.Replicas()), Resource: &stsRef},
-		{Phase: model.PhaseWaitReady, Description: "Wait for all pods Ready"},
+		{Phase: model.PhaseResume, Description: "Clear the operator's recovery status and resume the CR; the operator bootstraps the source", Resource: &crRef},
+		{Phase: model.PhaseWaitReady, Description: "Wait for all pods Ready and GaleraReady=True"},
 		{Phase: model.PhaseCleanup, Description: "Remove forceClusterBootstrapInPod, recovery status, and generation lock", Resource: &crRef},
-		{Phase: model.PhaseResume, Description: "Resume MariaDB CR", Resource: &crRef},
 		{Phase: model.PhaseVerify, Description: "Re-triage to verify cluster health"},
 	}
 
@@ -804,13 +805,28 @@ echo "=== Done ==="
 	markAction(model.PhaseScaleUp)
 	committed = true // point of no return — the operator will now bootstrap the candidate
 
-	// STEP 9: Wait for all pods ready (soft timeout: 15 minutes)
-	common.InfoLog("STEP 9: Waiting for all pods to become ready")
+	// STEP 9: Hand the bootstrap to the operator: only it starts the source with
+	// wsrep_new_cluster, and only while reconciling. A stale recovery snapshot that
+	// already reads bootstrapping/restarted makes it skip the forced bootstrap, so clear
+	// it first.
+	common.InfoLog("STEP 9: Resuming MariaDB CR — the operator bootstraps %s", candidatePod)
+	b.clearRecoveryStatus(ctx)
+	if err := b.p.ResumeCR(ctx); err != nil {
+		common.WarnLog("Failed to resume CR: %v — the operator cannot bootstrap %s until it is resumed", err, candidatePod)
+	}
+	suspended = false
+	markAction(model.PhaseResume)
+
+	// STEP 10: Wait for all pods ready (soft timeout: 15 minutes) and the operator's GaleraReady
+	common.InfoLog("STEP 10: Waiting for all pods to become ready")
 	b.waitForAllReady(ctx)
+	if err := b.waitGaleraReady(ctx); err != nil {
+		common.WarnLog("%v — continuing to cleanup and verify", err)
+	}
 	markAction(model.PhaseWaitReady)
 
-	// STEP 10: Cleanup — remove forceClusterBootstrapInPod via JSON Patch + remove generation lock
-	common.InfoLog("STEP 10: Cleaning up forceClusterBootstrapInPod")
+	// STEP 11: Cleanup — remove forceClusterBootstrapInPod via JSON Patch + remove generation lock
+	common.InfoLog("STEP 11: Cleaning up forceClusterBootstrapInPod")
 	clearPatch := `[{"op":"remove","path":"/spec/galera/recovery/forceClusterBootstrapInPod"}]`
 	for attempt := 1; attempt <= 5; attempt++ {
 		_, err = c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(ns).Patch(
@@ -839,8 +855,6 @@ echo "=== Done ==="
 		common.WarnLog("Failed to clear forceClusterBootstrapInPod after retries: %v\nManual cleanup may be required.", err)
 	}
 
-	// Clear stale operator recovery status — prevents operator from
-	// re-entering bootstrap mode when CR is resumed
 	b.clearRecoveryStatus(ctx)
 
 	// Remove generation lock
@@ -849,14 +863,6 @@ echo "=== Done ==="
 		ctx, cfg.ClusterName, types.MergePatchType, []byte(lockClearPatch), metav1.PatchOptions{})
 	genLocked = false
 	markAction(model.PhaseCleanup)
-
-	// STEP 11: Resume CR
-	common.InfoLog("STEP 11: Resuming MariaDB CR")
-	if err := b.p.ResumeCR(ctx); err != nil {
-		common.WarnLog("Failed to resume CR: %v — manual resume may be required", err)
-	}
-	suspended = false
-	markAction(model.PhaseResume)
 
 	// STEP 12: Re-triage
 	output.Section("Bootstrap Phase 4: Verify")
