@@ -151,11 +151,34 @@ func TestBootstrapOnline_EmptyTargetRefuses(t *testing.T) {
 // TestBootstrapOnline_TimesOutIfNeverReady: if the operator never reaches GaleraReady, the
 // remedy reports failure rather than claiming success.
 func TestBootstrapOnline_TimesOutIfNeverReady(t *testing.T) {
-	b, _, cleanup := onlineSetup(onlineCR("False")) // never becomes Ready
+	b, dyn, cleanup := onlineSetup(onlineCR("False")) // never becomes Ready
 	defer cleanup()
+
+	var forceCleared bool
+	dyn.PrependReactor("patch", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		body := string(a.(clienttesting.PatchAction).GetPatch())
+		if strings.Contains(body, "remove") && strings.Contains(body, "forceClusterBootstrapInPod") {
+			forceCleared = true
+		}
+		return false, nil, nil
+	})
 
 	_, err := b.bootstrapOnline(context.Background(), deadlockDiagnosis, false, &model.BootstrapResult{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "GaleraReady") {
 		t.Fatalf("must fail when the cluster never becomes GaleraReady, got: %v", err)
+	}
+	if !forceCleared {
+		t.Fatal("a failed online bootstrap must clear forceClusterBootstrapInPod, or the operator retries it forever")
+	}
+}
+
+// A declared source takes the online remedy only when triage proved the live group's
+// authority; a live group it can't prove (e.g. on the zero UUID) can't take joiners.
+func TestOnlineDeclaredOK(t *testing.T) {
+	if onlineDeclaredOK(&model.TriageResult{DataComparison: model.DataComparison{SafeToHeal: false}}) {
+		t.Fatal("an unprovable live group was sent down the online path")
+	}
+	if !onlineDeclaredOK(&model.TriageResult{DataComparison: model.DataComparison{SafeToHeal: true}}) {
+		t.Fatal("control: a provable live group should take the online path")
 	}
 }

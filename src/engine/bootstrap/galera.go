@@ -122,8 +122,14 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 
 	// Declared source (--force --instance N): the human names the node to bootstrap from,
 	// the decision HASteward withholds when it can't prove authority itself (a zero-UUID
-	// lineage, a split-brain). A live cluster takes the online remedy, a down one the
-	// fenced bootstrap; either way every node is escrowed before anything changes.
+	// lineage, a split-brain). Either way every node is escrowed before anything changes.
+	//   - Live, with provable authority: the online remedy. The operator skips a pod that
+	//     is already synced and restarts the rest, which rejoin the live group.
+	//   - Otherwise: the fenced bootstrap, live or down. A live group whose authority
+	//     isn't provable (e.g. on the zero UUID) can't take joiners, and the operator
+	//     won't re-found a synced pod, so the source must be restarted as the founder.
+	//     Seen on osticket: online force-bootstrap left pod 1 "already synced", and pod 0
+	//     failed to join the zero-UUID group every round.
 	declared := ""
 	if cfg.InstanceNumber != nil {
 		declared = fmt.Sprintf("%s-%d", cfg.ClusterName, *cfg.InstanceNumber)
@@ -131,7 +137,7 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 			result.Decision = model.BootstrapDecision{Eligible: false, Reason: err.Error()}
 			return result, err
 		}
-		if serving := servingPods(triageResult.Assessments); len(serving) > 0 {
+		if serving := servingPods(triageResult.Assessments); len(serving) > 0 && onlineDeclaredOK(triageResult) {
 			if !containsPod(serving, declared) {
 				err := fmt.Errorf("ABORT: declared source %s is not serving while %v are; a live bootstrap "+
 					"must come from a serving node", declared, serving)
@@ -146,8 +152,9 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	// Phase 2: Safety gates
 	output.Section("Bootstrap Phase 2: Safety Gates")
 
-	// Gate 1: Must have all nodes down
-	if !triageResult.AllNodesDown {
+	// Gate 1: Must have all nodes down — unless the human declared the source, whose
+	// fenced bootstrap takes the live nodes down itself.
+	if !triageResult.AllNodesDown && declared == "" {
 		healthyCount := 0
 		for _, a := range triageResult.Assessments {
 			if a.IsRunning && a.IsReady {
@@ -306,6 +313,12 @@ func declaredSourceGate(source string, force bool, assessments []model.InstanceA
 	return fmt.Errorf("ABORT: declared source %s is not an instance of this cluster", source)
 }
 
+// onlineDeclaredOK reports whether a declared source may take the online remedy: only
+// when triage proved the live group's authority, so the other nodes can rejoin it.
+func onlineDeclaredOK(t *model.TriageResult) bool {
+	return t.DataComparison.SafeToHeal
+}
+
 // servingPods lists the instances that are running and ready.
 func servingPods(assessments []model.InstanceAssessment) []string {
 	var out []string
@@ -418,6 +431,10 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 	// 3. Wait for the operator to reform the cluster from the source.
 	common.InfoLog("Waiting for the operator to reform the cluster (GaleraReady=True)...")
 	if err := b.waitGaleraReady(ctx); err != nil {
+		// Leaving the force set makes the operator retry the failed bootstrap forever.
+		if cerr := b.p.ClearForceBootstrap(ctx); cerr != nil {
+			common.WarnLog("could not clear forceClusterBootstrapInPod after the failed bootstrap: %v — clear it by hand", cerr)
+		}
 		return result, err
 	}
 
