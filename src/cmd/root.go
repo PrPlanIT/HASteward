@@ -85,6 +85,8 @@ func init() {
 		"When triage recommends expanding a genuinely data-full PVC, size the suggestion so\n"+
 			"post-expansion data lands at ~this percent of the volume (leaving headroom for\n"+
 			"WAL/temp/growth). Set HASTEWARD_EXPAND_TARGET_PCT once to avoid repeating the flag.")
+	env.String(pf, &k8s.HelperImage, "helper-image", "", "HELPER_IMAGE", k8s.DefaultHelperImage,
+		"Image the short-lived helper pods run (probe, heal, escrow, wsrep_recover)")
 	env.Raw(pf, &Cfg.Kubeconfig, "kubeconfig", "", "KUBECONFIG", "", "Path to kubeconfig file")
 	env.Bool(pf, &Cfg.Verbose, "verbose", "v", "VERBOSE", false, "Verbose output (debug logging)")
 	// Bound through env like every other flag. It was the lone pf.BoolVar, so
