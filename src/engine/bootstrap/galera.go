@@ -268,6 +268,8 @@ func (b *galeraBootstrap) Bootstrap(ctx context.Context, dryRun bool) (*model.Bo
 	}
 
 	result.ActionsPlanned = []model.BootstrapAction{
+		{Phase: model.PhaseEscrow, Description: "Escrow every node's datadir (" +
+			strings.Join(podsFromAssessments(triageResult.Assessments), ", ") + ") and prove it restorable, or refuse"},
 		{Phase: model.PhaseSuspend, Description: "Suspend MariaDB CR", Resource: &crRef},
 		{Phase: model.PhaseGenLock, Description: "Set generation lock annotation", Resource: &crRef},
 		{Phase: model.PhaseScaleDown, Description: "Scale StatefulSet to 0", Resource: &stsRef},
