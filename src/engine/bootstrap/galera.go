@@ -365,8 +365,8 @@ func findDiagnosis(t *model.TriageResult, id string) *model.Diagnosis {
 // bootstrapOnline resolves a galera-operator-recovery-deadlock on a LIVE, data-healthy
 // cluster: force the operator to bootstrap the (already-synced) authority, delete the
 // stuck recovery jobs, and wait for it to reform — WITHOUT scaling the cluster to zero.
-// The operator clears its own recovery status + unsets the force patch; we verify and
-// defensively unset. This is the light counterpart to the all-down offline flow.
+// It then unsets the force patch and the operator's recovery snapshot. This is the light
+// counterpart to the all-down offline flow.
 func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis, dryRun bool, result *model.BootstrapResult,
 	escrowSet []model.InstanceAssessment) (*model.BootstrapResult, error) {
 	cfg := b.p.Config()
@@ -394,7 +394,7 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 		{Phase: model.PhaseClusterPatch, Description: "Resume CR + patch forceClusterBootstrapInPod=" + target + " (live, no scale-to-0)", Resource: &crRef},
 		{Phase: model.PhaseCleanup, Description: "Delete stuck operator recovery jobs"},
 		{Phase: model.PhaseWaitReady, Description: "Wait for GaleraReady=True (operator reforms from " + target + ")"},
-		{Phase: model.PhaseVerify, Description: "Unset forceClusterBootstrapInPod if the operator left it"},
+		{Phase: model.PhaseVerify, Description: "Unset forceClusterBootstrapInPod if the operator left it, and clear status.galeraRecovery"},
 	}...)
 
 	output.Section("Bootstrap: online recovery-deadlock remedy")
@@ -440,15 +440,39 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 		return result, err
 	}
 
-	// 4. The operator normally clears its own recovery status + force patch; defensively
-	//    unset so a stale force can't re-bootstrap on the next restart.
+	// 4. The operator leaves its recovery snapshot and may leave the force patch after a
+	//    successful bootstrap; unset both so a stale force can't re-bootstrap on restart.
 	if err := b.p.ClearForceBootstrap(ctx); err != nil {
 		common.WarnLog("could not clear forceClusterBootstrapInPod (operator may have already): %v", err)
 	}
+	b.clearRecoveryStatus(ctx)
 
 	output.Success("Operator recovery deadlock resolved — cluster is GaleraReady (bootstrapped from %s)", target)
 	result.Decision.Reason = "resolved: operator recovery deadlock cleared via forceClusterBootstrapInPod=" + target
 	return result, nil
+}
+
+// clearRecoveryStatus removes the operator's status.galeraRecovery snapshot once the
+// cluster is up, and warns if it is still present.
+func (b *galeraBootstrap) clearRecoveryStatus(ctx context.Context) {
+	cfg := b.p.Config()
+	c := k8s.GetClients()
+	common.InfoLog("Clearing operator recovery status (status.galeraRecovery)")
+	recoveryClearPatch := `{"status":{"galeraRecovery":null}}`
+	for attempt := 1; attempt <= 5; attempt++ {
+		_, serr := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).
+			Patch(ctx, cfg.ClusterName, types.MergePatchType,
+				[]byte(recoveryClearPatch), metav1.PatchOptions{}, "status")
+		if serr == nil {
+			break
+		}
+		common.WarnLog("status.galeraRecovery clear attempt %d failed: %v", attempt, serr)
+		common.Sleep(2 * time.Second)
+	}
+	statusObj, verr := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if verr == nil && k8s.HasNestedField(statusObj, "status", "galeraRecovery") {
+		common.WarnLog("status.galeraRecovery still present after clear — operator may re-populate it")
+	}
 }
 
 // waitGaleraReady polls the MariaDB CR until its GaleraReady condition is True (the
@@ -805,23 +829,7 @@ echo "=== Done ==="
 
 	// Clear stale operator recovery status — prevents operator from
 	// re-entering bootstrap mode when CR is resumed
-	common.InfoLog("Clearing operator recovery status (status.galeraRecovery)")
-	recoveryClearPatch := `{"status":{"galeraRecovery":null}}`
-	for attempt := 1; attempt <= 5; attempt++ {
-		_, serr := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(ns).
-			Patch(ctx, cfg.ClusterName, types.MergePatchType,
-				[]byte(recoveryClearPatch), metav1.PatchOptions{}, "status")
-		if serr == nil {
-			break
-		}
-		common.WarnLog("status.galeraRecovery clear attempt %d failed: %v", attempt, serr)
-		common.Sleep(2 * time.Second)
-	}
-	// Verify the field is actually gone
-	statusObj, verr := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(ns).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
-	if verr == nil && k8s.HasNestedField(statusObj, "status", "galeraRecovery") {
-		common.WarnLog("status.galeraRecovery still present after clear — operator may re-populate it")
-	}
+	b.clearRecoveryStatus(ctx)
 
 	// Remove generation lock
 	lockClearPatch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, bootstrapLockAn)

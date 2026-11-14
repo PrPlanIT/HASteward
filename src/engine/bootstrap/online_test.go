@@ -50,15 +50,17 @@ var deadlockDiagnosis = model.Diagnosis{ID: "galera-operator-recovery-deadlock",
 
 // TestBootstrapOnline_ForceBootstrapsAndClears drives the execute path: it must patch
 // forceClusterBootstrapInPod on the LIVE cluster, wait for GaleraReady, and defensively
-// clear the force patch afterward.
+// clear the force patch and the operator's recovery snapshot afterward.
 func TestBootstrapOnline_ForceBootstrapsAndClears(t *testing.T) {
 	b, dyn, cleanup := onlineSetup(onlineCR("True"))
 	defer cleanup()
 
-	var forcePatched, forceCleared, scaled bool
+	var forcePatched, forceCleared, recoveryCleared, scaled bool
 	dyn.PrependReactor("patch", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		body := string(a.(clienttesting.PatchAction).GetPatch())
 		switch {
+		case a.GetSubresource() == "status" && strings.Contains(body, `"galeraRecovery":null`):
+			recoveryCleared = true
 		case strings.Contains(body, "forceClusterBootstrapInPod") && strings.Contains(body, "c-0"):
 			forcePatched = true
 		case strings.Contains(body, "remove") && strings.Contains(body, "forceClusterBootstrapInPod"):
@@ -76,6 +78,9 @@ func TestBootstrapOnline_ForceBootstrapsAndClears(t *testing.T) {
 	}
 	if !forceCleared {
 		t.Fatal("must defensively clear forceClusterBootstrapInPod after GaleraReady")
+	}
+	if !recoveryCleared {
+		t.Fatal("must clear status.galeraRecovery after GaleraReady")
 	}
 	if scaled {
 		t.Fatal("online path must NOT scale the live cluster")
