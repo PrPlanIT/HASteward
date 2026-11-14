@@ -65,10 +65,32 @@ func (p *GaleraProvider) SuspendCR(ctx context.Context) error {
 	return err
 }
 
+// WaitResumeObserved returns once the operator has reconciled the CR since its last
+// resume. A resumed CR whose Ready reason still reads Suspended has not been, and a
+// suspend made now would be acknowledged by that stale reason. Call before SuspendCR.
+func (p *GaleraProvider) WaitResumeObserved(ctx context.Context, timeoutSec int) error {
+	return p.pollCR(ctx, timeoutSec, func(suspended bool, reason string) bool {
+		return suspended || reason != "Suspended"
+	}, "mariadb-operator has not reconciled the CR since its last resume (Ready reason still Suspended)")
+}
+
 // WaitSuspendAcknowledged polls until the operator reports Ready reason Suspended. It
 // reconciles a CR one pass at a time, so once it reports the suspend no pass started
-// before it is still running to scale the StatefulSet back up.
+// before it is still running to scale the StatefulSet back up. Only a fresh report
+// counts, which WaitResumeObserved before the suspend guarantees.
 func (p *GaleraProvider) WaitSuspendAcknowledged(ctx context.Context, timeoutSec int) error {
+	if err := p.pollCR(ctx, timeoutSec, func(suspended bool, reason string) bool {
+		return suspended && reason == "Suspended"
+	}, "mariadb-operator did not acknowledge the suspend (Ready reason Suspended) — "+
+		"a reconcile already in flight could still scale the StatefulSet; refusing to fence"); err != nil {
+		return err
+	}
+	common.InfoLog("mariadb-operator acknowledged the suspend")
+	return nil
+}
+
+// pollCR polls the CR's spec.suspend and Ready reason until done reports true.
+func (p *GaleraProvider) pollCR(ctx context.Context, timeoutSec int, done func(suspended bool, reason string) bool, failure string) error {
 	c := k8s.GetClients()
 	cfg := p.Config()
 	if timeoutSec <= 0 {
@@ -76,18 +98,18 @@ func (p *GaleraProvider) WaitSuspendAcknowledged(ctx context.Context, timeoutSec
 	}
 	for i := 0; i <= timeoutSec/5; i++ {
 		obj, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
-		if err == nil && k8s.GetNestedBool(obj, "spec", "suspend") {
+		if err == nil {
+			reason := ""
 			if cond := k8s.FindCondition(k8s.GetNestedMap(obj, "status"), "Ready"); cond != nil {
-				if reason, _ := cond["reason"].(string); reason == "Suspended" {
-					common.InfoLog("mariadb-operator acknowledged the suspend")
-					return nil
-				}
+				reason, _ = cond["reason"].(string)
+			}
+			if done(k8s.GetNestedBool(obj, "spec", "suspend"), reason) {
+				return nil
 			}
 		}
 		common.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("mariadb-operator did not acknowledge the suspend (Ready reason Suspended) within %ds — "+
-		"a reconcile already in flight could still scale the StatefulSet; refusing to fence", timeoutSec)
+	return fmt.Errorf("%s within %ds", failure, timeoutSec)
 }
 
 // ResumeCR patches the MariaDB CR to spec.suspend=false.

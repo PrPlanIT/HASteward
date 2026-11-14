@@ -594,6 +594,9 @@ echo "reverted safe_to_bootstrap to 0"`
 	copy(result.ActionsTaken, result.ActionsPlanned)
 
 	// STEP 1: Suspend CR
+	if err := b.p.WaitResumeObserved(ctx, cfg.DeleteTimeout); err != nil {
+		return err
+	}
 	common.InfoLog("STEP 1: Suspending MariaDB CR")
 	if err := b.p.SuspendCR(ctx); err != nil {
 		return fmt.Errorf("failed to suspend CR: %w", err)

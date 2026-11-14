@@ -40,16 +40,13 @@ func TestExecuteBootstrap_RescueRevertsAuthorityMarkers(t *testing.T) {
 		"kind":       "MariaDB",
 		"metadata":   map[string]interface{}{"name": "c", "namespace": "ns"},
 		"spec":       map[string]interface{}{"suspend": false, "replicas": int64(3), "image": "mariadb:11"},
-		// The operator's acknowledgement of the suspend, which the fence waits for.
-		"status": map[string]interface{}{"conditions": []interface{}{
-			map[string]interface{}{"type": "Ready", "status": "False", "reason": "Suspended"},
-		}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{k8s.MariaDBGVR: "MariaDBList"},
 		cr,
 	)
+	operatorAcksSuspend(dyn)
 
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}}
 	cs := fake.NewSimpleClientset(sts)
@@ -139,4 +136,32 @@ func TestExecuteBootstrap_RescueRevertsAuthorityMarkers(t *testing.T) {
 	if k8s.GetNestedBool(got, "spec", "suspend") {
 		t.Fatal("CR left suspended after a failed bootstrap — rescue must resume it")
 	}
+}
+
+// operatorAcksSuspend stands in for mariadb-operator: a patch that suspends or resumes the
+// CR flips its Ready reason the way the operator's next reconcile does.
+func operatorAcksSuspend(dyn *dynamicfake.FakeDynamicClient) {
+	dyn.PrependReactor("patch", "mariadbs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		pa := a.(clienttesting.PatchAction)
+		body := string(pa.GetPatch())
+		reason := ""
+		switch {
+		case strings.Contains(body, `"suspend":true`):
+			reason = "Suspended"
+		case strings.Contains(body, `"suspend":false`):
+			reason = "Failed"
+		default:
+			return false, nil, nil
+		}
+		obj, err := dyn.Tracker().Get(k8s.MariaDBGVR, pa.GetNamespace(), pa.GetName())
+		if err != nil {
+			return false, nil, nil
+		}
+		u := obj.(*unstructured.Unstructured).DeepCopy()
+		_ = unstructured.SetNestedSlice(u.Object, []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "False", "reason": reason},
+		}, "status", "conditions")
+		_ = dyn.Tracker().Update(k8s.MariaDBGVR, u, pa.GetNamespace())
+		return false, nil, nil
+	})
 }

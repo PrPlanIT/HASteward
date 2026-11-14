@@ -86,6 +86,9 @@ func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResul
 
 	// Suspend CR before donor probe — operator recovery pods can interfere
 	// with wsrep queries on the donor. Suspend stops operator reconciliation.
+	if err := g.p.WaitResumeObserved(ctx, g.p.Config().DeleteTimeout); err != nil {
+		return err
+	}
 	common.InfoLog("Suspending CR before donor probe (prevents operator interference)")
 	if err := g.p.SuspendCR(ctx); err != nil {
 		return fmt.Errorf("failed to suspend CR for donor probe: %w", err)
@@ -414,6 +417,9 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		common.InfoLog("STEP 1: CR already suspended (from SafetyGate)")
 		suspended = true
 	} else {
+		if err := g.p.WaitResumeObserved(ctx, cfg.DeleteTimeout); err != nil {
+			return err
+		}
 		common.InfoLog("STEP 1: Suspending MariaDB CR")
 		if err := g.p.SuspendCR(ctx); err != nil {
 			return fmt.Errorf("failed to suspend CR: %w", err)

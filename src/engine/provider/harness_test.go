@@ -205,3 +205,28 @@ func TestWaitSuspendAcknowledged(t *testing.T) {
 		})
 	}
 }
+
+// TestWaitResumeObserved: a resumed CR still reading Ready reason Suspended has not been
+// reconciled since the resume, so a suspend now would be "acknowledged" by the stale reason.
+func TestWaitResumeObserved(t *testing.T) {
+	cases := []struct {
+		name string
+		cr   *unstructured.Unstructured
+		ok   bool
+	}{
+		{"resume not yet reconciled", readyCR(false, "Suspended"), false},
+		{"resume reconciled", readyCR(false, "Failed"), true},
+		{"already suspended", readyCR(true, "Suspended"), true},
+		{"no Ready condition", mariadbCR(false), true},
+	}
+	defer common.DisableSleepForTest()()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer k8s.SetClientsForTest(&k8s.Clients{Dynamic: fakeDynamic(tc.cr)})()
+			err := testProvider().WaitResumeObserved(context.Background(), 5)
+			if (err == nil) != tc.ok {
+				t.Fatalf("WaitResumeObserved: got err=%v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}

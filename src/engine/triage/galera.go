@@ -1198,6 +1198,10 @@ func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) 
 	common.WarnLog("Belly-up cluster, nothing serving — escalating to a fenced wsrep_recover to read authoritative positions (triage evaluation only; the cluster is restored and no authority is declared).")
 	output.Section("Belly-up Escalation (fenced wsrep_recover)")
 
+	if err := t.p.WaitResumeObserved(ctx, cfg.DeleteTimeout); err != nil {
+		common.WarnLog("deep-recover: %v — skipping escalation", err)
+		return
+	}
 	common.InfoLog("Suspending MariaDB CR")
 	if err := t.p.SuspendCR(ctx); err != nil {
 		common.WarnLog("deep-recover: suspend CR failed: %v — skipping escalation", err)

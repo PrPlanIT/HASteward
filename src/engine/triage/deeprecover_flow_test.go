@@ -2,6 +2,7 @@ package triage
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/PrPlanIT/HASteward/src/common"
@@ -39,16 +40,13 @@ func TestDeepRecover_FenceRecoverRestore(t *testing.T) {
 			"replicas": int64(3),
 			"image":    "mariadb:11",
 		},
-		// The operator's acknowledgement of the suspend, which the fence waits for.
-		"status": map[string]interface{}{"conditions": []interface{}{
-			map[string]interface{}{"type": "Ready", "status": "False", "reason": "Suspended"},
-		}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{k8s.MariaDBGVR: "MariaDBList"},
 		cr,
 	)
+	operatorAcksSuspend(dyn)
 
 	// A StatefulSet at 3 replicas; NO cluster pods (belly-up, already down).
 	replicas := int32(3)
@@ -179,4 +177,32 @@ func TestDeepRecover_SkipsWhenAlreadySuspended(t *testing.T) {
 	if scaled {
 		t.Fatal("deepRecover must not scale the StatefulSet when the CR is already suspended")
 	}
+}
+
+// operatorAcksSuspend stands in for mariadb-operator: a patch that suspends or resumes the
+// CR flips its Ready reason the way the operator's next reconcile does.
+func operatorAcksSuspend(dyn *dynamicfake.FakeDynamicClient) {
+	dyn.PrependReactor("patch", "mariadbs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		pa := a.(clienttesting.PatchAction)
+		body := string(pa.GetPatch())
+		reason := ""
+		switch {
+		case strings.Contains(body, `"suspend":true`):
+			reason = "Suspended"
+		case strings.Contains(body, `"suspend":false`):
+			reason = "Failed"
+		default:
+			return false, nil, nil
+		}
+		obj, err := dyn.Tracker().Get(k8s.MariaDBGVR, pa.GetNamespace(), pa.GetName())
+		if err != nil {
+			return false, nil, nil
+		}
+		u := obj.(*unstructured.Unstructured).DeepCopy()
+		_ = unstructured.SetNestedSlice(u.Object, []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "False", "reason": reason},
+		}, "status", "conditions")
+		_ = dyn.Tracker().Update(k8s.MariaDBGVR, u, pa.GetNamespace())
+		return false, nil, nil
+	})
 }
