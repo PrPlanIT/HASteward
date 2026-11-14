@@ -39,6 +39,10 @@ func TestDeepRecover_FenceRecoverRestore(t *testing.T) {
 			"replicas": int64(3),
 			"image":    "mariadb:11",
 		},
+		// The operator's acknowledgement of the suspend, which the fence waits for.
+		"status": map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "False", "reason": "Suspended"},
+		}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
