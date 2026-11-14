@@ -29,6 +29,7 @@ const (
 	PhaseWsrepRecover   = "wsrep_recover"
 	PhaseSafeBootClear  = "safe_boot_clear"
 	PhaseResume         = "resume"
+	PhaseEscrow         = "escrow"
 )
 
 // Event represents a discrete progress event emitted during command execution.

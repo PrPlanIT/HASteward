@@ -367,12 +367,20 @@ func (b *galeraBootstrap) bootstrapOnline(ctx context.Context, d model.Diagnosis
 		CandidatePod:  target,
 		SafeToProceed: true,
 	}
-	result.ActionsPlanned = []model.BootstrapAction{
+	var escrowPlan []model.BootstrapAction
+	if len(escrowSet) > 0 {
+		// Declared source: the human's forced decision, and every other node is re-seeded.
+		result.Decision.Reason = "operator-declared source (--force --instance) — force-bootstrap " + target + " on the live cluster"
+		result.Decision.ForceRequired = true
+		escrowPlan = []model.BootstrapAction{{Phase: model.PhaseEscrow,
+			Description: "Escrow every node's datadir (" + strings.Join(podsFromAssessments(escrowSet), ", ") + ") and prove it restorable, or refuse"}}
+	}
+	result.ActionsPlanned = append(escrowPlan, []model.BootstrapAction{
 		{Phase: model.PhaseClusterPatch, Description: "Resume CR + patch forceClusterBootstrapInPod=" + target + " (live, no scale-to-0)", Resource: &crRef},
 		{Phase: model.PhaseCleanup, Description: "Delete stuck operator recovery jobs"},
 		{Phase: model.PhaseWaitReady, Description: "Wait for GaleraReady=True (operator reforms from " + target + ")"},
 		{Phase: model.PhaseVerify, Description: "Unset forceClusterBootstrapInPod if the operator left it"},
-	}
+	}...)
 
 	output.Section("Bootstrap: online recovery-deadlock remedy")
 	output.Field("Diagnosis", d.ID)

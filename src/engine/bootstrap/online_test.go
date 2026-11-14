@@ -108,6 +108,26 @@ func TestBootstrapOnline_DryRunNoMutation(t *testing.T) {
 	}
 }
 
+// TestBootstrapOnline_DeclaredSourcePlansEscrowFirst: a declared source's plan says so,
+// is marked forced, and escrows every node before the first mutation.
+func TestBootstrapOnline_DeclaredSourcePlansEscrowFirst(t *testing.T) {
+	b, _, cleanup := onlineSetup(onlineCR("True"))
+	defer cleanup()
+
+	as := []model.InstanceAssessment{{Pod: "c-0"}, {Pod: "c-1"}, {Pod: "c-2"}}
+	d := model.Diagnosis{ID: "operator-declared-source", Target: "c-1"}
+	res, err := b.bootstrapOnline(context.Background(), d, true, &model.BootstrapResult{}, as)
+	if err != nil {
+		t.Fatalf("dry-run should not error: %v", err)
+	}
+	if !strings.Contains(res.Decision.Reason, "declared") || !res.Decision.ForceRequired {
+		t.Fatalf("decision must report the declared, forced source; got %+v", res.Decision)
+	}
+	if len(res.ActionsPlanned) == 0 || res.ActionsPlanned[0].Phase != model.PhaseEscrow {
+		t.Fatalf("escrow must be the first planned action; got %+v", res.ActionsPlanned)
+	}
+}
+
 // TestBootstrapOnline_EmptyTargetRefuses: no bootstrap source → refuse, patch nothing.
 func TestBootstrapOnline_EmptyTargetRefuses(t *testing.T) {
 	b, dyn, cleanup := onlineSetup(onlineCR("True"))
