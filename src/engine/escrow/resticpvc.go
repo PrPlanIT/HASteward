@@ -17,10 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// escrowHelperImage runs the read-only tar that streams a PVC's files to the
-// host-side restic. busybox tar is sufficient and matches the bootstrap helper.
-const escrowHelperImage = "docker.io/library/busybox:latest"
-
 // escrowMountPath is where the captured PVC is mounted (read-only) in the helper.
 const escrowMountPath = "/escrow-data"
 
@@ -106,7 +102,7 @@ func (e *resticPVCEscrow) captureOne(ctx context.Context, rc *restic.Client, pvc
 			// Stay alive so we can exec the tar stream; deleted in defer.
 			Containers: []corev1.Container{{
 				Name:    "escrow",
-				Image:   escrowHelperImage,
+				Image:   k8s.HelperImage,
 				Command: []string{"sleep", "3600"},
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "data",

@@ -606,7 +606,7 @@ func (g *galeraReconfigure) runHelperPod(ctx context.Context, name, ns, pvc, mou
 			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: &rootUser},
 			Containers: []corev1.Container{{
 				Name:    "reconfigure",
-				Image:   "docker.io/library/busybox:latest",
+				Image:   k8s.HelperImage,
 				Command: []string{"sh", "-c", script},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "data", MountPath: mountPath},

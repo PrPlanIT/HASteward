@@ -46,6 +46,9 @@ func DisableIstioInjection(pod *corev1.Pod) {
 	pod.Annotations[istioInjectKey] = "false"
 }
 
+// HelperImage is the image every helper pod runs.
+const HelperImage = "docker.io/library/busybox:1.38.0"
+
 // HelperPodOpts describes a one-shot helper pod mounting exactly one PVC.
 type HelperPodOpts struct {
 	Name           string

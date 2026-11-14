@@ -500,7 +500,7 @@ func (p *GaleraProvider) RunHelperPodSpec(ctx context.Context, spec HelperPodSpe
 	// Shared builder → Istio exemption applied. RunAsUID only (root); FSGroup is
 	// deliberately omitted (it would recursively chown the mounted DB volume on start).
 	pod := k8s.BuildHelperPod(k8s.HelperPodOpts{
-		Name: spec.Name, Namespace: ns, Image: "docker.io/library/busybox:latest",
+		Name: spec.Name, Namespace: ns, Image: k8s.HelperImage,
 		Command: spec.Command, ServiceAccount: spec.SA,
 		PVCName: spec.PVCName, MountPath: spec.MountPath, ReadOnly: spec.ReadOnly,
 		RunAsUID: &root, NodeName: spec.NodeName, Labels: labels,
