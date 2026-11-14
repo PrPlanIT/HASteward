@@ -755,9 +755,11 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 		es := data.effectiveSeqnos[gs.Pod]
 		nodeSeqno := int64(-1)
 		seqnoSource := "none"
+		nodeKnown := false
 		if es != nil {
 			nodeSeqno = es.Value
 			seqnoSource = es.Source
+			nodeKnown = es.Known
 		}
 		seqnoLag := int64(-1)
 		if bestPrimarySeqno > 0 && nodeSeqno > 0 {
@@ -778,7 +780,7 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 
 		switch {
 		case !comparison.SafeToHeal:
-			if !isInPrimary && nodeSeqno > bestPrimarySeqno && nodeSeqno > 0 {
+			if !isInPrimary && nodeKnown && bestPrimarySeqno >= 0 && nodeSeqno > bestPrimarySeqno && nodeSeqno > 0 {
 				notes = append(notes, fmt.Sprintf("AHEAD OF PRIMARY COMPONENT (seqno %d > %d)", nodeSeqno, bestPrimarySeqno))
 				recommendation = "MANUAL REVIEW REQUIRED. This node has data ahead of the primary component. Do NOT heal without understanding the data state."
 			} else if !hasData {
@@ -1206,6 +1208,10 @@ func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) 
 			common.WarnLog("deep-recover: resume CR failed: %v — operator may need a manual resume", err)
 		}
 	}()
+	if err := t.p.WaitSuspendAcknowledged(ctx, cfg.DeleteTimeout); err != nil {
+		common.WarnLog("deep-recover: %v — skipping escalation", err)
+		return
+	}
 
 	t.p.DeleteRecoveryPods(ctx)
 
@@ -1228,6 +1234,10 @@ func (t *galeraTriage) deepRecover(ctx context.Context, data *galeraTriageData) 
 
 	common.InfoLog("Running wsrep_recover on all nodes")
 	for _, gs := range data.grastateData {
+		if err := t.p.VerifyFenced(ctx); err != nil {
+			common.WarnLog("deep-recover: %v — aborting recover", err)
+			break
+		}
 		rr, err := t.p.RunWsrepRecover(ctx, gs.Pod, sa)
 		if err != nil {
 			common.WarnLog("deep-recover: wsrep_recover %s failed: %v", gs.Pod, err)

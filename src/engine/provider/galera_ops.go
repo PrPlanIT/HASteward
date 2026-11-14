@@ -65,6 +65,31 @@ func (p *GaleraProvider) SuspendCR(ctx context.Context) error {
 	return err
 }
 
+// WaitSuspendAcknowledged polls until the operator reports Ready reason Suspended. It
+// reconciles a CR one pass at a time, so once it reports the suspend no pass started
+// before it is still running to scale the StatefulSet back up.
+func (p *GaleraProvider) WaitSuspendAcknowledged(ctx context.Context, timeoutSec int) error {
+	c := k8s.GetClients()
+	cfg := p.Config()
+	if timeoutSec <= 0 {
+		timeoutSec = common.DefaultDeleteTimeout
+	}
+	for i := 0; i <= timeoutSec/5; i++ {
+		obj, err := c.Dynamic.Resource(k8s.MariaDBGVR).Namespace(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err == nil && k8s.GetNestedBool(obj, "spec", "suspend") {
+			if cond := k8s.FindCondition(k8s.GetNestedMap(obj, "status"), "Ready"); cond != nil {
+				if reason, _ := cond["reason"].(string); reason == "Suspended" {
+					common.InfoLog("mariadb-operator acknowledged the suspend")
+					return nil
+				}
+			}
+		}
+		common.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("mariadb-operator did not acknowledge the suspend (Ready reason Suspended) within %ds — "+
+		"a reconcile already in flight could still scale the StatefulSet; refusing to fence", timeoutSec)
+}
+
 // ResumeCR patches the MariaDB CR to spec.suspend=false.
 func (p *GaleraProvider) ResumeCR(ctx context.Context) error {
 	c := k8s.GetClients()
@@ -77,8 +102,7 @@ func (p *GaleraProvider) ResumeCR(ctx context.Context) error {
 
 // ForceBootstrapLive atomically resumes the operator AND forces it to bootstrap the given
 // pod — an ONLINE bootstrap for a data-healthy but recovery-deadlocked cluster (no
-// scale-to-0). The operator reforms the cluster from that node, then clears its own
-// recovery status and unsets forceClusterBootstrapInPod.
+// scale-to-0). The operator reforms the cluster from that node.
 func (p *GaleraProvider) ForceBootstrapLive(ctx context.Context, pod string) error {
 	c := k8s.GetClients()
 	cfg := p.Config()
@@ -189,6 +213,9 @@ func (p *GaleraProvider) WaitPodsTerminated(ctx context.Context, timeoutSec int)
 	}
 	sel := p.PodSelector()
 	for i := 0; i < timeoutSec/5; i++ {
+		if err := p.scaledToZero(ctx); err != nil {
+			return err
+		}
 		pods, err := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 		if err == nil && len(pods.Items) == 0 {
 			common.InfoLog("All %s pods terminated — datadir is unowned", cfg.ClusterName)
@@ -198,6 +225,35 @@ func (p *GaleraProvider) WaitPodsTerminated(ctx context.Context, timeoutSec int)
 	}
 	pods, _ := c.Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	return fmt.Errorf("pods did not terminate within %ds (%d remain) — refusing wsrep_recover to avoid a concurrent-open corruption", timeoutSec, len(pods.Items))
+}
+
+// VerifyFenced returns an error unless the StatefulSet is still at 0 replicas and no
+// cluster pod exists. Checked before each step that opens a datadir.
+func (p *GaleraProvider) VerifyFenced(ctx context.Context) error {
+	if err := p.scaledToZero(ctx); err != nil {
+		return err
+	}
+	cfg := p.Config()
+	pods, err := k8s.GetClients().Clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: p.PodSelector()})
+	if err != nil {
+		return fmt.Errorf("fence check: listing %s pods: %w", cfg.ClusterName, err)
+	}
+	if len(pods.Items) > 0 {
+		return fmt.Errorf("fence broken: %d %s pod(s) exist — refusing to open a datadir", len(pods.Items), cfg.ClusterName)
+	}
+	return nil
+}
+
+func (p *GaleraProvider) scaledToZero(ctx context.Context) error {
+	cfg := p.Config()
+	scale, err := k8s.GetClients().Clientset.AppsV1().StatefulSets(cfg.Namespace).GetScale(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("fence check: reading %s scale: %w", cfg.ClusterName, err)
+	}
+	if scale.Spec.Replicas != 0 {
+		return fmt.Errorf("fence broken: StatefulSet %s is back at %d replicas — refusing to open a datadir", cfg.ClusterName, scale.Spec.Replicas)
+	}
+	return nil
 }
 
 // DeleteRecoveryPods force-deletes any operator recovery pods that could compete

@@ -91,7 +91,11 @@ func (g *galeraRepair) SafetyGate(ctx context.Context, result *model.TriageResul
 		return fmt.Errorf("failed to suspend CR for donor probe: %w", err)
 	}
 	g.crSuspended = true
-	common.Sleep(3 * time.Second)
+	if err := g.p.WaitSuspendAcknowledged(ctx, g.p.Config().DeleteTimeout); err != nil {
+		g.p.ResumeCR(ctx)
+		g.crSuspended = false
+		return err
+	}
 
 	// Delete any active recovery pods that may be competing with mariadb containers
 	g.p.DeleteRecoveryPods(ctx)
@@ -416,7 +420,10 @@ func (g *galeraRepair) healNode(ctx context.Context, targetPod string, instanceN
 		}
 		suspended = true
 		g.crSuspended = true // keep the struct flag truthful so Cleanup/rescue know
-		common.Sleep(3 * time.Second)
+		if err := g.p.WaitSuspendAcknowledged(ctx, cfg.DeleteTimeout); err != nil {
+			rescue()
+			return err
+		}
 	}
 
 	// STEP 2: Release target pod's PVC by scaling down the StatefulSet.

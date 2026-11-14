@@ -7,6 +7,7 @@ import (
 	"github.com/PrPlanIT/HASteward/src/common"
 	"github.com/PrPlanIT/HASteward/src/k8s"
 
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func testProvider() *GaleraProvider {
@@ -110,9 +112,96 @@ func TestWaitPodsTerminated_AllGone(t *testing.T) {
 	cs := fake.NewSimpleClientset(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "ns", Labels: map[string]string{"app": "unrelated"}},
 	})
+	scaleReactor(cs, 0)
 	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs})()
 
 	if err := testProvider().WaitPodsTerminated(ctx, 5); err != nil {
 		t.Fatalf("WaitPodsTerminated should return nil when no cluster pods remain, got %v", err)
+	}
+}
+
+// scaleReactor serves the StatefulSet scale subresource (the fake panics on it) at a
+// fixed replica count.
+func scaleReactor(cs *fake.Clientset, replicas int32) {
+	cs.PrependReactor("get", "statefulsets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		ga := a.(clienttesting.GetAction)
+		if ga.GetSubresource() != "scale" {
+			return false, nil, nil
+		}
+		return true, &autoscalingv1.Scale{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+		}, nil
+	})
+}
+
+func clusterPod(name string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns",
+		Labels: map[string]string{"app.kubernetes.io/instance": "c"}}}
+}
+
+// TestWaitPodsTerminated_ScaledBackRefuses: no pods yet, but an in-flight operator
+// reconcile already scaled the StatefulSet back up — the datadir is not unowned.
+func TestWaitPodsTerminated_ScaledBackRefuses(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	scaleReactor(cs, 3)
+	defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs})()
+
+	if err := testProvider().WaitPodsTerminated(context.Background(), 5); err == nil {
+		t.Fatal("WaitPodsTerminated must refuse while the StatefulSet is scaled back up")
+	}
+}
+
+func TestVerifyFenced(t *testing.T) {
+	cases := []struct {
+		name     string
+		replicas int32
+		pods     []runtime.Object
+		ok       bool
+	}{
+		{"fenced", 0, nil, true},
+		{"scaled back", 3, nil, false},
+		{"pod present", 0, []runtime.Object{clusterPod("c-1")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset(tc.pods...)
+			scaleReactor(cs, tc.replicas)
+			defer k8s.SetClientsForTest(&k8s.Clients{Clientset: cs})()
+			err := testProvider().VerifyFenced(context.Background())
+			if (err == nil) != tc.ok {
+				t.Fatalf("VerifyFenced: got err=%v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
+func readyCR(suspend bool, reason string) *unstructured.Unstructured {
+	cr := mariadbCR(suspend)
+	cr.Object["status"] = map[string]interface{}{"conditions": []interface{}{
+		map[string]interface{}{"type": "Ready", "status": "False", "reason": reason},
+	}}
+	return cr
+}
+
+func TestWaitSuspendAcknowledged(t *testing.T) {
+	cases := []struct {
+		name string
+		cr   *unstructured.Unstructured
+		ok   bool
+	}{
+		{"acknowledged", readyCR(true, "Suspended"), true},
+		{"not yet reconciled", readyCR(true, "Failed"), false},
+		{"not suspended", readyCR(false, "Suspended"), false},
+	}
+	defer common.DisableSleepForTest()()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer k8s.SetClientsForTest(&k8s.Clients{Dynamic: fakeDynamic(tc.cr)})()
+			err := testProvider().WaitSuspendAcknowledged(context.Background(), 5)
+			if (err == nil) != tc.ok {
+				t.Fatalf("WaitSuspendAcknowledged: got err=%v, want ok=%v", err, tc.ok)
+			}
+		})
 	}
 }

@@ -35,6 +35,10 @@ func TestHealNode_NeverReadyReturnsError(t *testing.T) {
 		"kind":       "MariaDB",
 		"metadata":   map[string]interface{}{"name": "c", "namespace": "ns"},
 		"spec":       map[string]interface{}{"suspend": false, "replicas": int64(3), "image": "mariadb:11"},
+		// The operator's acknowledgement of the suspend, which the fence waits for.
+		"status": map[string]interface{}{"conditions": []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "False", "reason": "Suspended"},
+		}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),

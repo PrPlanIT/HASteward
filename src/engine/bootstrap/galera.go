@@ -599,7 +599,10 @@ echo "reverted safe_to_bootstrap to 0"`
 	}
 	suspended = true
 	markAction(model.PhaseSuspend)
-	common.Sleep(3 * time.Second)
+	if err := b.p.WaitSuspendAcknowledged(ctx, cfg.DeleteTimeout); err != nil {
+		rescue()
+		return err
+	}
 
 	// STEP 2: Set generation lock annotation
 	common.InfoLog("STEP 2: Setting generation lock annotation")
@@ -641,6 +644,10 @@ echo "reverted safe_to_bootstrap to 0"`
 	recoveredResults := make(map[string]wsrepRecoverResult)
 	var zeroLineage []string
 	for _, a := range assessments {
+		if err := b.p.VerifyFenced(ctx); err != nil {
+			rescue()
+			return err
+		}
 		rr, rerr := b.p.RunWsrepRecover(ctx, a.Pod, sa)
 		if errors.Is(rerr, provider.ErrZeroLineage) {
 			zeroLineage = append(zeroLineage, a.Pod)
@@ -697,6 +704,11 @@ echo "reverted safe_to_bootstrap to 0"`
 	if !found {
 		rescue()
 		return fmt.Errorf("candidate pod %s not found in assessments — stale reference", candidatePod)
+	}
+
+	if err := b.p.VerifyFenced(ctx); err != nil {
+		rescue()
+		return err
 	}
 
 	// STEP 4b: gcache IST loop detection
