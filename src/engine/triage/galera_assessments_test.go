@@ -126,3 +126,60 @@ func TestGaleraBuildAssessments_AheadOfPrimaryUnderSplitBrain(t *testing.T) {
 		t.Fatalf("want an AHEAD-OF-PRIMARY note, got %v", a.Notes)
 	}
 }
+
+func TestGaleraCrashReason(t *testing.T) {
+	cases := []struct{ log, want string }{
+		{"[ERROR] mariadbd: Disk is full writing './ib_logfile0'", "disk_full"},
+		{"[ERROR] WSREP: gcs connect failed: Operation timed out", "peer_unreachable"},
+		{"[ERROR] WSREP: failed to open gcomm backend connection: 110: failed to reach primary view", "peer_unreachable"},
+		{"[ERROR] InnoDB: Plugin initialization aborted", ""},
+	}
+	for _, c := range cases {
+		if got := galeraCrashReason(c.log); got != c.want {
+			t.Errorf("galeraCrashReason(%q) = %q, want %q", c.log, got, c.want)
+		}
+	}
+}
+
+// A node crash-looping because gcomm cannot reach a live Primary component is a network
+// fault: a wipe+SST needs that same connection, so it must not be flagged for heal.
+func TestGaleraBuildAssessments_PeerUnreachableDoesNotHeal(t *testing.T) {
+	tr := galeraTriageForTest()
+	data := &galeraTriageData{
+		grastateData:  []grastate{{Pod: "c-1", Source: "exec"}},
+		crashloopPods: []corev1.Pod{runningPod("c-1")},
+		crashReasons:  map[string]string{"c-1": "peer_unreachable"},
+	}
+	cmp := &model.DataComparison{SafeToHeal: true, PrimaryMembers: []string{"c-0", "c-2"}, BestPrimarySeqno: 100}
+	a := findAssessment(tr.buildAssessments(data, cmp), "c-1")
+	if a == nil {
+		t.Fatal("no assessment for c-1")
+	}
+	if a.NeedsHeal {
+		t.Fatalf("a peer-unreachable node must not be healed; notes=%v", a.Notes)
+	}
+	if !notesContain(a, "cannot reach the Primary component") {
+		t.Fatalf("want a peer-unreachable note, got %v", a.Notes)
+	}
+	if a.CrashReason != "peer_unreachable" {
+		t.Fatalf("CrashReason = %q, want peer_unreachable", a.CrashReason)
+	}
+}
+
+// With no Primary component there is nothing to reach; the verdict stays with the
+// existing crash-loop handling.
+func TestGaleraBuildAssessments_PeerUnreachableWithoutPrimaryFallsThrough(t *testing.T) {
+	tr := galeraTriageForTest()
+	data := &galeraTriageData{
+		grastateData:  []grastate{{Pod: "c-1", Source: "exec"}},
+		crashloopPods: []corev1.Pod{runningPod("c-1")},
+		crashReasons:  map[string]string{"c-1": "peer_unreachable"},
+	}
+	a := findAssessment(tr.buildAssessments(data, &model.DataComparison{SafeToHeal: true}), "c-1")
+	if a == nil {
+		t.Fatal("no assessment for c-1")
+	}
+	if notesContain(a, "cannot reach the Primary component") {
+		t.Fatalf("no Primary component exists to reach; notes=%v", a.Notes)
+	}
+}

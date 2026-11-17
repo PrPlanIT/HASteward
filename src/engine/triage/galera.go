@@ -370,11 +370,8 @@ func (t *galeraTriage) triageCollect(ctx context.Context) (*galeraTriageData, er
 		if err != nil {
 			continue
 		}
-		logText := string(logBytes)
-		if strings.Contains(logText, "No space left on device") ||
-			strings.Contains(logText, "Disk is full") ||
-			strings.Contains(logText, "disk full") {
-			data.crashReasons[pod.Name] = "disk_full"
+		if reason := galeraCrashReason(string(logBytes)); reason != "" {
+			data.crashReasons[pod.Name] = reason
 		}
 	}
 
@@ -856,6 +853,11 @@ func (t *galeraTriage) buildAssessments(data *galeraTriageData, comparison *mode
 				needsHeal = true
 				notes = append(notes, "disk full (cause of crash)")
 				recommendation = fmt.Sprintf("Crash-looping due to disk full. Needs heal or PVC expansion.\n\n  %s", healCmd)
+			case data.crashReasons[gs.Pod] == "peer_unreachable" && len(comparison.PrimaryMembers) > 0:
+				notes = append(notes, "cannot reach the Primary component (gcomm connect failed)")
+				recommendation = fmt.Sprintf("Crash-looping because it cannot connect to its peers (gcomm, port 4567), not because of its data. "+
+					"A heal cannot help: SST needs the same connection. Fix the network path to %s; the node rejoins on its next restart.",
+					strings.Join(comparison.PrimaryMembers, ", "))
 			case dataCurrent:
 				notes = append(notes, fmt.Sprintf("data current (seqno: %d)", nodeSeqno))
 				recommendation = fmt.Sprintf("Data is current but pod is crash-looping. Check pod logs for root cause. May recover on restart. Otherwise needs heal.\n\n  %s", healCmd)
@@ -1009,8 +1011,11 @@ func (t *galeraTriage) triageDisplay(data *galeraTriageData, result *model.Triag
 			primaryTag = " [PRIMARY COMPONENT]"
 		}
 		diskTag := ""
-		if a.CrashReason == "disk_full" {
+		switch a.CrashReason {
+		case "disk_full":
 			diskTag = " [DISK FULL]"
+		case "peer_unreachable":
+			diskTag = " [PEERS UNREACHABLE]"
 		}
 		output.Printf("%s%s%s: %s\n", a.Pod, primaryTag, diskTag, strings.Join(a.Notes, ", "))
 		output.Printf("  Wsrep: state=%d (%s) connected=%s ready=%s cluster=%s\n",
@@ -1630,4 +1635,18 @@ func joinGaleraProbeNames(targets []galeraProbeTarget) string {
 	return strings.Join(names, ", ")
 }
 
-// ptr returns a pointer to the given value.
+// galeraCrashReason classifies a crash-looping node from its mariadb log: "disk_full",
+// "peer_unreachable" (gcomm could not open a connection to any peer), or "" when the
+// log names neither.
+func galeraCrashReason(logText string) string {
+	switch {
+	case strings.Contains(logText, "No space left on device") ||
+		strings.Contains(logText, "Disk is full") ||
+		strings.Contains(logText, "disk full"):
+		return "disk_full"
+	case strings.Contains(logText, "gcs connect failed") ||
+		strings.Contains(logText, "failed to reach primary view"):
+		return "peer_unreachable"
+	}
+	return ""
+}
